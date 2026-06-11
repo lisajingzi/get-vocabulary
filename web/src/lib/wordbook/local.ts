@@ -14,7 +14,16 @@
 const STORAGE_KEY = "get:wordbook:v1";
 const NOTES_KEY = "get:notes:v1";
 
-export type WordbookStatus = "new" | "old";
+/**
+ * Wordbook membership states:
+ *   - "new"      → 新朋友 (default after first lookup)
+ *   - "old"      → 老朋友 (graduated, mastered)
+ *   - "archived" → 不收藏 (looked up but explicitly excluded from both books)
+ *
+ * `archived` words still keep their query history (for the "已查过的词" highlight
+ * and per-lemma stats), they just don't show up in either wordbook list.
+ */
+export type WordbookStatus = "new" | "old" | "archived";
 
 export interface WordbookEntry {
   lemma: string;
@@ -27,6 +36,11 @@ export interface WordbookEntry {
   firstSeenAt: string;
   /** ISO timestamp of most recent lookup or review. */
   lastSeenAt: string;
+  /** ISO timestamp of the most recent SEARCH-BAR lookup specifically.
+   *  Distinct from lastSeenAt because clicking a word from the wordbook
+   *  list (which mounts the detail page too) must NOT count as a fresh
+   *  query — only entries originated from the top search box do. */
+  lastQueriedAt?: string;
   /** ISO timestamp of when the entry next becomes due for review.
    *  Null = graduated; missing on legacy entries (treated as immediately due). */
   nextReviewAt?: string | null;
@@ -98,23 +112,43 @@ function writeNotes(notes: NotesStore): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Record a successful lookup of `lemma`. Creates the entry if it didn't exist
- * (always as "new friend") and bumps the query counter otherwise.
+ * Record a lookup of `lemma`.
+ *
+ * - Creates the entry if it didn't exist. Default status is "new" (新朋友)
+ *   for fresh search-bar lookups, but `opts.skipCount` (used when the user
+ *   navigated in from inside the wordbook list) leaves the entry untouched
+ *   if it already existed and avoids creating one if it didn't — viewing
+ *   isn't "querying".
+ * - When NOT skipping, bumps `queryCount`, refreshes `lastSeenAt` AND
+ *   `lastQueriedAt`. Both timestamps are needed: lastSeenAt also moves on
+ *   reviews, but the wordbook page wants the latest *query* date specifically.
  *
  * `pos` is an optional snapshot of the first sense's part of speech at the
  * time of the lookup; we stamp it on the entry once so the wordbook page can
  * filter by pos cheaply.
  */
-export function recordLookup(lemma: string, pos?: string): WordbookEntry {
+export function recordLookup(
+  lemma: string,
+  pos?: string,
+  opts?: { skipCount?: boolean },
+): WordbookEntry | null {
   const key = lemma.toLowerCase().trim();
   const store = readStore();
   const now = new Date().toISOString();
   const existing = store[key];
+
+  // skipCount == true means "the user opened the detail page from inside the
+  // wordbook, not from the search bar". We must NOT create or count.
+  if (opts?.skipCount) {
+    return existing ?? null;
+  }
+
   const next: WordbookEntry = existing
     ? {
         ...existing,
         queryCount: existing.queryCount + 1,
         lastSeenAt: now,
+        lastQueriedAt: now,
         // Backfill pos on entries that pre-date this field.
         pos: existing.pos ?? pos,
       }
@@ -125,6 +159,7 @@ export function recordLookup(lemma: string, pos?: string): WordbookEntry {
         level: 0,
         firstSeenAt: now,
         lastSeenAt: now,
+        lastQueriedAt: now,
         pos,
       };
   store[key] = next;
@@ -136,9 +171,13 @@ export function getEntry(lemma: string): WordbookEntry | null {
   return readStore()[lemma.toLowerCase().trim()] ?? null;
 }
 
-/** All wordbook entries — useful for the wordbook page on Day 3. */
-export function listEntries(): WordbookEntry[] {
-  return Object.values(readStore());
+/** All wordbook entries — useful for the wordbook page on Day 3.
+ *  By default omits `archived` so the new/old friend lists stay clean;
+ *  pass `{ includeArchived: true }` for the full set. */
+export function listEntries(opts?: { includeArchived?: boolean }): WordbookEntry[] {
+  const all = Object.values(readStore());
+  if (opts?.includeArchived) return all;
+  return all.filter((e) => e.status !== "archived");
 }
 
 /** Map of lemma → true for words already in the wordbook. Used by the
@@ -210,10 +249,19 @@ export function setStatus(lemma: string, status: WordbookStatus): WordbookEntry 
   const store = readStore();
   const existing = store[key];
   if (!existing) return null;
+  // Archiving freezes the Ebbinghaus level — we don't want a 不收藏 word to
+  // show up in review queues, but if the user later flips it back to "new"
+  // we keep their progress.
+  const nextLevel =
+    status === "old"
+      ? 7
+      : status === "archived"
+        ? existing.level
+        : Math.min(existing.level, 6);
   const next: WordbookEntry = {
     ...existing,
     status,
-    level: status === "old" ? 7 : Math.min(existing.level, 6),
+    level: nextLevel,
     lastSeenAt: new Date().toISOString(),
   };
   store[key] = next;

@@ -69,6 +69,11 @@ function buildPrompt(lemma: string, sentence: string, sense?: SenseHint) {
     "Your job:",
     "1) Decide if the sentence (a) uses the target word in the requested sense,",
     "   (b) is grammatically natural English. If both are true, set ok=true.",
+    "   IMPORTANT: any inflected form of the target word counts as using it,",
+    "   including plurals, past tense, past participle, gerund, and irregular",
+    `   forms (e.g. "ran" for "run", "children" for "child"). Do NOT reject a`,
+    "   sentence merely because the user wrote an inflection rather than the",
+    "   bare lemma.",
     "2) If anything is wrong, produce a segment list that, when concatenated by .text,",
     "   reproduces the original sentence VERBATIM. Mark the broken segments with",
     "   {wrong:true, fix:'<the corrected words>'}. Keep correct stretches as plain",
@@ -105,22 +110,80 @@ function extractJson(s: string): string | null {
 
 /**
  * Mock heuristic correction:
- *   - Accept if the lemma (or a simple inflection) appears as a whole word.
+ *   - Accept if the lemma appears as a whole word in any inflected form.
+ *     We use wink-lemmatizer to reduce every word in the sentence to its
+ *     base form (noun/verb/adjective) and compare against the target lemma,
+ *     so "children" matches "child", "ran" matches "run", "happiest"
+ *     matches "happy", etc. The previous regex only caught the regular
+ *     `+s/es/ed/ing/d` suffix family and missed irregular forms entirely.
  *   - Otherwise mark the whole sentence wrong and suggest a templated fix.
  *
  * This isn't trying to be smart — it just exercises every code path on the
  * UI side so the real DeepSeek integration plugs in cleanly later.
  */
-function mockCorrect(
+interface Lemmatizer {
+  noun: (s: string) => string;
+  verb: (s: string) => string;
+  adjective: (s: string) => string;
+}
+
+let lemmatizerCache: Lemmatizer | null | undefined;
+async function loadLemmatizer(): Promise<Lemmatizer | null> {
+  if (lemmatizerCache !== undefined) return lemmatizerCache;
+  try {
+    const mod = (await import("wink-lemmatizer")) as unknown as {
+      default?: Lemmatizer;
+    } & Lemmatizer;
+    lemmatizerCache = (mod.default ?? mod) as Lemmatizer;
+  } catch {
+    lemmatizerCache = null;
+  }
+  return lemmatizerCache;
+}
+
+function sentenceMentionsLemma(
+  lemma: string,
+  sentence: string,
+  lem: Lemmatizer | null,
+): boolean {
+  const target = lemma.toLowerCase();
+  // Fast path: regular inflection regex still wins for common cases and avoids
+  // the lemmatizer's slight imprecision on already-base verbs.
+  const re = new RegExp(
+    `\\b${target.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}(s|es|ed|ing|d)?\\b`,
+    "i",
+  );
+  if (re.test(sentence)) return true;
+  if (!lem) return false;
+  // Slow path: lemmatize each word and compare.
+  const words = sentence.toLowerCase().match(/[a-z][a-z'-]*/g) ?? [];
+  for (const w of words) {
+    try {
+      if (lem.verb(w) === target) return true;
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (lem.noun(w) === target) return true;
+    } catch {
+      /* ignore */
+    }
+    try {
+      if (lem.adjective(w) === target) return true;
+    } catch {
+      /* ignore */
+    }
+  }
+  return false;
+}
+
+async function mockCorrect(
   lemma: string,
   sentence: string,
   sense?: SenseHint,
-): ResponseBody {
-  const re = new RegExp(
-    `\\b${lemma.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}(s|es|ed|ing|d)?\\b`,
-    "i",
-  );
-  if (re.test(sentence) && sentence.trim().length > 5) {
+): Promise<ResponseBody> {
+  const lem = await loadLemmatizer();
+  if (sentenceMentionsLemma(lemma, sentence, lem) && sentence.trim().length > 5) {
     return {
       ok: true,
       reason: `用法看起来没问题，符合「${sense?.chn ?? lemma}」的释义。`,
@@ -131,7 +194,7 @@ function mockCorrect(
   // Try to point at the missing-word slot.
   return {
     ok: false,
-    reason: `句子里没有出现 "${lemma}"，或用法不太自然，建议改写。`,
+    reason: `句子里没有出现 "${lemma}"（或任何词形变化），建议改写。`,
     segments: [
       { text: sentence, wrong: true, fix: `She decided to ${lemma} the project.` },
     ],
@@ -208,7 +271,7 @@ export async function POST(req: Request): Promise<Response> {
 
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) {
-    return NextResponse.json(mockCorrect(lemma, sentence, body.sense));
+    return NextResponse.json(await mockCorrect(lemma, sentence, body.sense));
   }
   try {
     return NextResponse.json(
@@ -216,6 +279,9 @@ export async function POST(req: Request): Promise<Response> {
     );
   } catch (err) {
     console.error("[ai/correct] deepseek call failed:", err);
-    return NextResponse.json({ ...mockCorrect(lemma, sentence, body.sense), provider: "mock" });
+    return NextResponse.json({
+      ...(await mockCorrect(lemma, sentence, body.sense)),
+      provider: "mock",
+    });
   }
 }

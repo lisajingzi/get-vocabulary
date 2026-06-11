@@ -1,17 +1,23 @@
 "use client";
 
 /**
- * <SpeakButton /> — fire-and-forget Web Speech API wrapper.
+ * <SpeakButton /> — speaks an English word/phrase aloud.
  *
- * Why not <audio src=…>? — The Oxford mdx ships pronunciation audio inside
- * a separate `.mdd` resource pack we have not unpacked. Until we do (post-V1),
- * the browser's native speechSynthesis is good enough and ships zero bytes.
+ * Strategy (tries in order, falls back on failure):
+ *   1. **YouDao MP3** — `https://dict.youdao.com/dictvoice?audio=<text>&type=<1|2>`
+ *      Real human recordings, free, no API key. type=1 = UK, type=2 = US.
+ *      Best quality for single words and common phrases.
+ *   2. **Web Speech API** — system TTS as a robust fallback
+ *      (used for offline, network errors, or sentences too long for the
+ *      YouDao endpoint to have a recording for).
  *
  * Implementation notes:
- *   - Some browsers (Chrome) only populate `getVoices()` after a `voiceschanged`
- *     event. We pick the best voice once on mount and cache it.
- *   - We always cancel any in-flight utterance before starting a new one so
- *     hammering the button doesn't queue up a backlog.
+ *   - We reuse a single <Audio> element to avoid GC churn.
+ *   - YouDao only reliably has recordings for words/short phrases. For
+ *     anything containing whitespace longer than ~6 tokens we go straight
+ *     to TTS — saves a wasted round-trip.
+ *   - SpeechSynthesis voice picking still uses voiceschanged event so
+ *     Chrome's lazy voice list works.
  */
 
 import { useCallback, useEffect, useRef } from "react";
@@ -26,6 +32,22 @@ interface Props {
   children?: React.ReactNode;
 }
 
+const YOUDAO_BASE = "https://dict.youdao.com/dictvoice";
+
+function buildYouDaoUrl(text: string, variant: "uk" | "us"): string {
+  // type=1 → UK English, type=2 → US English
+  const type = variant === "uk" ? 1 : 2;
+  return `${YOUDAO_BASE}?audio=${encodeURIComponent(text)}&type=${type}`;
+}
+
+/** Heuristic: very long sentences are unlikely to have a YouDao recording. */
+function shouldSkipYouDao(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  const tokens = trimmed.split(/\s+/);
+  return tokens.length > 6 || trimmed.length > 60;
+}
+
 function pickVoice(
   voices: SpeechSynthesisVoice[],
   variant: "uk" | "us",
@@ -38,6 +60,17 @@ function pickVoice(
   return prefix ?? voices[0];
 }
 
+function speakViaTTS(text: string, variant: "uk" | "us", voice: SpeechSynthesisVoice | null) {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+  if (!text.trim()) return;
+  window.speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.lang = variant === "uk" ? "en-GB" : "en-US";
+  utt.rate = 0.95;
+  if (voice) utt.voice = voice;
+  window.speechSynthesis.speak(utt);
+}
+
 export default function SpeakButton({
   text,
   variant = "us",
@@ -46,6 +79,7 @@ export default function SpeakButton({
   children,
 }: Props) {
   const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
@@ -63,14 +97,44 @@ export default function SpeakButton({
   }, [variant]);
 
   const speak = useCallback(() => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    if (!text.trim()) return;
-    window.speechSynthesis.cancel();
-    const utt = new SpeechSynthesisUtterance(text);
-    utt.lang = variant === "uk" ? "en-GB" : "en-US";
-    utt.rate = 0.95; // slight slowdown helps language-learner comprehension
-    if (voiceRef.current) utt.voice = voiceRef.current;
-    window.speechSynthesis.speak(utt);
+    if (typeof window === "undefined") return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    // Cancel any pending TTS so playback feels snappy when hammered.
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+
+    // Long sentence → skip YouDao, go straight to system TTS.
+    if (shouldSkipYouDao(trimmed)) {
+      speakViaTTS(trimmed, variant, voiceRef.current);
+      return;
+    }
+
+    // Try YouDao real-human MP3 first.
+    if (!audioRef.current) {
+      audioRef.current = new Audio();
+      audioRef.current.preload = "auto";
+    }
+    const audio = audioRef.current;
+    audio.pause();
+    audio.src = buildYouDaoUrl(trimmed, variant);
+
+    const onError = () => {
+      cleanup();
+      speakViaTTS(trimmed, variant, voiceRef.current);
+    };
+    const cleanup = () => {
+      audio.removeEventListener("error", onError);
+    };
+    audio.addEventListener("error", onError, { once: true });
+
+    const playPromise = audio.play();
+    if (playPromise && typeof playPromise.then === "function") {
+      playPromise.catch(() => {
+        cleanup();
+        speakViaTTS(trimmed, variant, voiceRef.current);
+      });
+    }
   }, [text, variant]);
 
   return (

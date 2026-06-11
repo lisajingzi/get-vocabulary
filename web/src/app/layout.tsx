@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import Script from "next/script";
+import ToastHost from "@/components/Toast";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -37,8 +38,8 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body className="min-h-screen antialiased">
-        <header className="border-b border-[var(--border)]">
-          <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
+        <header className="sticky top-0 z-30 border-b border-[var(--border)] bg-[var(--bg)]/95 backdrop-blur supports-[backdrop-filter]:bg-[var(--bg)]/75">
+          <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-3">
             <Link href="/" className="text-lg font-semibold tracking-tight">
               GET<span className="text-[var(--accent)]">!</span>
             </Link>
@@ -46,13 +47,11 @@ export default function RootLayout({
               <Link href="/wordbook" className="hover:text-[var(--fg)]">
                 单词本
               </Link>
-              <Link href="/login" className="hover:text-[var(--fg)]">
-                登录
-              </Link>
             </nav>
           </div>
         </header>
         <main className="mx-auto max-w-5xl px-6 py-6">{children}</main>
+        <ToastHost />
         {/*
           Service-worker registration. We only register in production so dev
           mode HMR isn't disrupted by stale cached chunks. The script is

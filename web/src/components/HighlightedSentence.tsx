@@ -139,11 +139,28 @@ export default function HighlightedSentence({
         if (!isTarget && !isKnown) {
           return <Fragment key={i}>{t.raw}</Fragment>;
         }
-        const cls = isTarget
-          ? "font-semibold text-[var(--accent)] underline-offset-2 hover:underline"
-          : "text-[var(--accent)]/80 underline-offset-2 hover:underline";
+        // Target = the word being learned: strong accent + bold, NOT a link
+        // (clicking your way back to yourself is pointless and confuses the
+        // back stack).
+        if (isTarget) {
+          return (
+            <span
+              key={i}
+              className="font-semibold text-[var(--accent)]"
+            >
+              {t.raw}
+            </span>
+          );
+        }
+        // Known = previously-looked-up word: lighter shade of the accent so
+        // it stands out from black body text but doesn't compete with the
+        // target word. Clickable, no underline (color carries enough signal).
         return (
-          <Link key={i} href={`/word/${encodeURIComponent(t.match!)}`} className={cls}>
+          <Link
+            key={i}
+            href={`/word/${encodeURIComponent(t.match!)}`}
+            className="text-[var(--accent)]/60 transition hover:text-[var(--accent)]"
+          >
             {t.raw}
           </Link>
         );

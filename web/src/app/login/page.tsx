@@ -1,16 +1,11 @@
+import { redirect } from "next/navigation";
+
 /**
- * /login — email magic-link login (Day 7).
+ * /login — deprecated.
  *
- * Day 7 wires this to Supabase Auth with a single-email whitelist
- * (NEXT_PUBLIC_ALLOWED_EMAIL). For Day 1 we only need the placeholder route.
+ * 登录功能已移除（私有部署 + 个人使用）。任何指向 /login 的旧链接都会
+ * 直接重定向回首页，避免 404。等你确认没问题后，可以把整个 login 目录删掉。
  */
 export default function LoginPage() {
-  return (
-    <div className="space-y-3">
-      <h1 className="text-xl font-semibold">登录</h1>
-      <p className="text-sm text-[var(--fg-soft)]">
-        🚧 Day 7 将接入 Supabase Auth 邮箱登录（仅白名单邮箱可访问）。
-      </p>
-    </div>
-  );
+  redirect("/");
 }

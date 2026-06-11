@@ -14,7 +14,7 @@
  *   - Each cached entry is individually deletable.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import HighlightedSentence from "@/components/HighlightedSentence";
 import SpeakButton from "@/components/SpeakButton";
 import {
@@ -36,6 +36,34 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
   const [history, setHistory] = useState<AIExample[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Snapshot of every wordbook lemma; passed into HighlightedSentence so the
+  // soft-highlight covers ALL the user's known words, not just the ones the
+  // model happened to flag in `highlights`. Keeps the visual signal consistent
+  // across cached and freshly generated examples.
+  const [knownLemmas, setKnownLemmas] = useState<string[]>([]);
+  useEffect(() => {
+    function refresh() {
+      setKnownLemmas(Array.from(getKnownLemmaSet()));
+    }
+    refresh();
+    if (typeof window !== "undefined") {
+      window.addEventListener("get:wordbook-change", refresh);
+      return () =>
+        window.removeEventListener("get:wordbook-change", refresh);
+    }
+  }, []);
+
+  // Human-friendly label for a given senseIndex. -1 collapses to "主要释义".
+  const senseLabel = useMemo(() => {
+    return (idx: number): string => {
+      if (idx < 0) return "主要释义";
+      const s = senses[idx];
+      if (!s) return `释义 ${idx + 1}`;
+      const summary = (s.chn || s.def || "").slice(0, 18);
+      return summary ? `释义 ${idx + 1}·${summary}` : `释义 ${idx + 1}`;
+    };
+  }, [senses]);
 
   // Reset whenever the lemma or selected sense changes — we treat each
   // (lemma, senseIndex) pair as its own thread of history.
@@ -91,8 +119,12 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
   }, [lemma, senseIndex, senses]);
 
   // Mount + (lemma, senseIndex) change: load cache, then auto-generate iff empty.
+  // We CLEAR `history` first so the previous sense's examples don't linger
+  // on screen for the split second between switching the dropdown and the
+  // async load coming back.
   useEffect(() => {
     let cancelled = false;
+    setHistory([]);
     (async () => {
       const list = await listExamples(lemma, senseIndex);
       if (cancelled) return;
@@ -164,12 +196,20 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
               key={ex.id}
               className="space-y-1 rounded-lg border border-[var(--border)] p-3"
             >
+              {/* Per-example sense badge so it's obvious which meaning this
+                  sentence belongs to — prevents the "why is the old example
+                  still here?" confusion when flipping the dropdown. */}
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center rounded-full bg-[var(--bg-soft)] px-2 py-0.5 text-[11px] text-[var(--fg-soft)]">
+                  {senseLabel(ex.senseIndex)}
+                </span>
+              </div>
               <div className="flex items-start gap-2">
                 <p className="flex-1 text-sm leading-relaxed">
                   <HighlightedSentence
                     text={ex.en}
                     targetLemma={lemma}
-                    knownLemmas={ex.highlights}
+                    knownLemmas={knownLemmas}
                   />
                 </p>
                 <SpeakButton text={ex.en} variant="us" />

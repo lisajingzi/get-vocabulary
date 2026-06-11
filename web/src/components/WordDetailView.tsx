@@ -6,22 +6,23 @@
  * Responsibilities:
  *   1. Resolve the slug against the IndexedDB-cached dictionary.
  *   2. Show four states: loading / not-found / redirected / canonical.
- *   3. Record a successful lookup into the local wordbook (debounced — we
- *      only count one lookup per slug per page mount, otherwise React 18
- *      strict-mode double-invocation would bump the counter twice).
+ *   3. Record a successful lookup into the local wordbook UNLESS the user
+ *      arrived from inside the wordbook list (`?from=wordbook`) — viewing
+ *      from there mustn't bump query stats.
  *   4. Render the structured fields with comfortable Notion-style spacing,
  *      grouped by part of speech.
- *
- * Day 3 will graft "新朋友 / 老朋友" status toggle and the notes panel onto
- * the same surface; Day 4 the AI examples block.
+ *   5. Three-state membership pill: 新朋友 / 老朋友 / 不收藏, each click
+ *      surfaces a toast so the user knows what happened.
  */
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AIExamplesPanel from "@/components/AIExamplesPanel";
 import HighlightedSentence from "@/components/HighlightedSentence";
 import NotesPanel from "@/components/NotesPanel";
 import SpeakButton from "@/components/SpeakButton";
+import { toast } from "@/components/Toast";
 import { lookup, type LookupResult } from "@/lib/dict";
 import {
   getEntry,
@@ -34,6 +35,9 @@ import {
 
 interface Props {
   slug: string;
+  /** Origin marker from the URL. "wordbook" = clicked through from the
+   *  wordbook list; anything else (or undefined) = a real search. */
+  from?: string;
 }
 
 type State =
@@ -41,13 +45,18 @@ type State =
   | { kind: "not-found" }
   | { kind: "ok"; result: LookupResult };
 
-export default function WordDetailView({ slug }: Props) {
+export default function WordDetailView({ slug, from }: Props) {
+  const router = useRouter();
   const [state, setState] = useState<State>({ kind: "loading" });
   const [bookEntry, setBookEntry] = useState<WordbookEntry | null>(null);
 
   // The route param has already been url-decoded by Next, but our store keys
   // are lowercase. Normalise once.
   const query = useMemo(() => slug.trim().toLowerCase(), [slug]);
+
+  // Whether to count this mount as a fresh lookup. Stable per mount so even
+  // if `from` changes mid-route we don't second-guess the original intent.
+  const countAsLookupRef = useRef<boolean>(from !== "wordbook");
 
   useEffect(() => {
     let cancelled = false;
@@ -62,10 +71,10 @@ export default function WordDetailView({ slug }: Props) {
         setState({ kind: "ok", result });
         // Count this lookup. Using the canonical lemma so "abandoned" (alias)
         // and "abandon" (canonical) both consolidate under one wordbook entry.
-        // We also stamp the first sense's POS so the wordbook page can filter
-        // by it without re-fetching dictionary shards.
         const firstPos = result.entry.senses[0]?.pos ?? undefined;
-        recordLookup(result.lemma, firstPos);
+        recordLookup(result.lemma, firstPos, {
+          skipCount: !countAsLookupRef.current,
+        });
         setBookEntry(getEntry(result.lemma));
       })
       .catch(() => {
@@ -91,10 +100,22 @@ export default function WordDetailView({ slug }: Props) {
   const handleToggleStatus = useCallback(
     (next: WordbookStatus) => {
       if (state.kind !== "ok") return;
+      const previous = bookEntry?.status;
       const updated = setStatus(state.result.lemma, next);
-      if (updated) setBookEntry(updated);
+      if (!updated) return;
+      setBookEntry(updated);
+      // Friendly feedback so the user actually feels the click.
+      const label =
+        next === "new" ? "新朋友" : next === "old" ? "老朋友" : "不收藏";
+      const verb =
+        previous && previous !== next ? "已移动到" : "已加入";
+      toast(
+        next === "archived"
+          ? "已从单词本移除"
+          : `${verb} ${label}`,
+      );
     },
-    [state],
+    [state, bookEntry?.status],
   );
 
   // Snapshot of "already-looked-up" lemmas; used to highlight them in every
@@ -110,9 +131,20 @@ export default function WordDetailView({ slug }: Props) {
     return () => window.removeEventListener("get:wordbook-change", refresh);
   }, []);
 
+  // Back button — prefer router.back() so we land on whatever screen the
+  // user came from (search results / wordbook / home). Falls back to "/".
+  const handleBack = useCallback(() => {
+    if (typeof window !== "undefined" && window.history.length > 1) {
+      router.back();
+    } else {
+      router.push("/");
+    }
+  }, [router]);
+
   if (state.kind === "loading") {
     return (
       <div className="space-y-4">
+        <BackButton onClick={handleBack} />
         <div className="h-8 w-40 animate-pulse rounded bg-[var(--bg-soft)]" />
         <div className="h-4 w-72 animate-pulse rounded bg-[var(--bg-soft)]" />
         <div className="h-4 w-64 animate-pulse rounded bg-[var(--bg-soft)]" />
@@ -123,6 +155,7 @@ export default function WordDetailView({ slug }: Props) {
   if (state.kind === "not-found") {
     return (
       <div className="space-y-4">
+        <BackButton onClick={handleBack} />
         <h1 className="text-2xl font-semibold">{query}</h1>
         <p className="text-sm text-[var(--fg-soft)]">
           牛津高阶词典里没有收录这个词。
@@ -147,6 +180,8 @@ export default function WordDetailView({ slug }: Props) {
 
   return (
     <div className="space-y-6">
+      <BackButton onClick={handleBack} />
+
       {/* Header — lemma + phonetics + speak buttons */}
       <header className="space-y-1">
         {redirected && (
@@ -180,8 +215,8 @@ export default function WordDetailView({ slug }: Props) {
           </div>
         )}
 
-        {/* 新朋友 / 老朋友 切换 — 只在已被收录后显示，避免在还没 recordLookup
-            完成的初次渲染里闪现一个空状态。 */}
+        {/* 新朋友 / 老朋友 / 不收藏 三段式开关。
+            进入页面后立即显示，"不收藏"为默认未选中且与"新朋友"互斥。 */}
         {bookEntry && (
           <div className="flex items-center gap-2 pt-2">
             <FriendToggle
@@ -264,12 +299,26 @@ export default function WordDetailView({ slug }: Props) {
 
 // ---------------------------------------------------------------------------
 
+function BackButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center gap-1 text-sm text-[var(--fg-soft)] transition hover:text-[var(--fg)]"
+      aria-label="返回上一页"
+    >
+      <span aria-hidden>←</span>
+      <span>返回</span>
+    </button>
+  );
+}
+
 /**
- * Two-state pill for marking a word as 新朋友 / 老朋友.
+ * Three-state pill for marking a word as 新朋友 / 老朋友 / 不收藏.
  *
  * Visual weight is intentionally subtle — this is a state indicator the user
  * glances at, not a primary action. The pill that matches `status` gets the
- * accent color; the other is muted.
+ * accent color; the other two are muted.
  */
 function FriendToggle({
   status,
@@ -281,6 +330,7 @@ function FriendToggle({
   const items: Array<{ key: WordbookStatus; label: string }> = [
     { key: "new", label: "新朋友" },
     { key: "old", label: "老朋友" },
+    { key: "archived", label: "不收藏" },
   ];
   return (
     <div className="inline-flex rounded-md border border-[var(--border)] p-0.5">
