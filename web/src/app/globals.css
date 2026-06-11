@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * GET! — Notion-inspired minimal palette.
+ *
+ * Light mode only by V1 (per product decision). Dark mode is intentionally
+ * omitted; we keep custom properties so it's easy to add later.
+ */
+:root {
+  --bg: #ffffff;
+  --bg-soft: #f7f6f3;
+  --fg: #2f3437;
+  --fg-soft: #6b6b6b;
+  --border: #e9e9e7;
+  --accent: #2383e2;          /* link / primary */
+  --accent-soft: #e6f0fb;
+  --highlight: #ff7a45;       /* in-sentence "已查词" highlight */
+  --new-friend: #2383e2;
+  --old-friend: #0f9d58;
+}
+
+html,
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family:
+    "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/*
+ * Make Oxford dictionary HTML render with the original `oalecd9.css`. We load
+ * that stylesheet only on the word detail page; this rule scopes the imported
+ * styles' default block behavior so unknown custom tags act like inline-block.
+ */
+.oald-entry h-g,
+.oald-entry top-g,
+.oald-entry sn-gs,
+.oald-entry sn-blk,
+.oald-entry sn-g,
+.oald-entry def,
+.oald-entry x-gs,
+.oald-entry x-g-blk,
+.oald-entry x,
+.oald-entry chn,
+.oald-entry pron-gs,
+.oald-entry pron-g-blk,
+.oald-entry pos-g,
+.oald-entry v-gs-blk,
+.oald-entry if-gs-blk {
+  display: block;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}

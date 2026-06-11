@@ -1,0 +1,36 @@
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Project tooling caches
+.codebuddy/
+
+# --- Python (scripts/parse_mdx.py) ----------------------------------------
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+scripts/dict-out/
+scripts/*.log
+
+# --- Source dictionary (NOT redistributable; not for the repo) -------------
+# Original Oxford MDX/MDD lives here; users must supply their own copy.
+牛津高阶英汉词典/
+
+# --- Node / Next.js (mirrors web/.gitignore for safety) -------------------
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+
+# --- Generated dictionary shards ------------------------------------------
+# Built by scripts/parse_mdx.py from the source MDX; large + reproducible,
+# not source-of-truth. Re-generate locally with:
+#   python3 scripts/parse_mdx.py
+web/public/dict/

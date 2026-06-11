@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0a0a0a"/>
+  <text x="256" y="316" text-anchor="middle"
+        font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-weight="700" font-size="200" fill="#fafaf9" letter-spacing="-6">GET</text>
+  <circle cx="426" cy="86" r="16" fill="#f59e0b"/>
+</svg>
