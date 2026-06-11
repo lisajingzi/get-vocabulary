@@ -41,11 +41,20 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
   // soft-highlight covers ALL the user's known words, not just the ones the
   // model happened to flag in `highlights`. Keeps the visual signal consistent
   // across cached and freshly generated examples.
-  const [knownLemmas, setKnownLemmas] = useState<string[]>([]);
+  //
+  // Lazy initializer reads localStorage on the FIRST render so cached examples
+  // get their highlights painted on the very first paint instead of flashing
+  // "black, then highlighted" when the useEffect lands a tick later. Falls
+  // back to an empty array during SSR (no window).
+  const [knownLemmas, setKnownLemmas] = useState<string[]>(() =>
+    typeof window === "undefined" ? [] : Array.from(getKnownLemmaSet()),
+  );
   useEffect(() => {
     function refresh() {
       setKnownLemmas(Array.from(getKnownLemmaSet()));
     }
+    // Re-read once on mount in case SSR hydration produced a stale empty
+    // array (it shouldn't, but defensive).
     refresh();
     if (typeof window !== "undefined") {
       window.addEventListener("get:wordbook-change", refresh);

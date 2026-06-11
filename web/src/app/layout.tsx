@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import Script from "next/script";
+import SearchBox from "@/components/SearchBox";
 import ToastHost from "@/components/Toast";
 import "./globals.css";
 
@@ -39,11 +40,20 @@ export default function RootLayout({
     <html lang="zh-CN">
       <body className="min-h-screen antialiased">
         <header className="sticky top-0 z-30 border-b border-[var(--border)] bg-[var(--bg)]/95 backdrop-blur supports-[backdrop-filter]:bg-[var(--bg)]/75">
-          <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-3">
-            <Link href="/" className="text-lg font-semibold tracking-tight">
+          <div className="mx-auto flex max-w-5xl items-center gap-3 px-6 py-3">
+            <Link
+              href="/"
+              className="shrink-0 text-lg font-semibold tracking-tight"
+            >
               GET<span className="text-[var(--accent)]">!</span>
             </Link>
-            <nav className="flex gap-5 text-sm text-[var(--fg-soft)]">
+            {/* Global sticky search — the core action of this app, available
+                from every page so the user never has to scroll back to the
+                home hero just to look up a new word. */}
+            <div className="min-w-0 flex-1">
+              <SearchBox size="sm" />
+            </div>
+            <nav className="shrink-0 text-sm text-[var(--fg-soft)]">
               <Link href="/wordbook" className="hover:text-[var(--fg)]">
                 单词本
               </Link>

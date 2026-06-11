@@ -30,7 +30,6 @@ import {
   recordLookup,
   setStatus,
   type WordbookEntry,
-  type WordbookStatus,
 } from "@/lib/wordbook/local";
 
 interface Props {
@@ -97,18 +96,21 @@ export default function WordDetailView({ slug, from }: Props) {
     return () => window.removeEventListener("get:wordbook-change", refresh);
   }, [state]);
 
+  // Manual status toggle is intentionally limited to {"new", "archived"}.
+  // Graduating to "old" (老朋友) is the EXCLUSIVE responsibility of the
+  // Ebbinghaus review flow — letting the user flip it manually here would
+  // bypass the spaced-repetition curve entirely, which defeats the purpose
+  // of having one. If a word is already "old" we render a read-only badge
+  // (see FriendBadge below) instead of an interactive switch.
   const handleToggleStatus = useCallback(
-    (next: WordbookStatus) => {
+    (next: "new" | "archived") => {
       if (state.kind !== "ok") return;
       const previous = bookEntry?.status;
       const updated = setStatus(state.result.lemma, next);
       if (!updated) return;
       setBookEntry(updated);
-      // Friendly feedback so the user actually feels the click.
-      const label =
-        next === "new" ? "新朋友" : next === "old" ? "老朋友" : "不收藏";
-      const verb =
-        previous && previous !== next ? "已移动到" : "已加入";
+      const label = next === "new" ? "新朋友" : "不收藏";
+      const verb = previous && previous !== next ? "已移动到" : "已加入";
       toast(
         next === "archived"
           ? "已从单词本移除"
@@ -119,9 +121,13 @@ export default function WordDetailView({ slug, from }: Props) {
   );
 
   // Snapshot of "already-looked-up" lemmas; used to highlight them in every
-  // dictionary example sentence on the page. Refresh on wordbook changes so
-  // that adding a new word in a sibling tab updates the highlights here.
-  const [knownLemmas, setKnownLemmas] = useState<string[]>([]);
+  // dictionary example sentence on the page. Lazy-initialized so first paint
+  // already has the data (avoids the brief "black, then highlighted" flash
+  // on slower devices). Refresh on wordbook changes so adding a new word in
+  // a sibling tab updates the highlights here.
+  const [knownLemmas, setKnownLemmas] = useState<string[]>(() =>
+    typeof window === "undefined" ? [] : Array.from(getKnownLemmaSet()),
+  );
   useEffect(() => {
     function refresh() {
       setKnownLemmas(Array.from(getKnownLemmaSet()));
@@ -215,14 +221,20 @@ export default function WordDetailView({ slug, from }: Props) {
           </div>
         )}
 
-        {/* 新朋友 / 老朋友 / 不收藏 三段式开关。
-            进入页面后立即显示，"不收藏"为默认未选中且与"新朋友"互斥。 */}
+        {/* 新朋友 / 不收藏 二选一开关。
+            "老朋友" 状态由艾宾浩斯打卡流程自动产生（level 升到 7 时），
+            这里不能手动切换 —— 否则就绕过了复习曲线。已是老朋友的词，
+            位置上换成只读徽标 <FriendBadge />。 */}
         {bookEntry && (
           <div className="flex items-center gap-2 pt-2">
-            <FriendToggle
-              status={bookEntry.status}
-              onChange={handleToggleStatus}
-            />
+            {bookEntry.status === "old" ? (
+              <FriendBadge />
+            ) : (
+              <FriendToggle
+                status={bookEntry.status}
+                onChange={handleToggleStatus}
+              />
+            )}
             <span className="text-xs text-[var(--fg-soft)]">
               已查 {bookEntry.queryCount} 次
             </span>
@@ -320,16 +332,22 @@ function BackButton({ onClick }: { onClick: () => void }) {
  * glances at, not a primary action. The pill that matches `status` gets the
  * accent color; the other two are muted.
  */
+/**
+ * Two-state pill: 新朋友 / 不收藏.
+ *
+ * "老朋友" is intentionally NOT one of the options — graduation to that
+ * state is owned by the Ebbinghaus review flow (`recordReview` bumping
+ * level to 7). Already-graduated words render <FriendBadge /> instead.
+ */
 function FriendToggle({
   status,
   onChange,
 }: {
-  status: WordbookStatus;
-  onChange: (next: WordbookStatus) => void;
+  status: "new" | "archived";
+  onChange: (next: "new" | "archived") => void;
 }) {
-  const items: Array<{ key: WordbookStatus; label: string }> = [
+  const items: Array<{ key: "new" | "archived"; label: string }> = [
     { key: "new", label: "新朋友" },
-    { key: "old", label: "老朋友" },
     { key: "archived", label: "不收藏" },
   ];
   return (
@@ -353,6 +371,24 @@ function FriendToggle({
         );
       })}
     </div>
+  );
+}
+
+/**
+ * Read-only badge shown when a word has already graduated to 老朋友 via
+ * the Ebbinghaus flow. We deliberately don't expose a way to demote it
+ * here — the only way back is failing future reviews (which the engine
+ * handles automatically).
+ */
+function FriendBadge() {
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-md border border-[var(--accent)] bg-[var(--accent-soft)] px-2.5 py-1 text-xs text-[var(--accent)]"
+      title="通过艾宾浩斯打卡毕业"
+    >
+      <span aria-hidden>✓</span>
+      <span>老朋友 · 已掌握</span>
+    </span>
   );
 }
 
