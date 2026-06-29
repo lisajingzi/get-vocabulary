@@ -17,7 +17,7 @@
  */
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   type ChangeEvent,
   type KeyboardEvent,
@@ -41,6 +41,7 @@ export default function SearchBox({
   autoFocus = false,
 }: Props) {
   const router = useRouter();
+  const pathname = usePathname();
   const [value, setValue] = useState(initial);
   const [items, setItems] = useState<string[]>([]);
   const [open, setOpen] = useState(false);
@@ -48,6 +49,16 @@ export default function SearchBox({
   const wrapperRef = useRef<HTMLDivElement>(null);
   // Holds the timer id for debounced suggest() calls.
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Sticky header instance: when the route changes (e.g. user clicked a
+  // suggestion or hit Enter and landed on /word/<x>), clear the input so the
+  // box never looks stuck on a stale query and the next lookup starts fresh.
+  useEffect(() => {
+    setValue("");
+    setItems([]);
+    setActive(-1);
+    setOpen(false);
+  }, [pathname]);
 
   // ---- effects ----------------------------------------------------------
 
@@ -64,10 +75,12 @@ export default function SearchBox({
       try {
         const next = await suggest(q, 8);
         setItems(next);
-        // Auto-highlight the first item only when the user's exact text is
-        // not already a hit — otherwise pressing Enter would silently jump
-        // to a different word, which is surprising.
-        setActive(next.length > 0 && next[0] !== q ? 0 : -1);
+        // Never auto-highlight a suggestion. Pressing Enter must always
+        // search for exactly what the user typed — otherwise typing
+        // "arousal" and hitting Enter would silently jump to whatever the
+        // first prefix match happens to be, which surprised users in
+        // testing. Highlighting only kicks in via ↑/↓ keys.
+        setActive(-1);
       } catch {
         setItems([]);
       }
@@ -98,7 +111,16 @@ export default function SearchBox({
     const trimmed = target.trim().toLowerCase();
     if (!trimmed) return;
     setOpen(false);
-    router.push(`/word/${encodeURIComponent(trimmed)}`);
+    const dest = `/word/${encodeURIComponent(trimmed)}`;
+    // If we're already sitting on the same /word/<slug> URL (common when
+    // the sticky search box is reused on a detail page) router.push is a
+    // no-op and the page appears "frozen". Force a refresh in that case so
+    // the lookup re-runs and the user sees feedback either way.
+    if (pathname === dest) {
+      router.refresh();
+    } else {
+      router.push(dest);
+    }
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {

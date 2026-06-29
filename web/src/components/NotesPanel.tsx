@@ -30,7 +30,54 @@ import {
 
 interface Props {
   lemma: string;
+  /**
+   * When true, the composer enforces selecting a part-of-speech *before*
+   * the very first save can go through. Used by the not-found flow where
+   * the user is creating an entry the dictionary doesn't carry, so we need
+   * them to tell us how to classify it in 单词本. Default: false (normal
+   * dictionary words already have a pos snapshot).
+   */
+  requirePosOnFirstSave?: boolean;
+  /**
+   * The currently-stored pos for this lemma, if any. Drives two things:
+   *   1. Whether the pos picker is in "first-time required" mode (undefined)
+   *      vs. "already chosen, optional edit" mode (defined).
+   *   2. The pre-selected chip in the picker.
+   */
+  initialPos?: string;
+  /**
+   * Called when the user submits the very FIRST note for a lemma that has
+   * no wordbook entry yet (i.e. requirePosOnFirstSave + no existing entry).
+   * The parent is responsible for actually creating the wordbook entry
+   * (recordLookup) — the panel itself only owns the notes store. The note
+   * itself has already been persisted by the time this fires.
+   */
+  onFirstSave?: (info: { pos: string }) => void;
+  /**
+   * Called whenever the user edits the pos chip *after* the entry exists.
+   * Lets the parent persist the change (setPos) without coupling the panel
+   * to the wordbook module. Only relevant when requirePosOnFirstSave=true.
+   */
+  onPosChange?: (pos: string) => void;
 }
+
+/** Allowed pos tokens. Stored values match the strings the wordbook page's
+ *  `matchPos` checks against (`includes("verb")` etc.) so the user's choice
+ *  flows straight into the existing filter. */
+export const POS_PICKER_OPTIONS: ReadonlyArray<{
+  value: string;
+  short: string;
+  label: string;
+}> = [
+  { value: "noun", short: "n.", label: "名词" },
+  { value: "verb", short: "v.", label: "动词" },
+  { value: "adjective", short: "adj.", label: "形容词" },
+  { value: "adverb", short: "adv.", label: "副词" },
+  { value: "preposition", short: "prep.", label: "介词" },
+  { value: "conjunction", short: "conj.", label: "连词" },
+  { value: "pronoun", short: "pron.", label: "代词" },
+  { value: "other", short: "其他", label: "其他" },
+];
 
 /** Down-scale uploaded images so localStorage doesn't blow up.
  *  Caps the longest edge at 1200px and re-encodes as JPEG q=0.85 — this turns
@@ -67,7 +114,13 @@ async function fileToCompressedDataUrl(file: File): Promise<string> {
   }
 }
 
-export default function NotesPanel({ lemma }: Props) {
+export default function NotesPanel({
+  lemma,
+  requirePosOnFirstSave = false,
+  initialPos,
+  onFirstSave,
+  onPosChange,
+}: Props) {
   const [notes, setNotes] = useState<WordNote[]>([]);
   const [draft, setDraft] = useState("");
   const [draftImage, setDraftImage] = useState<string | undefined>(undefined);
@@ -76,6 +129,20 @@ export default function NotesPanel({ lemma }: Props) {
   const [editImage, setEditImage] = useState<string | undefined>(undefined);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const editFileRef = useRef<HTMLInputElement>(null);
+
+  // When we're in "ask the user for a pos" mode, this holds the current
+  // selection. Seeded from initialPos so already-classified words show their
+  // chip pre-checked. Empty string == nothing chosen yet.
+  const normalizedInitial = (initialPos ?? "").toLowerCase();
+  const matchedInitial =
+    POS_PICKER_OPTIONS.find((o) => normalizedInitial.includes(o.value))?.value ?? "";
+  const [selectedPos, setSelectedPos] = useState<string>(matchedInitial);
+
+  // Keep selectedPos in sync if the parent's initialPos changes (e.g. the
+  // wordbook entry was created, parent re-rendered with the new pos).
+  useEffect(() => {
+    setSelectedPos(matchedInitial);
+  }, [matchedInitial]);
 
   const refresh = useCallback(() => {
     setNotes(listNotes(lemma));
@@ -92,14 +159,34 @@ export default function NotesPanel({ lemma }: Props) {
 
   // ---- handlers ---------------------------------------------------------
 
+  // Whether to render and enforce the pos picker on the composer.
+  const showPosPicker = requirePosOnFirstSave;
+  // True until the parent persists a pos for this lemma. "Required" means
+  // saving is blocked until selectedPos is non-empty.
+  const posRequired = showPosPicker && !initialPos;
+
+  function handlePosPick(value: string) {
+    setSelectedPos(value);
+    // If the entry already exists, propagate the change immediately so the
+    // wordbook reflects the new classification without waiting for a save.
+    if (initialPos && onPosChange && value && value !== matchedInitial) {
+      onPosChange(value);
+    }
+  }
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const body = draft.trim();
     if (!body && !draftImage) return;
+    if (posRequired && !selectedPos) return; // guarded by disabled state too
+    const isFirstSave = requirePosOnFirstSave && !initialPos;
     addNote(lemma, body, draftImage);
     setDraft("");
     setDraftImage(undefined);
     if (fileInputRef.current) fileInputRef.current.value = "";
+    if (isFirstSave && onFirstSave && selectedPos) {
+      onFirstSave({ pos: selectedPos });
+    }
   }
 
   async function handlePickImage(e: ChangeEvent<HTMLInputElement>) {
@@ -191,6 +278,37 @@ export default function NotesPanel({ lemma }: Props) {
             </button>
           </div>
         )}
+        {showPosPicker && (
+          <div className="space-y-1.5 border-t border-[var(--border)] pt-2">
+            <p className="text-[11px] text-[var(--fg-soft)]">
+              {posRequired
+                ? "选择词性（用于在单词本里分类，必选）"
+                : "词性（点击可修改）"}
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {POS_PICKER_OPTIONS.map((o) => {
+                const active = selectedPos === o.value;
+                return (
+                  <button
+                    type="button"
+                    key={o.value}
+                    onClick={() => handlePosPick(o.value)}
+                    title={o.label}
+                    className={[
+                      "rounded-full border px-2.5 py-0.5 text-xs transition",
+                      active
+                        ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                        : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--accent)] hover:text-[var(--fg)]",
+                    ].join(" ")}
+                  >
+                    <span className="font-medium">{o.short}</span>
+                    <span className="ml-1 text-[10px] opacity-80">{o.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
         <div className="flex items-center justify-between">
           <label className="cursor-pointer text-xs text-[var(--fg-soft)] hover:text-[var(--accent)]">
             <input
@@ -204,7 +322,15 @@ export default function NotesPanel({ lemma }: Props) {
           </label>
           <button
             type="submit"
-            disabled={!draft.trim() && !draftImage}
+            disabled={
+              (!draft.trim() && !draftImage) ||
+              (posRequired && !selectedPos)
+            }
+            title={
+              posRequired && !selectedPos
+                ? "请先选择词性，再保存第一条笔记"
+                : undefined
+            }
             className="rounded-md border border-[var(--border)] px-3 py-1 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
           >
             保存

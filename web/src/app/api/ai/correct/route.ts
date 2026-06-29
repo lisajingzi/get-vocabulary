@@ -56,7 +56,16 @@ interface ResponseBody {
   provider: "deepseek" | "mock";
 }
 
-const DEEPSEEK_URL = "https://api.deepseek.com/chat/completions";
+/** Resolve the OpenAI-compatible chat-completions URL from env, tolerating
+ *  base URLs given with or without a trailing `/v1` and with or without the
+ *  `/chat/completions` suffix. */
+function resolveChatUrl(): string {
+  const raw = (process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com").replace(/\/+$/, "");
+  if (/\/chat\/completions$/.test(raw)) return raw;
+  if (/\/v\d+$/.test(raw)) return `${raw}/chat/completions`;
+  return `${raw}/v1/chat/completions`;
+}
+const CHAT_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
 
 function buildPrompt(lemma: string, sentence: string, sense?: SenseHint) {
   const senseLine = sense?.def
@@ -209,14 +218,14 @@ async function callDeepseek(
   apiKey: string,
 ): Promise<ResponseBody> {
   const prompt = buildPrompt(lemma, sentence, sense);
-  const res = await fetch(DEEPSEEK_URL, {
+  const res = await fetch(resolveChatUrl(), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: "deepseek-chat",
+      model: CHAT_MODEL,
       messages: [{ role: "user", content: prompt }],
       temperature: 0.3,
       max_tokens: 360,

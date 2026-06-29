@@ -149,8 +149,13 @@ export function recordLookup(
         queryCount: existing.queryCount + 1,
         lastSeenAt: now,
         lastQueriedAt: now,
-        // Backfill pos on entries that pre-date this field.
-        pos: existing.pos ?? pos,
+        // pos resolution: an explicit pos argument always wins (the caller
+        // KNOWS the right tag — e.g. the user just picked it from the chip
+        // picker, or we just resolved it from the dictionary's first sense).
+        // Only fall back to the stored pos when no new tag was supplied.
+        // Using truthiness (not ??) so empty-string pos legacy rows get
+        // overwritten rather than sticking around.
+        pos: pos || existing.pos,
       }
     : {
         lemma: key,
@@ -264,6 +269,24 @@ export function setStatus(lemma: string, status: WordbookStatus): WordbookEntry 
     level: nextLevel,
     lastSeenAt: new Date().toISOString(),
   };
+  store[key] = next;
+  writeStore(store);
+  return next;
+}
+
+/**
+ * Update the snapshot pos on an existing entry. No-op (returns null) if
+ * the lemma isn't in the wordbook yet — pos is only meaningful relative
+ * to a recorded lookup. Used by the not-found flow where the user picks
+ * the part of speech themselves (since there's no dictionary sense to
+ * read it from), and may amend it later.
+ */
+export function setPos(lemma: string, pos: string): WordbookEntry | null {
+  const key = lemma.toLowerCase().trim();
+  const store = readStore();
+  const existing = store[key];
+  if (!existing) return null;
+  const next: WordbookEntry = { ...existing, pos };
   store[key] = next;
   writeStore(store);
   return next;

@@ -99,10 +99,15 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
               }
             : undefined;
       const known = Array.from(getKnownLemmaSet()).filter((w) => w !== lemma);
+      // Pass the most recent generations back to the API so the prompt can
+      // explicitly tell the model "don't echo these". Without this the
+      // model happily produces near-duplicates on every "再生成" click —
+      // same scenario, same verbs, just one word swapped.
+      const avoid = history.slice(0, 5).map((h) => h.en);
       const res = await fetch("/api/ai/example", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lemma, sense, known: known.slice(0, 50) }),
+        body: JSON.stringify({ lemma, sense, known: known.slice(0, 50), avoid }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as {
@@ -125,7 +130,13 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
     } finally {
       setBusy(false);
     }
-  }, [lemma, senseIndex, senses]);
+    // history is in the dep list because we read it above to build the avoid
+    // payload; if we left it out the closure would always see the initial
+    // empty array and the avoid-list would never actually reach the model.
+    // The auto-generate effect below pins itself to (lemma, senseIndex) only
+    // and explicitly disables exhaustive-deps, so the new generate identity
+    // here doesn't retrigger it.
+  }, [lemma, senseIndex, senses, history]);
 
   // Mount + (lemma, senseIndex) change: load cache, then auto-generate iff empty.
   // We CLEAR `history` first so the previous sense's examples don't linger

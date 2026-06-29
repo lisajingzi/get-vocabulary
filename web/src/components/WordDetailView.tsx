@@ -8,17 +8,24 @@
  *   2. Show four states: loading / not-found / redirected / canonical.
  *   3. Record a successful lookup into the local wordbook UNLESS the user
  *      arrived from inside the wordbook list (`?from=wordbook`) — viewing
- *      from there mustn't bump query stats.
+ *      from there mustn't bump query stats. Words missing from the
+ *      dictionary do NOT auto-record on visit; they only enter the
+ *      wordbook the moment the user saves their first note (and picks a
+ *      pos at the same time), so empty visits don't pollute the list.
  *   4. Render the structured fields with comfortable Notion-style spacing,
  *      grouped by part of speech.
  *   5. Three-state membership pill: 新朋友 / 老朋友 / 不收藏, each click
  *      surfaces a toast so the user knows what happened.
+ *   6. For not-found words, expose a NotesPanel with a required pos picker
+ *      so the user can write their own definitions / examples / scratch
+ *      notes against that word and have it classified in 单词本.
  */
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AIExamplesPanel from "@/components/AIExamplesPanel";
+import DerivedFormPanel from "@/components/DerivedFormPanel";
 import HighlightedSentence from "@/components/HighlightedSentence";
 import NotesPanel from "@/components/NotesPanel";
 import SpeakButton from "@/components/SpeakButton";
@@ -28,6 +35,7 @@ import {
   getEntry,
   getKnownLemmaSet,
   recordLookup,
+  setPos,
   setStatus,
   type WordbookEntry,
 } from "@/lib/wordbook/local";
@@ -65,16 +73,38 @@ export default function WordDetailView({ slug, from }: Props) {
         if (cancelled) return;
         if (!result) {
           setState({ kind: "not-found" });
+          // Do NOT auto-record this lookup — for words the dictionary
+          // doesn't carry, we only want to create a wordbook entry once
+          // the user actively writes a note (and picks a pos). That keeps
+          // "typo / curiosity" visits from cluttering 新朋友本. We DO mirror
+          // any pre-existing entry so the membership pill renders correctly
+          // for words the user has already taken notes on.
+          setBookEntry(getEntry(query));
           return;
         }
         setState({ kind: "ok", result });
-        // Count this lookup. Using the canonical lemma so "abandoned" (alias)
-        // and "abandon" (canonical) both consolidate under one wordbook entry.
-        const firstPos = result.entry.senses[0]?.pos ?? undefined;
-        recordLookup(result.lemma, firstPos, {
+        // Count this lookup against THE WORD THE USER TYPED, not the
+        // canonical headword we resolved to. So "arousal" (alias) stays
+        // "arousal" in the wordbook even though we render "arouse"'s
+        // senses underneath as derivation context. Likewise an inflected
+        // form ("abandoned") is recorded under the form the user actually
+        // looked up — the wordbook is meant to reflect their query history,
+        // not the dictionary's normalisation.
+        //
+        // POS handling:
+        //   • redirected (alias) → the dictionary's senses[0].pos belongs to
+        //     the BASE form (verb for `arouse`), which is wrong for the
+        //     derived form (`arousal` is a noun). Skip the pos here and let
+        //     <DerivedFormPanel>'s onResolved callback backfill it once the
+        //     LLM tells us the real derived-form pos.
+        //   • not redirected (canonical lookup) → senses[0].pos is correct.
+        const firstPos = result.redirected
+          ? undefined
+          : (result.entry.senses[0]?.pos ?? undefined);
+        recordLookup(result.query, firstPos, {
           skipCount: !countAsLookupRef.current,
         });
-        setBookEntry(getEntry(result.lemma));
+        setBookEntry(getEntry(result.query));
       })
       .catch(() => {
         if (!cancelled) setState({ kind: "not-found" });
@@ -85,16 +115,21 @@ export default function WordDetailView({ slug, from }: Props) {
   }, [query]);
 
   // Listen for wordbook changes from anywhere (e.g. user toggled status in
-  // another tab) and keep our local mirror fresh.
+  // another tab) and keep our local mirror fresh. Both branches key off the
+  // user's typed query — that's what recordLookup() persisted above and what
+  // the wordbook list shows.
   useEffect(() => {
-    if (state.kind !== "ok") return;
-    const lemma = state.result.lemma;
+    let lemma: string | null = null;
+    if (state.kind === "ok") lemma = state.result.query;
+    else if (state.kind === "not-found") lemma = query;
+    if (!lemma) return;
+    const key = lemma;
     function refresh() {
-      setBookEntry(getEntry(lemma));
+      setBookEntry(getEntry(key));
     }
     window.addEventListener("get:wordbook-change", refresh);
     return () => window.removeEventListener("get:wordbook-change", refresh);
-  }, [state]);
+  }, [state, query]);
 
   // Manual status toggle is intentionally limited to {"new", "archived"}.
   // Graduating to "old" (老朋友) is the EXCLUSIVE responsibility of the
@@ -104,9 +139,14 @@ export default function WordDetailView({ slug, from }: Props) {
   // (see FriendBadge below) instead of an interactive switch.
   const handleToggleStatus = useCallback(
     (next: "new" | "archived") => {
-      if (state.kind !== "ok") return;
+      // Pick the right key for whichever branch we're rendering. Both
+      // branches key off the user's typed query (see recordLookup above).
+      let lemma: string | null = null;
+      if (state.kind === "ok") lemma = state.result.query;
+      else if (state.kind === "not-found") lemma = query;
+      if (!lemma) return;
       const previous = bookEntry?.status;
-      const updated = setStatus(state.result.lemma, next);
+      const updated = setStatus(lemma, next);
       if (!updated) return;
       setBookEntry(updated);
       const label = next === "new" ? "新朋友" : "不收藏";
@@ -117,7 +157,7 @@ export default function WordDetailView({ slug, from }: Props) {
           : `${verb} ${label}`,
       );
     },
-    [state, bookEntry?.status],
+    [state, query, bookEntry?.status],
   );
 
   // Snapshot of "already-looked-up" lemmas; used to highlight them in every
@@ -147,6 +187,65 @@ export default function WordDetailView({ slug, from }: Props) {
     }
   }, [router]);
 
+  // Called by NotesPanel the moment the user saves their FIRST note for a
+  // not-found word. We create the wordbook entry now (not on page enter), so
+  // visits without notes don't end up in 新朋友本. The chosen pos comes from
+  // the chip picker the user just confirmed.
+  //
+  // NOTE: we deliberately DON'T forward `skipCount` here. That flag exists
+  // to prevent re-entering from the wordbook list from inflating queryCount,
+  // but the user actively writing a note IS an explicit "create this entry"
+  // intent — it must always materialize the row, even if the page was opened
+  // via ?from=wordbook (which would early-return and produce no entry).
+  const handleFirstNoteSave = useCallback(
+    ({ pos }: { pos: string }) => {
+      const created = recordLookup(query, pos);
+      if (created) {
+        setBookEntry(created);
+        toast(`已加入 新朋友 · ${pos}`);
+      }
+    },
+    [query],
+  );
+
+  // Called when the user changes the pos chip after the entry already exists.
+  const handlePosChange = useCallback(
+    (pos: string) => {
+      const updated = setPos(query, pos);
+      if (updated) {
+        setBookEntry(updated);
+        toast(`词性已更新为 ${pos}`);
+      }
+    },
+    [query],
+  );
+
+  // Called by <DerivedFormPanel> as soon as it has the LLM-resolved info for
+  // the derived form (either fresh from the API or from cache). We use the
+  // returned `pos` to backfill the wordbook entry — the original recordLookup
+  // for redirected words deliberately skipped pos because the dictionary only
+  // knew the BASE form's pos (e.g. verb for "arouse"), which is wrong for
+  // "arousal".
+  //
+  // We DO NOT overwrite a pos that's already there. If the entry already has
+  // a pos it was either (a) set by a previous resolution we trust, or (b)
+  // manually picked by the user via the chip on this same screen — either
+  // way, the AI shouldn't quietly change it.
+  const handleDerivedResolved = useCallback(
+    (info: { pos: string }) => {
+      if (!info.pos) return;
+      // Read fresh, not from `bookEntry` state, because this fires soon
+      // after recordLookup writes the row and our local mirror may not
+      // have caught up yet via the wordbook-change listener.
+      const current = getEntry(state.kind === "ok" ? state.result.query : query);
+      if (!current) return;
+      if (current.pos) return; // respect the user's prior choice
+      const updated = setPos(current.lemma, info.pos);
+      if (updated) setBookEntry(updated);
+    },
+    [state, query],
+  );
+
   if (state.kind === "loading") {
     return (
       <div className="space-y-4">
@@ -159,20 +258,54 @@ export default function WordDetailView({ slug, from }: Props) {
   }
 
   if (state.kind === "not-found") {
+    // Word isn't in the Oxford shards. We still let the user keep notes on
+    // it (definitions, examples, anything they want) — those notes survive
+    // page reloads, follow the word into /wordbook, and show up during
+    // review. Storage key = the user's typed query (lowercased), same as
+    // what recordLookup() persisted above.
     return (
-      <div className="space-y-4">
+      <div className="space-y-6">
         <BackButton onClick={handleBack} />
-        <h1 className="text-2xl font-semibold">{query}</h1>
-        <p className="text-sm text-[var(--fg-soft)]">
-          牛津高阶词典里没有收录这个词。
-        </p>
-        <p className="text-sm text-[var(--fg-soft)]">
-          检查拼写后再试，或者
-          <Link href="/" className="ml-1 text-[var(--accent)] hover:underline">
-            返回首页
-          </Link>
-          。
-        </p>
+
+        <header className="space-y-2">
+          <h1 className="text-3xl font-semibold tracking-tight">{query}</h1>
+          <p className="text-sm text-[var(--fg-soft)]">
+            牛津高阶词典里没有收录这个词。你可以在下方写下自己的释义、例句和笔记，它们会保留在单词本里，下次再查或复习这个词时都能看到。
+          </p>
+          <p className="text-xs text-[var(--fg-soft)]">
+            如果只是拼写出错，可以
+            <Link href="/" className="ml-1 text-[var(--accent)] hover:underline">
+              返回首页
+            </Link>
+            重新搜索。
+          </p>
+
+          {/* Same 新朋友 / 不收藏 toggle as canonical entries. "老朋友" is
+              still owned exclusively by the review flow. */}
+          {bookEntry && (
+            <div className="flex items-center gap-2 pt-1">
+              {bookEntry.status === "old" ? (
+                <FriendBadge />
+              ) : (
+                <FriendToggle
+                  status={bookEntry.status}
+                  onChange={handleToggleStatus}
+                />
+              )}
+              <span className="text-xs text-[var(--fg-soft)]">
+                已查 {bookEntry.queryCount} 次
+              </span>
+            </div>
+          )}
+        </header>
+
+        <NotesPanel
+          lemma={query}
+          requirePosOnFirstSave
+          initialPos={bookEntry?.pos}
+          onFirstSave={handleFirstNoteSave}
+          onPosChange={handlePosChange}
+        />
       </div>
     );
   }
@@ -184,6 +317,18 @@ export default function WordDetailView({ slug, from }: Props) {
   // like the printed dictionary instead of an interleaved list.
   const groups = groupByPos(entry.senses);
 
+  // When the user typed an inflected/alias form (e.g. "arousal"), we still
+  // want the headline to be THEIR word — not the canonical lemma we resolved
+  // to. The dictionary content (phonetics, senses) below remains the
+  // canonical entry's, since aliases don't carry their own definitions.
+  const headword = redirected ? typed : entry.lemma;
+  // Tiny lead-in shown on the canonical block so the user understands why
+  // the senses below are listed under a different headword.
+  const firstPos = entry.senses[0]?.pos;
+  const firstChn = entry.senses[0]?.chn;
+  const firstDef = entry.senses[0]?.def;
+  const lemmaSummary = firstChn || firstDef || "";
+
   return (
     <div className="space-y-6">
       <BackButton onClick={handleBack} />
@@ -192,17 +337,22 @@ export default function WordDetailView({ slug, from }: Props) {
       <header className="space-y-1">
         {redirected && (
           <p className="text-xs text-[var(--fg-soft)]">
-            <span className="font-medium text-[var(--fg)]">{typed}</span>
+            <span>原形</span>
             <span className="mx-1">→</span>
-            <span>原形 {lemma}</span>
+            <span className="font-medium text-[var(--fg)]">{lemma}</span>
           </p>
         )}
         <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
           <h1 className="text-3xl font-semibold tracking-tight">
-            {entry.lemma}
+            {headword}
           </h1>
         </div>
-        {(entry.phon?.uk || entry.phon?.us) && (
+        {/* Phonetics row only renders for non-redirected entries.
+            For an alias like "arousal" → "arouse", `entry.phon` belongs
+            to `arouse` and would mispronounce the headword. The accurate
+            IPA for the derived form is rendered by <DerivedFormPanel />
+            below using AI-supplied data. */}
+        {!redirected && (entry.phon?.uk || entry.phon?.us) && (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-[var(--fg-soft)]">
             {entry.phon?.uk && (
               <div className="inline-flex items-center gap-1">
@@ -241,6 +391,53 @@ export default function WordDetailView({ slug, from }: Props) {
           </div>
         )}
       </header>
+
+      {/* Origin-form notice — only when the user searched an inflected form
+          (e.g. "arousal" → "arouse"). We surface the canonical lemma + its
+          part-of-speech + a one-line gloss so the user immediately sees the
+          relationship instead of being silently redirected. */}
+      {redirected && (
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-soft)] px-4 py-3 text-sm">
+          <p className="text-[var(--fg)]">
+            <span className="font-medium">{typed}</span>
+            <span className="mx-1 text-[var(--fg-soft)]">的原形是</span>
+            <span className="font-medium">{lemma}</span>
+            {firstPos && (
+              <span className="ml-1 text-[var(--fg-soft)]">— {firstPos}</span>
+            )}
+            {lemmaSummary && (
+              <span className="text-[var(--fg-soft)]">：{lemmaSummary}</span>
+            )}
+          </p>
+        </div>
+      )}
+
+      {/* AI-filled card for the derived form itself (e.g. arousal). The
+          dictionary doesn't carry an independent entry for it, so this
+          panel asks an LLM for pos / IPA / definition / examples that
+          actually describe the user's typed word. */}
+      {redirected && (
+        <DerivedFormPanel
+          derived={typed}
+          base={lemma}
+          baseSense={entry.senses[0]}
+          onResolved={handleDerivedResolved}
+        />
+      )}
+
+      {/* Section divider — when redirected, everything below describes the
+          BASE lemma (`arouse`), not the user's typed word. Make that
+          relationship explicit instead of letting it look like "arousal"
+          itself has 4 verb senses and 6 example sentences. */}
+      {redirected && (
+        <div className="flex items-center gap-3 pt-2">
+          <span className="h-px flex-1 bg-[var(--border)]" aria-hidden />
+          <span className="text-xs uppercase tracking-wide text-[var(--fg-soft)]">
+            派生关系参考 · {lemma}
+          </span>
+          <span className="h-px flex-1 bg-[var(--border)]" aria-hidden />
+        </div>
+      )}
 
       {/* Senses */}
       {groups.map(([pos, senses], gi) => (
@@ -300,11 +497,12 @@ export default function WordDetailView({ slug, from }: Props) {
         </section>
       ))}
 
-      {/* AI 例句区（Day 4） */}
-      <AIExamplesPanel lemma={entry.lemma} senses={entry.senses} />
+      {/* AI 例句区（Day 4）—— 围绕用户搜的词（typed），不是字典原形。
+          这样 arousal 的例句不会跑到 arouse 的缓存键上去。 */}
+      <AIExamplesPanel lemma={typed} senses={entry.senses} />
 
-      {/* 笔记区（Day 3a） */}
-      <NotesPanel lemma={entry.lemma} />
+      {/* 笔记区（Day 3a）—— 笔记跟着用户搜的词，与 wordbook 条目的 key 一致。 */}
+      <NotesPanel lemma={typed} />
     </div>
   );
 }
