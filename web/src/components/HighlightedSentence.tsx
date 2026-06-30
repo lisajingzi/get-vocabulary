@@ -166,7 +166,7 @@ export default function HighlightedSentence({
           return (
             <span
               key={i}
-              className="font-semibold text-[var(--accent)]"
+              className="font-semibold text-[var(--highlight)]"
             >
               {t.raw}
             </span>
