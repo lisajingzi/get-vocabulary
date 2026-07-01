@@ -36,6 +36,12 @@ export interface WordbookEntry {
   firstSeenAt: string;
   /** ISO timestamp of most recent lookup or review. */
   lastSeenAt: string;
+  /** ISO timestamp of the most recent ACTUAL review attempt (pass/fail in /review).
+   *  Distinct from lastSeenAt because lookups, status moves, etc. also bump
+   *  lastSeenAt — only this field reflects "the user really sat down and
+   *  graded this card today". Used by the daily progress counter so that
+   *  shuffling a card between 新朋友 / 老朋友 doesn't fake completion. */
+  lastReviewedAt?: string;
   /** ISO timestamp of the most recent SEARCH-BAR lookup specifically.
    *  Distinct from lastSeenAt because clicking a word from the wordbook
    *  list (which mounts the detail page too) must NOT count as a fresh
@@ -222,6 +228,7 @@ export function recordReview(
     level: nextLevel,
     status: nextLevel >= 7 ? "old" : existing.status,
     lastSeenAt: now.toISOString(),
+    lastReviewedAt: now.toISOString(),
     nextReviewAt:
       nextLevel >= 7
         ? null
@@ -240,34 +247,66 @@ export function recordReview(
 }
 
 /**
- * Toggle / set the lemma's status between "new friend" and "old friend".
+ * Toggle / set the lemma's status between "new friend" / "old friend" / "archived".
  * Has no effect (returns null) if the lemma isn't in the wordbook yet —
  * status only makes sense after a first lookup.
  *
- * Side effect: when a user manually graduates a word to "old", we also bump
- * `level` to 7 so the Ebbinghaus scheduler stops surfacing it. Coming back
- * to "new" resets level to whatever it was (we keep the previous progress
- * implicitly by only writing 7 on graduation, never overwriting on demote).
+ * Level handling per status transition:
+ *   - → "old": jump level to 7 (manual graduation; scheduler stops surfacing it).
+ *   - → "archived": freeze the current level (so flipping back to "new" later
+ *     keeps progress; archived entries don't appear in any review queue anyway).
+ *   - → "new":
+ *       * From "old": user is saying "I forgot this graduated word, drill me
+ *         again". We reset level to 4 (= 7-day interval slot) so the card
+ *         needs THREE more successful reviews to re-graduate (4→5→6→7),
+ *         and clear nextReviewAt so it surfaces in today's queue immediately.
+ *         Going straight back to level 7 on the next pass (the old bug) made
+ *         "old → new → review once → old again" trivially achievable.
+ *       * From "archived": preserve the frozen level (clamped to ≤ 6 so an
+ *         archived-while-graduated entry doesn't auto-graduate again on next
+ *         touch). nextReviewAt left alone — caller-visible progress is
+ *         whatever it was before archiving.
+ *       * From "new" (no-op transition): leave level untouched.
  */
 export function setStatus(lemma: string, status: WordbookStatus): WordbookEntry | null {
   const key = lemma.toLowerCase().trim();
   const store = readStore();
   const existing = store[key];
   if (!existing) return null;
-  // Archiving freezes the Ebbinghaus level — we don't want a 不收藏 word to
-  // show up in review queues, but if the user later flips it back to "new"
-  // we keep their progress.
-  const nextLevel =
-    status === "old"
-      ? 7
-      : status === "archived"
-        ? existing.level
-        : Math.min(existing.level, 6);
+
+  let nextLevel = existing.level;
+  let nextReviewAt: string | null | undefined = existing.nextReviewAt;
+
+  if (status === "old") {
+    nextLevel = 7;
+    nextReviewAt = null; // graduated — never auto-due
+  } else if (status === "archived") {
+    // Freeze level as-is. Don't touch nextReviewAt either; it's irrelevant
+    // while archived (the scheduler filters by status === "new" anyway).
+  } else if (status === "new") {
+    if (existing.status === "old") {
+      // Reactivating a graduated word: drop to level 4 (mid-curve, "记得过
+      // 一阵但需要复习"), make it immediately due so the user can practise
+      // it today rather than waiting 7 days for the level-4 slot to open.
+      nextLevel = 4;
+      nextReviewAt = null;
+    } else if (existing.status === "archived") {
+      // Coming back from 不收藏 — keep level but cap at 6 so it doesn't
+      // skip the final review on the next pass.
+      nextLevel = Math.min(existing.level, 6);
+      // Re-arm the scheduler: if the entry has no due time yet, mark it
+      // immediately due (parity with `pickDailyQueue`'s "missing = due").
+      if (!nextReviewAt) nextReviewAt = null;
+    }
+    // status === "new" already → leave level / nextReviewAt untouched.
+  }
+
   const next: WordbookEntry = {
     ...existing,
     status,
     level: nextLevel,
     lastSeenAt: new Date().toISOString(),
+    nextReviewAt,
   };
   store[key] = next;
   writeStore(store);

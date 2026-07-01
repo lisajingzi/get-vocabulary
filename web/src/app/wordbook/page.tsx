@@ -24,6 +24,7 @@
  * list to view its detail is not a "query".
  */
 
+import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -244,9 +245,9 @@ export default function WordbookPage() {
       ) : (
         <ul className="divide-y divide-[var(--border)] rounded-lg border border-[var(--border)]">
           {visible.map((e) => {
-            const moveIcon = e.status === "new" ? "✅" : "🧐";
+            const isNew = e.status === "new";
             const moveTitle =
-              e.status === "new" ? "已掌握，移到老朋友" : "还想再看，移回新朋友";
+              isNew ? "已掌握，移到老朋友" : "还想再看，移回新朋友";
             return (
               <li key={e.lemma} className="group">
                 <div className="flex items-center gap-3 px-4 py-3 transition hover:bg-[var(--bg-soft)]">
@@ -280,9 +281,25 @@ export default function WordbookPage() {
                       ev.stopPropagation();
                       handleMove(e);
                     }}
-                    className="shrink-0 rounded-md border border-transparent px-2 py-1 text-base leading-none transition hover:border-[var(--border)] hover:bg-[var(--bg)]"
+                    className="shrink-0 rounded-md p-0.5 leading-none transition hover:opacity-70"
                   >
-                    {moveIcon}
+                    {isNew ? (
+                      <Image
+                        src="/get-check.png"
+                        alt="标记为已掌握"
+                        width={56}
+                        height={56}
+                        className="h-10 w-10 object-contain"
+                      />
+                    ) : (
+                      <Image
+                        src="/lost-mark.png"
+                        alt="标记为未掌握"
+                        width={56}
+                        height={56}
+                        className="h-10 w-10 object-contain"
+                      />
+                    )}
                   </button>
                 </div>
               </li>
@@ -390,7 +407,7 @@ function formatQueryDate(iso: string | undefined): string {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   if (d.getFullYear() === new Date().getFullYear()) {
-    return `${m}月${day}日`;
+    return `${m}/${day}`;
   }
-  return `${d.getFullYear()}年${m}月${day}日`;
+  return `${d.getFullYear()}/${m}/${day}`;
 }

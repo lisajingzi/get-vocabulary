@@ -3,15 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState, useCallback } from "react";
 import { currentStreak, punchesInMonth } from "@/lib/wordbook/punches";
-import { listEntries } from "@/lib/wordbook/local";
-import { pickDailyQueue } from "@/lib/wordbook/scheduler";
-
-function localDayKey(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
+import { getDailyProgress } from "@/lib/wordbook/daily-snapshot";
 
 export default function CheckinSection() {
   const [today, setToday] = useState<Date | null>(null);
@@ -28,14 +20,11 @@ export default function CheckinSection() {
     setToday(now);
     setStreak(currentStreak(now));
 
-    const all = listEntries();
-    const todayKey = localDayKey(now);
-    const due = pickDailyQueue(all);
-    setDueTotal(due.length);
-    const finished = all.filter((e) => {
-      if (e.level <= 0) return false;
-      return localDayKey(new Date(e.lastSeenAt)) === todayKey;
-    }).length;
+    // Y = words frozen in today's snapshot that are still 新朋友 & ungraduated.
+    // X = subset of Y that has been actually reviewed (recordReview) today.
+    // See lib/wordbook/daily-snapshot.ts for the why.
+    const { total, finished } = getDailyProgress(now);
+    setDueTotal(Math.max(0, total - finished));
     setFinishedToday(finished);
   }, []);
 
@@ -43,10 +32,12 @@ export default function CheckinSection() {
     refresh();
     window.addEventListener("get:punch-change", refresh);
     window.addEventListener("get:wordbook-change", refresh);
+    window.addEventListener("get:daily-snapshot-change", refresh);
     document.addEventListener("visibilitychange", refresh);
     return () => {
       window.removeEventListener("get:punch-change", refresh);
       window.removeEventListener("get:wordbook-change", refresh);
+      window.removeEventListener("get:daily-snapshot-change", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
   }, [refresh]);
@@ -73,9 +64,9 @@ export default function CheckinSection() {
 
   if (!today || !viewMonth) {
     return (
-      <div className="rounded-2xl border border-[var(--border)] p-4 h-full">
-        <div className="h-4 w-24 animate-pulse rounded bg-[var(--bg-soft)]" />
-        <div className="mt-4 h-40 animate-pulse rounded-md bg-[var(--bg-soft)]" />
+      <div className="rounded-[var(--radius-lg)] border border-white/70 bg-white/40 backdrop-blur-2xl p-5 h-full shadow-[var(--shadow-glass)]">
+        <div className="h-4 w-24 animate-pulse rounded bg-white/50" />
+        <div className="mt-4 h-40 animate-pulse rounded-md bg-white/40" />
       </div>
     );
   }
@@ -121,42 +112,56 @@ export default function CheckinSection() {
   }
 
   return (
-    <div className="rounded-2xl border border-[var(--border)] overflow-hidden flex flex-col bg-[var(--bg)] shadow-sm h-full">
-      {/* Calendar Header - 月份切换 */}
-      <div className="px-4 pt-4 pb-2 shrink-0 flex items-center justify-between">
+    <div className="relative overflow-hidden rounded-[var(--radius-lg)] border border-white/70 bg-white/40 backdrop-blur-2xl shadow-[var(--shadow-glass)] h-full flex flex-col supports-[backdrop-filter]:bg-white/32">
+      {/* Frosted-glass layer stack — kept minimal for a clean feel */}
+      <div className="pointer-events-none absolute inset-0">
+        {/* diagonal light sheen */}
+        <div className="absolute inset-0 bg-[linear-gradient(140deg,rgba(255,255,255,0.42),rgba(255,255,255,0.10)_55%,transparent)]" />
+        {/* bottom soft haze */}
+        <div className="absolute inset-x-0 bottom-0 h-[38%] bg-gradient-to-t from-white/25 to-transparent" />
+        {/* one gentle warm highlight — like morning sun */}
+        <div className="absolute -top-10 -right-10 h-40 w-40 rounded-full bg-[var(--highlight)]/35 blur-3xl" />
+        {/* inner rim highlight */}
+        <div className="absolute inset-0 rounded-[var(--radius-lg)] ring-1 ring-inset ring-white/50" />
+      </div>
+
+      {/* Month header */}
+      <div className="relative px-6 pt-5 pb-3 shrink-0 flex items-center justify-between">
         <button
           type="button"
           onClick={goPrevMonth}
           aria-label="上一月"
-          className="w-8 h-8 rounded-full border border-[var(--border)] flex items-center justify-center text-[var(--fg-soft)] hover:text-[var(--fg)] hover:border-[var(--accent)] transition"
+          className="h-8 w-8 rounded-full border border-white/70 bg-white/60 text-[var(--fg-soft)] transition hover:bg-white/90 hover:text-[var(--fg)] active:scale-95"
         >
           ‹
         </button>
-        <div className="text-center">
-          <div className="text-base font-semibold tracking-tight">
-            {monthLabel} {year}
-          </div>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[19px] font-semibold tracking-tight text-[var(--fg)]">
+            {monthLabel}
+          </span>
+          <span className="text-[13px] font-medium text-[var(--fg-soft)] tabular-nums">
+            {year}
+          </span>
         </div>
         <button
           type="button"
           onClick={goNextMonth}
           aria-label="下一月"
-          className="w-8 h-8 rounded-full border border-[var(--border)] flex items-center justify-center text-[var(--fg-soft)] hover:text-[var(--fg)] hover:border-[var(--accent)] transition"
+          className="h-8 w-8 rounded-full border border-white/70 bg-white/60 text-[var(--fg-soft)] transition hover:bg-white/90 hover:text-[var(--fg)] active:scale-95"
         >
           ›
         </button>
       </div>
 
-      {/* Calendar Grid - 自适应剩余空间 */}
-      <div className="px-3 pt-2 pb-2 flex-1 min-h-0 flex flex-col">
-        <div className="grid grid-cols-7 gap-0 text-center text-[10px] text-[var(--fg-soft)] mb-1 shrink-0">
+      <div className="relative px-5 pb-2 flex-1 min-h-0 flex flex-col">
+        <div className="grid grid-cols-7 text-center text-[10.5px] uppercase tracking-[0.14em] text-[var(--fg-soft)]/80 mb-1.5 shrink-0">
           {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((w) => (
-            <div key={w} className="py-0.5 font-medium tracking-wider">
+            <div key={w} className="py-1">
               {w}
             </div>
           ))}
         </div>
-        <div className="grid grid-cols-7 gap-y-0.5 text-center text-xs flex-1 min-h-0">
+        <div className="grid grid-cols-7 gap-y-1 text-center flex-1 min-h-0">
           {cells.map((d, i) => {
             if (d === null) {
               return <div key={i} />;
@@ -169,10 +174,9 @@ export default function CheckinSection() {
 
             return (
               <div key={i} className="relative flex items-center justify-center">
-                {/* Connection background */}
                 {isPunched && (
                   <div
-                    className={`absolute inset-y-1 ${
+                    className={`absolute inset-y-[30%] ${
                       prevPunched && nextPunched
                         ? "inset-x-0"
                         : prevPunched
@@ -180,20 +184,20 @@ export default function CheckinSection() {
                         : nextPunched
                         ? "left-1/2 right-0"
                         : "hidden"
-                    } bg-[var(--accent)] opacity-15`}
+                    } bg-[var(--accent)]/18`}
                   />
                 )}
-                {/* Circle or Text */}
                 <div
-                  className={`relative z-10 flex items-center justify-center w-7 h-7 rounded-full mx-auto ${
-                    isPunched && (!prevPunched || !nextPunched)
-                      ? "bg-[var(--accent)] text-white shadow-sm"
+                  className={[
+                    "relative z-10 flex h-9 w-9 items-center justify-center rounded-full mx-auto text-[13px] tabular-nums transition",
+                    isToday
+                      ? "bg-white ring-2 ring-[var(--accent)] text-[var(--accent)] font-semibold shadow-[0_4px_10px_rgba(106,167,195,0.35)]"
+                      : isPunched && (!prevPunched || !nextPunched)
+                      ? "bg-[var(--accent)] text-white shadow-[0_2px_6px_rgba(106,167,195,0.35)]"
                       : isPunched
-                      ? "text-[var(--accent)] font-medium"
-                      : isToday
-                      ? "ring-1 ring-[var(--accent)] text-[var(--accent)]"
-                      : "text-[var(--fg)]"
-                  }`}
+                      ? "text-[var(--accent)] font-semibold"
+                      : "text-[var(--fg)]/85 hover:bg-white/50",
+                  ].join(" ")}
                 >
                   {d}
                 </div>
@@ -203,16 +207,20 @@ export default function CheckinSection() {
         </div>
       </div>
 
-      {/* 今日打卡 - 紧凑单行布局 */}
-      <div className="border-t border-[var(--border)] px-4 py-3 bg-[var(--bg-soft)]/30 shrink-0">
+      <div className="relative border-t border-white/50 bg-white/45 backdrop-blur-md px-5 py-3.5 shrink-0">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex items-baseline gap-4 min-w-0 flex-1">
-            <div className="text-sm font-semibold whitespace-nowrap">今日打卡</div>
-            <div className="flex items-baseline gap-1 text-xs text-[var(--fg-soft)] whitespace-nowrap">
-              连续 <span className="text-base font-semibold text-[var(--accent)]">{streak}</span> 天
+          <div className="flex items-center gap-5 min-w-0 flex-1">
+            <div className="text-[15px] font-semibold tracking-tight whitespace-nowrap">今日打卡</div>
+            <div className="flex items-baseline gap-1 text-[11px] text-[var(--fg-soft)] whitespace-nowrap">
+              连续
+              <span className="text-[15px] font-semibold text-[var(--accent)] tabular-nums">{streak}</span>
+              天
             </div>
-            <div className="flex items-baseline gap-1 text-xs text-[var(--fg-soft)] whitespace-nowrap">
-              进度 <span className="text-base font-semibold text-[var(--fg)]">{finishedToday}/{totalToday}</span>
+            <div className="flex items-baseline gap-1 text-[11px] text-[var(--fg-soft)] whitespace-nowrap">
+              进度
+              <span className="text-[15px] font-semibold text-[var(--fg)] tabular-nums">
+                {finishedToday}/{totalToday}
+              </span>
             </div>
           </div>
 
@@ -220,7 +228,7 @@ export default function CheckinSection() {
             <button
               type="button"
               disabled
-              className="shrink-0 rounded-full border border-[var(--border)] bg-[var(--bg)] px-4 py-1.5 text-xs font-medium opacity-50"
+              className="shrink-0 rounded-full border border-white/70 bg-white/70 px-4 py-1.5 text-xs font-medium opacity-55"
             >
               开始复习
             </button>
@@ -228,10 +236,11 @@ export default function CheckinSection() {
             <Link
               href="/review"
               className={[
-                "shrink-0 rounded-full px-4 py-1.5 text-center text-xs font-medium transition shadow-sm whitespace-nowrap",
+                "shrink-0 rounded-full px-4 py-1.5 text-center text-xs font-semibold transition whitespace-nowrap",
+                "active:translate-y-[1px]",
                 isFinished
-                  ? "border border-[var(--border)] bg-[var(--bg)] text-[var(--fg-soft)] hover:border-[var(--accent)]"
-                  : "bg-[var(--accent)] text-white hover:opacity-90 hover:shadow",
+                  ? "border border-[var(--border)] bg-white/80 text-[var(--fg-soft)] hover:border-[var(--accent)]"
+                  : "bg-[var(--accent)] text-white shadow-[0_6px_14px_rgba(106,167,195,0.35)] hover:brightness-105",
               ].join(" ")}
             >
               {isFinished ? "今日已完成" : "开始复习"}

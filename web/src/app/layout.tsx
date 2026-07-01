@@ -6,7 +6,7 @@ import ToastHost from "@/components/Toast";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "GET! — 英语单词本",
+  title: "GET!",
   description: "记录、查询并复习你的英语生词。",
   manifest: "/manifest.webmanifest",
   icons: {
@@ -39,7 +39,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body className="min-h-screen antialiased">
-        <header className="sticky top-0 z-30 border-b border-[var(--border)] bg-[var(--bg)]/95 backdrop-blur supports-[backdrop-filter]:bg-[var(--bg)]/75">
+        <header className="sticky top-0 z-30 border-b border-white/50 bg-white/55 backdrop-blur-xl shadow-[0_1px_0_rgba(255,255,255,0.5),0_8px_24px_rgba(67,101,118,0.10)] supports-[backdrop-filter]:bg-white/40">
           <div className="mx-auto flex max-w-5xl items-center gap-3 px-6 py-3">
             <Link
               href="/"
@@ -53,8 +53,11 @@ export default function RootLayout({
             <div className="min-w-0 flex-1">
               <SearchBox size="sm" />
             </div>
-            <nav className="shrink-0 text-sm text-[var(--fg-soft)]">
-              <Link href="/wordbook" className="hover:text-[var(--fg)]">
+            <nav className="shrink-0 text-sm">
+              <Link
+                href="/wordbook"
+                className="text-[var(--fg-soft)] transition hover:text-[var(--fg)]"
+              >
                 单词本
               </Link>
             </nav>

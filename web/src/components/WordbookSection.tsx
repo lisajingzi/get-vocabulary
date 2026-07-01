@@ -1,5 +1,6 @@
 "use client";
 
+import Image from "next/image";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -129,83 +130,66 @@ export default function WordbookSection() {
   }
 
   return (
-    <div className="rounded-2xl border border-[var(--border)] overflow-hidden flex flex-col bg-[var(--bg)] shadow-sm h-full">
-      {/* 标题区 - 与打卡模块的月份头部风格一致，留出充足留白 */}
+    <div className="relative overflow-hidden rounded-[var(--radius-lg)] border border-white/80 bg-[var(--card)] shadow-[var(--shadow-md)] h-full flex flex-col">
+      {/* subtle top accent line for hierarchy */}
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[var(--accent)]/25 to-transparent" />
+
       <header className="px-5 pt-5 pb-3 shrink-0">
-        <div className="flex items-center justify-between gap-3">
-          <h2 className="text-base font-semibold tracking-tight">单词本</h2>
-          <span className="text-xs text-[var(--fg-soft)]">
-            共 <span className="font-medium text-[var(--fg)]">{visible.length}</span> 个
-          </span>
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-baseline gap-2.5">
+            <h2 className="text-[19px] leading-none font-semibold tracking-tight">单词本</h2>
+            <span className="text-[12px] text-[var(--fg-soft)] tabular-nums">
+              共 <span className="text-[var(--fg)] font-medium">{visible.length}</span> 个
+            </span>
+          </div>
+          <div className="inline-flex rounded-full border border-[var(--border)]/70 bg-[var(--bg-soft)]/60 p-0.5 whitespace-nowrap">
+            {(
+              [
+                { key: "new", label: `新朋友 · ${counts.new}` },
+                { key: "old", label: `老朋友 · ${counts.old}` },
+              ] as const
+            ).map((it) => {
+              const active = tab === it.key;
+              return (
+                <button
+                  key={it.key}
+                  type="button"
+                  onClick={() => setTab(it.key)}
+                  className={[
+                    "rounded-full px-3 py-1 text-[12px] font-medium transition whitespace-nowrap",
+                    active
+                      ? "bg-white text-[var(--fg)] shadow-[0_2px_6px_rgba(52,92,112,0.10)]"
+                      : "text-[var(--fg-soft)] hover:text-[var(--fg)]",
+                  ].join(" ")}
+                >
+                  {it.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
       </header>
 
-      {/* Tabs（左）+ 筛选项（右）一行 - 两者功能不同，分开对齐 */}
-      <div className="px-5 pb-3 shrink-0 flex items-center justify-between gap-2 flex-wrap">
-        <div className="inline-flex rounded-md border border-[var(--border)] p-0.5">
-          {(
-            [
-              { key: "new", label: `新朋友 · ${counts.new}` },
-              { key: "old", label: `老朋友 · ${counts.old}` },
-            ] as const
-          ).map((it) => {
-            const active = tab === it.key;
-            return (
-              <button
-                key={it.key}
-                type="button"
-                onClick={() => setTab(it.key)}
-                className={[
-                  "rounded px-2 py-0.5 text-xs transition",
-                  active
-                    ? "bg-[var(--accent)] text-white"
-                    : "text-[var(--fg-soft)] hover:text-[var(--fg)]",
-                ].join(" ")}
-              >
-                {it.label}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+      <div className="px-5 pb-3 shrink-0 flex items-center justify-end gap-1.5 whitespace-nowrap">
+        {[
+          { value: pos, options: POS_OPTIONS, on: (v: string) => setPos(v as PosOption), title: "词性" },
+          { value: month, options: monthOptions, on: (v: string) => setMonth(v), title: "时间" },
+          { value: sortKey, options: SORT_OPTIONS, on: (v: string) => setSortKey(v as SortKey), title: "排序" },
+        ].map((sel, idx) => (
           <select
-            value={pos}
-            onChange={(e) => setPos(e.target.value as PosOption)}
-            className="rounded-md border border-[var(--border)] bg-transparent px-1.5 py-0.5 text-[var(--fg-soft)] outline-none"
-            title="词性"
+            key={idx}
+            value={sel.value}
+            onChange={(e) => sel.on(e.target.value)}
+            title={sel.title}
+            className="rounded-full border border-[var(--border)]/60 bg-white/80 px-2.5 py-1 text-[11px] text-[var(--fg-soft)] outline-none transition hover:border-[var(--accent)]/50 hover:text-[var(--fg)] cursor-pointer"
           >
-            {POS_OPTIONS.map((o) => (
+            {sel.options.map((o) => (
               <option key={o.value} value={o.value}>
                 {o.label}
               </option>
             ))}
           </select>
-          <select
-            value={month}
-            onChange={(e) => setMonth(e.target.value)}
-            className="rounded-md border border-[var(--border)] bg-transparent px-1.5 py-0.5 text-[var(--fg-soft)] outline-none"
-            title="时间"
-          >
-            {monthOptions.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-          <select
-            value={sortKey}
-            onChange={(e) => setSortKey(e.target.value as SortKey)}
-            className="rounded-md border border-[var(--border)] bg-transparent px-1.5 py-0.5 text-[var(--fg-soft)] outline-none"
-            title="排序"
-          >
-            {SORT_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        ))}
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col px-5 pb-5">
@@ -217,53 +201,84 @@ export default function WordbookSection() {
           </p>
         ) : (
           <>
-            <ul className="divide-y divide-[var(--border)] rounded-lg border border-[var(--border)] flex-1 overflow-hidden flex flex-col">
+            <ul className="flex-1 overflow-hidden flex flex-col gap-2">
               {paginated.map((e) => {
-                const moveIcon = e.status === "new" ? "✅" : "🧐";
-                const moveTitle =
-                  e.status === "new" ? "已掌握，移到老朋友" : "还想再看，移回新朋友";
+                const isNew = e.status === "new";
+                const moveTitle = isNew
+                  ? "已掌握，移到老朋友"
+                  : "还想再看，移回新朋友";
+                const stripColor = isNew
+                  ? "var(--new-friend)"
+                  : "var(--old-friend)";
                 return (
                   <li key={e.lemma} className="group flex-1 flex flex-col justify-center">
-                    <div className="flex items-center gap-3 px-4 py-2 transition hover:bg-[var(--bg-soft)]">
-                      <Link
-                        href={`/word/${encodeURIComponent(e.lemma)}?from=wordbook`}
-                        className="flex min-w-0 flex-1 items-baseline justify-between gap-3"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-baseline gap-2">
-                            <span className="font-medium">{e.lemma}</span>
-                            {e.pos && (
-                              <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
-                                {shortPos(e.pos)}
+                    <div
+                      className="relative overflow-hidden rounded-[var(--radius-md)] border border-black/[0.06] bg-white pl-4 pr-4 py-2 shadow-[var(--shadow-sm)] transition-all duration-200 hover:-translate-y-[1px] hover:shadow-[var(--shadow-md)] hover:border-black/[0.09]"
+                    >
+                      {/* left color strip — quiet status marker */}
+                      <span
+                        aria-hidden
+                        className="absolute left-0 top-2 bottom-2 w-[3px] rounded-r-full opacity-70"
+                        style={{ background: stripColor }}
+                      />
+                      <div className="flex items-center gap-3">
+                        <Link
+                          href={`/word/${encodeURIComponent(e.lemma)}?from=wordbook`}
+                          className="flex min-w-0 flex-1 items-baseline justify-between gap-3"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-baseline gap-2">
+                              <span className="truncate text-[16px] leading-[1.25] pb-[2px] font-medium tracking-tight">
+                                {e.lemma}
                               </span>
-                            )}
+                              {e.pos && (
+                                <span className="rounded-full bg-[var(--bg-soft)]/70 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-[var(--fg-soft)]">
+                                  {shortPos(e.pos)}
+                                </span>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                        <div className="shrink-0 space-x-3 text-xs text-[var(--fg-soft)]">
-                          <span title="查询次数">×{e.queryCount}</span>
-                          <span title="最近查询日期">
-                            {formatQueryDate(e.lastQueriedAt ?? e.lastSeenAt)}
-                          </span>
-                        </div>
-                      </Link>
-                      <button
-                        type="button"
-                        title={moveTitle}
-                        aria-label={moveTitle}
-                        onClick={(ev) => {
-                          ev.preventDefault();
-                          ev.stopPropagation();
-                          handleMove(e);
-                        }}
-                        className="shrink-0 rounded-md border border-transparent px-2 py-1 text-base leading-none transition hover:border-[var(--border)] hover:bg-[var(--bg)]"
-                      >
-                        {moveIcon}
-                      </button>
+                          <div className="shrink-0 flex items-center gap-3 text-[11px] text-[var(--fg-soft)] tabular-nums">
+                            <span title="查询次数">×{e.queryCount}</span>
+                            <span title="最近查询日期">
+                              {formatQueryDate(e.lastQueriedAt ?? e.lastSeenAt)}
+                            </span>
+                          </div>
+                        </Link>
+                        <button
+                          type="button"
+                          title={moveTitle}
+                          aria-label={moveTitle}
+                          onClick={(ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            handleMove(e);
+                          }}
+                          className="shrink-0 rounded-md p-0.5 leading-none transition hover:opacity-70 active:scale-95"
+                        >
+                          {isNew ? (
+                            <Image
+                              src="/get-check.png"
+                              alt="标记为已掌握"
+                              width={48}
+                              height={48}
+                              className="h-8 w-8 object-contain"
+                            />
+                          ) : (
+                            <Image
+                              src="/lost-mark.png"
+                              alt="标记为未掌握"
+                              width={48}
+                              height={48}
+                              className="h-8 w-8 object-contain"
+                            />
+                          )}
+                        </button>
+                      </div>
                     </div>
                   </li>
                 );
               })}
-              {/* Fill empty space if less than PAGE_SIZE items */}
               {Array.from({ length: PAGE_SIZE - paginated.length }).map((_, i) => (
                 <li key={`empty-${i}`} className="flex-1 flex flex-col justify-center pointer-events-none">
                   <div className="px-4 py-2 opacity-0">
@@ -272,33 +287,30 @@ export default function WordbookSection() {
                 </li>
               ))}
             </ul>
-            
-            {/* Pagination - 整体缩小，去掉文字改为箭头 */}
-            {totalPages > 1 && (
-              <div className="flex items-center justify-center gap-2 pt-2 pb-0.5 shrink-0">
-                <button
-                  type="button"
-                  disabled={page === 1}
-                  onClick={() => setPage(p => Math.max(1, p - 1))}
-                  aria-label="上一页"
-                  className="w-6 h-6 flex items-center justify-center text-xs rounded border border-[var(--border)] disabled:opacity-40 hover:bg-[var(--bg-soft)] transition leading-none"
-                >
-                  ‹
-                </button>
-                <span className="text-[11px] text-[var(--fg-soft)] tabular-nums">
-                  {page}/{totalPages}
-                </span>
-                <button
-                  type="button"
-                  disabled={page === totalPages}
-                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-                  aria-label="下一页"
-                  className="w-6 h-6 flex items-center justify-center text-xs rounded border border-[var(--border)] disabled:opacity-40 hover:bg-[var(--bg-soft)] transition leading-none"
-                >
-                  ›
-                </button>
-              </div>
-            )}
+
+            <div className="flex items-center justify-center gap-2 pt-2 pb-0.5 shrink-0">
+              <button
+                type="button"
+                disabled={page === 1}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                aria-label="上一页"
+                className="w-6 h-6 flex items-center justify-center text-xs rounded-full border border-[var(--border)]/70 bg-white/70 text-[var(--fg-soft)] disabled:opacity-40 hover:bg-white hover:text-[var(--fg)] transition leading-none"
+              >
+                ‹
+              </button>
+              <span className="text-[11px] text-[var(--fg-soft)] tabular-nums">
+                {page}/{totalPages}
+              </span>
+              <button
+                type="button"
+                disabled={page === totalPages}
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                aria-label="下一页"
+                className="w-6 h-6 flex items-center justify-center text-xs rounded-full border border-[var(--border)]/70 bg-white/70 text-[var(--fg-soft)] disabled:opacity-40 hover:bg-white hover:text-[var(--fg)] transition leading-none"
+              >
+                ›
+              </button>
+            </div>
           </>
         )}
       </div>
@@ -308,7 +320,7 @@ export default function WordbookSection() {
           role="status"
           className="fixed inset-x-0 bottom-6 z-50 flex justify-center px-4"
         >
-          <div className="flex items-center gap-3 rounded-full border border-[var(--border)] bg-[var(--bg)] px-4 py-2 text-sm shadow-lg">
+          <div className="flex items-center gap-3 rounded-full border border-[var(--border)] bg-[var(--card)] px-4 py-2 text-sm shadow-lg">
             <span>
               已将 <span className="font-medium">{undo.lemma}</span> 移到
               {undo.to === "old" ? "「老朋友」" : "「新朋友」"}
@@ -323,6 +335,17 @@ export default function WordbookSection() {
           </div>
         </div>
       )}
+
+      {/* Dinosaur decoration in bottom-right corner */}
+      <Image
+        src="/decor/peek-dino.png"
+        alt=""
+        aria-hidden
+        width={220}
+        height={110}
+        className="absolute bottom-2 right-2 w-[100px] h-auto opacity-60 pointer-events-none select-none"
+        priority={false}
+      />
     </div>
   );
 }
@@ -393,7 +416,7 @@ function formatQueryDate(iso: string | undefined): string {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   if (d.getFullYear() === new Date().getFullYear()) {
-    return `${m}月${day}日`;
+    return `${m}/${day}`;
   }
-  return `${d.getFullYear()}年${m}月${day}日`;
+  return `${d.getFullYear()}/${m}/${day}`;
 }

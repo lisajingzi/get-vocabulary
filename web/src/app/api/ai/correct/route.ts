@@ -1,30 +1,39 @@
 /**
  * POST /api/ai/correct
  *
- * Grades a learner's English sentence for use of a target word, returns:
- *   - whether the sentence is acceptable (uses the target word correctly,
- *     in the requested sense, and is grammatical),
- *   - a "diff" of corrections (segments to keep + segments to mark wrong +
- *     replacement text), so the UI can render the original with red strike-
- *     throughs over the broken parts and the fix in-line.
+ * Coach-style English sentence feedback for a Chinese B2 learner who is
+ * preparing for IELTS speaking. We do NOT operate as a binary "right/wrong"
+ * grader — we operate as a tutor that always nudges the learner toward more
+ * native-like phrasing, even when the original sentence is grammatically
+ * fine.
  *
- * Request body:
- *   { lemma, sense?, sentence }
+ * Two verdicts only:
+ *   - ok=true  ("good")        → original is already native-like; we still
+ *                                offer a slightly more advanced/idiomatic
+ *                                upgrade in `recommended` so the learner
+ *                                keeps levelling up.
+ *   - ok=false ("needs_work")  → anything from a real grammar bug to a
+ *                                merely-understandable-but-unnatural
+ *                                collocation. We always rewrite to a
+ *                                native-quality version.
  *
  * Response body:
  *   {
- *     ok: boolean,                 // true == accepted as-is, no edits needed
- *     reason: string,              // one Chinese sentence explaining the verdict
- *     segments: Array<{            // ordered, concatenating .text reproduces original
- *       text: string,              // the original chunk
- *       wrong?: boolean,           // true == this chunk is incorrect
- *       fix?: string               // the corrected replacement (only set when wrong)
+ *     ok: boolean,
+ *     recommended: string,           // most natural rewrite (or upgrade)
+ *     recommendedAlt?: string,       // optional second option (different register)
+ *     segments: Array<{              // diff over the ORIGINAL sentence; concatenating
+ *       text: string,                // .text reproduces the original verbatim.
+ *       wrong?: boolean,             // only set when ok=false
+ *       fix?: string,
  *     }>,
+ *     diagnosis: string[],           // 1-2 short Chinese explanations of the language point(s)
+ *     distinction?: string,          // 1-line confusable-word disambiguation (Chinese)
+ *     ielts?: string,                // 1 native-level IELTS-speaking sample sentence
  *     provider: "deepseek" | "mock"
  *   }
  *
- * Falls back to a deterministic mock when DEEPSEEK_API_KEY is unset, so the
- * UI is testable end-to-end before the real key lands.
+ * Falls back to a deterministic mock when DEEPSEEK_API_KEY is unset.
  */
 
 import { NextResponse } from "next/server";
@@ -51,8 +60,12 @@ interface Segment {
 
 interface ResponseBody {
   ok: boolean;
-  reason: string;
+  recommended: string;
+  recommendedAlt?: string;
   segments: Segment[];
+  diagnosis: string[];
+  distinction?: string;
+  ielts?: string;
   provider: "deepseek" | "mock";
 }
 
@@ -72,24 +85,119 @@ function buildPrompt(lemma: string, sentence: string, sense?: SenseHint) {
     ? `Target sense: "${sense.def}"${sense.chn ? ` (中文: ${sense.chn})` : ""}.`
     : "Target sense: most common.";
   return [
-    "You are a strict but kind English writing tutor for a Chinese B2 learner.",
+    "You are an English LANGUAGE COACH (not a grammar checker) for a Chinese",
+    "B2 learner who is preparing for IELTS speaking. Your goal is to help",
+    "the learner sound MORE NATIVE — not merely to verify that a sentence",
+    "is parseable.",
+    "",
     `Target word: "${lemma}". ${senseLine}`,
     `Learner's sentence: """${sentence}"""`,
-    "Your job:",
-    "1) Decide if the sentence (a) uses the target word in the requested sense,",
-    "   (b) is grammatically natural English. If both are true, set ok=true.",
-    "   IMPORTANT: any inflected form of the target word counts as using it,",
-    "   including plurals, past tense, past participle, gerund, and irregular",
-    `   forms (e.g. "ran" for "run", "children" for "child"). Do NOT reject a`,
-    "   sentence merely because the user wrote an inflection rather than the",
-    "   bare lemma.",
-    "2) If anything is wrong, produce a segment list that, when concatenated by .text,",
-    "   reproduces the original sentence VERBATIM. Mark the broken segments with",
-    "   {wrong:true, fix:'<the corrected words>'}. Keep correct stretches as plain",
-    "   {text:'…'} segments.",
-    "3) Provide one short Chinese sentence in `reason` explaining the verdict.",
-    "Reply with ONLY a JSON object, no markdown:",
-    '{ "ok": true|false, "reason": "<中文>", "segments": [ {"text":"…"}, {"text":"…","wrong":true,"fix":"…"} ] }',
+    "",
+    "TWO-TIER VERDICT (no middle ground):",
+    "  - ok=true  → A native speaker WOULD ACTUALLY SAY THIS sentence.",
+    "                It is grammatical, idiomatic, and uses the target word",
+    "                in the requested sense. The bar is NOT \"the best",
+    "                possible phrasing\" — it is \"a phrasing a native would",
+    "                naturally produce in casual speech\". If yes, ok=true.",
+    "                In this case `recommended` MAY be IDENTICAL to the",
+    "                learner's sentence; only suggest an upgrade if there",
+    "                is a clearly more idiomatic / higher-register version",
+    "                worth teaching. You MUST NOT mark any segments as",
+    "                wrong (segments = [{text: <whole original>}]).",
+    "  - ok=false → ANY of: real grammar bug, wrong sense of the target",
+    "                word, wrong part of speech, missing/extra article on",
+    "                a countable noun, broken collocation, or a phrasing",
+    "                native speakers would NOT produce. \"Slightly less",
+    "                elegant than the optimum\" is NOT a reason for false.",
+    "                Mark the broken segments and propose a native-quality",
+    "                `recommended` rewrite.",
+    "",
+    "ANTI-NITPICK GUARD (read carefully):",
+    "  The learner often resubmits sentences that you yourself recommended",
+    "  in a previous turn. You are stateless across turns, so don't assume",
+    "  context — just judge each sentence on its own merits. Crucially, if",
+    "  a sentence is already in the \"native would say this\" zone, you",
+    "  MUST return ok=true even though some other phrasing might score",
+    "  half a point higher on style. Do not chain endless micro-upgrades.",
+    "  Concrete anchors:",
+    '    - "I like listening to symphonies."        → ok=true (native says this)',
+    '    - "I enjoy listening to classical music."  → ok=true',
+    '    - "I like to listen to symphony."          → ok=false (countable-noun bug)',
+    '    - "I am interesting in music."             → ok=false (wrong adjective form)',
+    "",
+    "INFLECTIONS: any inflected form of the target word counts as using it",
+    "(plurals, past tense, gerund, irregular forms — e.g. \"ran\" for \"run\").",
+    "Do NOT reject merely because the user wrote an inflection.",
+    "",
+    "OUTPUT — produce all of the following:",
+    "  recommended      : the most natural English sentence for this idea.",
+    "                     When ok=true, this MAY be identical to the",
+    "                     learner's sentence; ONLY suggest a different",
+    "                     wording if it is clearly more idiomatic or",
+    "                     teaches a useful higher-register option. Don't",
+    "                     invent micro-upgrades just to fill the field.",
+    "                     When ok=false, this is your native-quality",
+    "                     rewrite. Keep it CLOSE to what the learner",
+    "                     tried to say — don't change the topic.",
+    "  recommendedAlt   : (optional) one additional option in a DIFFERENT",
+    "                     register or with a different common collocation.",
+    "                     Skip if there is no genuinely useful alternative.",
+    "  segments         : ordered diff over the ORIGINAL sentence. Concatenating",
+    "                     each .text MUST reproduce the original verbatim.",
+    "                     When ok=false, mark broken stretches with",
+    "                     {wrong:true, fix:'<corrected words>'} and keep",
+    "                     correct stretches as plain {text:'…'}.",
+    "                     When ok=true, output a single segment containing",
+    "                     the whole original sentence and no `wrong` flag.",
+    "  diagnosis        : array of 1–2 SHORT Chinese sentences, each explaining",
+    "                     ONE concrete language point — e.g. countability,",
+    "                     article rule, tense, collocation. Cite the offending",
+    "                     word in English in backticks. Example:",
+    '                     "`symphony` 是可数名词，泛指这类作品时用复数 `symphonies`，指某一首时用 `a symphony`。"',
+    "                     When ok=true and `recommended` equals the original,",
+    "                     `diagnosis` MAY be an empty array []. When ok=true",
+    "                     with a different `recommended`, give 1 sentence",
+    "                     explaining WHY the upgrade sounds more natural.",
+    "  distinction      : (optional) a SINGLE Chinese sentence distinguishing",
+    "                     two confusable words/phrases that are relevant to",
+    "                     this sentence (e.g. symphony vs classical music).",
+    "                     Format: \"`A` = …；`B` = …\". Skip if not useful.",
+    "  ielts            : (optional, but encouraged) ONE English sample",
+    "                     sentence at IELTS Band 7+ level that the learner",
+    "                     could reuse in IELTS speaking, built around the",
+    "                     same topic and the target word. Keep it natural,",
+    "                     not over-decorated.",
+    "",
+    "STRICT RULES:",
+    "  (R1) Be CONCISE. Each diagnosis item is one sentence. No bullet",
+    "       lists in any field, no markdown, no headings.",
+    "  (R2) Do NOT correct stylistic preferences. Only flag things a native",
+    "       speaker would actually say differently.",
+    "  (R3) When ok=false, the `wrong` segments must be MINIMAL — just the",
+    "       offending span, not the whole clause.",
+    "  (R4) `recommended` must keep the target word (or its inflection).",
+    "       Do not silently swap the target word out.",
+    "  (R5) Never invent a `distinction` just to fill the field. Skip it",
+    "       when there's no real confusable-word issue here.",
+    "  (R6) NO RECURSIVE PERFECTIONISM. If the learner's sentence is",
+    "       already in the native-acceptable zone, return ok=true and let",
+    "       `recommended` equal the original. Do not chase ever-more",
+    "       optimal phrasings turn after turn — that breaks the learner's",
+    "       flow and makes ok=true unreachable.",
+    "  (R7) When ok=true and you have nothing genuinely useful to teach,",
+    "       it is OK to skip `diagnosis`, `distinction`, and `ielts` (or",
+    "       send them as empty/absent). Silence is better than noise.",
+    "",
+    "Reply with ONLY a JSON object, no markdown, no commentary:",
+    "{",
+    '  "ok": true|false,',
+    '  "recommended": "<one English sentence>",',
+    '  "recommendedAlt": "<optional English sentence>",',
+    '  "segments": [{"text":"…"}, {"text":"…","wrong":true,"fix":"…"}],',
+    '  "diagnosis": ["<中文一句>", "<中文一句>"],',
+    '  "distinction": "<optional 中文一句>",',
+    '  "ielts": "<optional English sentence>"',
+    "}",
   ].join("\n");
 }
 
@@ -118,17 +226,13 @@ function extractJson(s: string): string | null {
 }
 
 /**
- * Mock heuristic correction:
- *   - Accept if the lemma appears as a whole word in any inflected form.
- *     We use wink-lemmatizer to reduce every word in the sentence to its
- *     base form (noun/verb/adjective) and compare against the target lemma,
- *     so "children" matches "child", "ran" matches "run", "happiest"
- *     matches "happy", etc. The previous regex only caught the regular
- *     `+s/es/ed/ing/d` suffix family and missed irregular forms entirely.
- *   - Otherwise mark the whole sentence wrong and suggest a templated fix.
+ * Mock heuristic correction (no API key path):
+ *   - If the lemma appears in any inflected form, treat as "good" with a
+ *     templated upgrade.
+ *   - Otherwise mark the whole sentence wrong.
  *
- * This isn't trying to be smart — it just exercises every code path on the
- * UI side so the real DeepSeek integration plugs in cleanly later.
+ * This isn't smart — it only exercises every UI code path so we can verify
+ * the new coach-style layout end-to-end.
  */
 interface Lemmatizer {
   noun: (s: string) => string;
@@ -156,15 +260,12 @@ function sentenceMentionsLemma(
   lem: Lemmatizer | null,
 ): boolean {
   const target = lemma.toLowerCase();
-  // Fast path: regular inflection regex still wins for common cases and avoids
-  // the lemmatizer's slight imprecision on already-base verbs.
   const re = new RegExp(
     `\\b${target.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}(s|es|ed|ing|d)?\\b`,
     "i",
   );
   if (re.test(sentence)) return true;
   if (!lem) return false;
-  // Slow path: lemmatize each word and compare.
   const words = sentence.toLowerCase().match(/[a-z][a-z'-]*/g) ?? [];
   for (const w of words) {
     try {
@@ -195,20 +296,71 @@ async function mockCorrect(
   if (sentenceMentionsLemma(lemma, sentence, lem) && sentence.trim().length > 5) {
     return {
       ok: true,
-      reason: `用法看起来没问题，符合「${sense?.chn ?? lemma}」的释义。`,
+      recommended: sentence,
       segments: [{ text: sentence }],
+      diagnosis: [
+        `用法看起来没问题，符合「${sense?.chn ?? lemma}」的释义。（mock 模式未提供升级版本）`,
+      ],
       provider: "mock",
     };
   }
-  // Try to point at the missing-word slot.
   return {
     ok: false,
-    reason: `句子里没有出现 "${lemma}"（或任何词形变化），建议改写。`,
+    recommended: `She decided to ${lemma} the project.`,
     segments: [
       { text: sentence, wrong: true, fix: `She decided to ${lemma} the project.` },
     ],
+    diagnosis: [`句子里没有出现 \`${lemma}\`（或任何词形变化），建议改写。`],
     provider: "mock",
   };
+}
+
+/** Sanitise the model's JSON into a strict ResponseBody. */
+function normaliseResponse(parsed: unknown, sentence: string): Omit<ResponseBody, "provider"> {
+  const p = (parsed ?? {}) as Record<string, unknown>;
+  const ok = Boolean(p.ok);
+  const recommended =
+    typeof p.recommended === "string" && p.recommended.trim()
+      ? p.recommended.trim()
+      : sentence;
+  const recommendedAlt =
+    typeof p.recommendedAlt === "string" && p.recommendedAlt.trim()
+      ? p.recommendedAlt.trim()
+      : undefined;
+  const segments: Segment[] = Array.isArray(p.segments)
+    ? (p.segments as unknown[])
+        .map((s) => {
+          const seg = (s ?? {}) as Record<string, unknown>;
+          return {
+            text: String(seg.text ?? ""),
+            wrong: Boolean(seg.wrong),
+            fix: seg.fix !== undefined ? String(seg.fix) : undefined,
+          };
+        })
+        .filter((s) => s.text.length > 0)
+    : [{ text: sentence }];
+  // If the model said ok=true but accidentally left wrong segments, scrub them.
+  if (ok) {
+    for (const s of segments) {
+      s.wrong = false;
+      s.fix = undefined;
+    }
+  }
+  const diagnosis: string[] = Array.isArray(p.diagnosis)
+    ? (p.diagnosis as unknown[])
+        .map((x) => String(x ?? "").trim())
+        .filter((x) => x.length > 0)
+        .slice(0, 3)
+    : [];
+  const distinction =
+    typeof p.distinction === "string" && p.distinction.trim()
+      ? p.distinction.trim()
+      : undefined;
+  const ielts =
+    typeof p.ielts === "string" && p.ielts.trim()
+      ? p.ielts.trim()
+      : undefined;
+  return { ok, recommended, recommendedAlt, segments, diagnosis, distinction, ielts };
 }
 
 async function callDeepseek(
@@ -227,8 +379,8 @@ async function callDeepseek(
     body: JSON.stringify({
       model: CHAT_MODEL,
       messages: [{ role: "user", content: prompt }],
-      temperature: 0.3,
-      max_tokens: 360,
+      temperature: 0.2,
+      max_tokens: 600,
     }),
   });
   if (!res.ok) {
@@ -241,25 +393,8 @@ async function callDeepseek(
   const content = data.choices?.[0]?.message?.content ?? "";
   const jsonStr = extractJson(content);
   if (!jsonStr) throw new Error(`deepseek returned non-JSON: ${content.slice(0, 200)}`);
-  const parsed = JSON.parse(jsonStr) as Partial<ResponseBody>;
-  const segments = Array.isArray(parsed.segments)
-    ? parsed.segments
-        .map((s) => ({
-          text: String((s as Segment).text ?? ""),
-          wrong: Boolean((s as Segment).wrong),
-          fix:
-            (s as Segment).fix !== undefined
-              ? String((s as Segment).fix)
-              : undefined,
-        }))
-        .filter((s) => s.text.length > 0)
-    : [{ text: sentence }];
-  return {
-    ok: Boolean(parsed.ok),
-    reason: String(parsed.reason ?? ""),
-    segments,
-    provider: "deepseek",
-  };
+  const parsed = JSON.parse(jsonStr) as unknown;
+  return { ...normaliseResponse(parsed, sentence), provider: "deepseek" };
 }
 
 export async function POST(req: Request): Promise<Response> {

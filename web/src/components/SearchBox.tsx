@@ -151,8 +151,8 @@ export default function SearchBox({
       : "w-full bg-transparent text-sm outline-none placeholder:text-[var(--fg-soft)]";
   const wrapperClass =
     size === "lg"
-      ? "rounded-xl border border-[var(--border)] bg-[var(--bg-soft)] px-4 py-3 transition focus-within:border-[var(--accent)]"
-      : "rounded-md border border-[var(--border)] bg-[var(--bg-soft)] px-3 py-1.5 transition focus-within:border-[var(--accent)]";
+      ? "rounded-2xl border border-[#9dbecd] bg-white/94 px-4 py-3 shadow-[0_10px_22px_rgba(70,105,122,0.16)] transition focus-within:border-[var(--accent)]"
+      : "rounded-[14px] border border-[#9dbecd] bg-white/92 px-3 py-1.5 shadow-[0_8px_18px_rgba(70,105,122,0.14)] transition focus-within:border-[var(--accent)]";
 
   return (
     <div ref={wrapperRef} className="relative">

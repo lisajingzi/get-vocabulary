@@ -127,6 +127,12 @@ interface CandidateBucket {
  * or weird lemma), returns null and the caller should fall back to a
  * different review style (e.g. spelling).
  */
+export interface ChoiceGloss {
+  pos?: string;
+  def?: string;
+  chn?: string;
+}
+
 export interface SynonymQuestion {
   target: string;
   /** Definition / gloss shown above the choices to ground the user. */
@@ -135,6 +141,13 @@ export interface SynonymQuestion {
   choices: string[];
   /** Index in `choices` that is the "correct" near-synonym. */
   answerIndex: number;
+  /** Per-choice gloss, keyed by lemma. Populated for ALL 4 choices so the
+   *  answer-explanation panel can show "what each option meant" without
+   *  re-fetching the dictionary. */
+  glossMap: Record<string, ChoiceGloss>;
+  /** Tokens (中文 2-char) that target & correct answer share — used to
+   *  surface "why these two are similar" in the explanation panel. */
+  sharedTokens: string[];
 }
 
 export async function buildSynonymQuestion(
@@ -143,6 +156,12 @@ export async function buildSynonymQuestion(
   const target = targetLemma.toLowerCase();
   const targetLookup = await lookup(target);
   if (!targetLookup) return null;
+  // If the user's lemma is a derived/inflected form (e.g. "arousal" → "arouse"),
+  // the dict's `senses` belong to the BASE lemma, not the user's word. Using
+  // `senses[0]` here would surface the wrong part of speech AND the wrong
+  // gloss (verb "激起" instead of noun "激起、唤醒"). Skip the synonym quiz
+  // entirely in that case — ReviewView falls back to a compose-only flow.
+  if (targetLookup.redirected) return null;
   const targetEntry = targetLookup.entry;
   const primary = targetEntry.senses[0];
   if (!primary) return null;
@@ -155,6 +174,9 @@ export async function buildSynonymQuestion(
   const shardEntries = await _loadShard(shardKey);
 
   const candidates: CandidateBucket[] = [];
+  // Also remember each candidate's English def so the explanation panel can
+  // show "错选词是什么意思" without a second dict lookup.
+  const defByLemma = new Map<string, string | undefined>();
   for (const [lemma, rec] of Object.entries(shardEntries)) {
     if (lemma === target) continue;
     if ("alias_of" in rec) continue;
@@ -168,6 +190,7 @@ export async function buildSynonymQuestion(
     }
     if (score > 0) {
       candidates.push({ lemma, pos: sense.pos ?? "", score, chn: sense.chn });
+      defByLemma.set(lemma, sense.def);
     }
   }
 
@@ -211,10 +234,41 @@ export async function buildSynonymQuestion(
     [all[i], all[j]] = [all[j], all[i]];
   }
   const answerIndex = all.findIndex((c) => c.lemma === correct.lemma);
+
+  // Build the per-choice gloss map. Distractors picked from the user's
+  // wordbook fallback path won't have chn populated here; resolve those
+  // via a fresh dict lookup so the explanation panel still gets data.
+  const glossMap: Record<string, ChoiceGloss> = {};
+  for (const c of all) {
+    let chn = c.chn;
+    let def = defByLemma.get(c.lemma);
+    let pos = c.pos;
+    if (!chn) {
+      // fallback path: candidate came from getKnownLemmaSet without sense info
+      const got = await lookup(c.lemma);
+      const s = got?.entry.senses[0];
+      chn = s?.chn ?? "";
+      def = s?.def;
+      pos = s?.pos ?? pos;
+    }
+    glossMap[c.lemma] = { pos: pos || undefined, def, chn: chn || undefined };
+  }
+
+  // Tokens shared by target & correct answer — the "why they're synonyms"
+  // surface area. Limited to a handful so the UI stays compact.
+  const correctTokens = new Set(chineseTokens(correct.chn));
+  const sharedTokens: string[] = [];
+  targetTokens.forEach((tok) => {
+    if (sharedTokens.length >= 4) return;
+    if (correctTokens.has(tok)) sharedTokens.push(tok);
+  });
+
   return {
     target,
     prompt: { def: primary.def, chn: primary.chn, pos: primary.pos },
     choices: all.map((c) => c.lemma),
     answerIndex,
+    glossMap,
+    sharedTokens,
   };
 }
