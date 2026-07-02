@@ -3,24 +3,26 @@
 /**
  * <SpeakButton /> — speaks an English word/phrase aloud.
  *
- * Strategy (tries in order, falls back on failure):
- *   1. **YouDao MP3** — `https://dict.youdao.com/dictvoice?audio=<text>&type=<1|2>`
+ * Strategy (tries in order, shows toast on failure — never falls back to
+ * the robotic Web Speech API, per product decision):
+ *   1. **Word / short phrase** → YouDao MP3
+ *      `https://dict.youdao.com/dictvoice?audio=<text>&type=<1|2>`
  *      Real human recordings, free, no API key. type=1 = UK, type=2 = US.
  *      Best quality for single words and common phrases.
- *   2. **Web Speech API** — system TTS as a robust fallback
- *      (used for offline, network errors, or sentences too long for the
- *      YouDao endpoint to have a recording for).
+ *   2. **Sentence** → local IndexedDB cache → `/api/tts` (Edge Neural TTS,
+ *      voice=en-US-JennyNeural, server retries once internally). Cached
+ *      MP3s replay instantly and offline.
+ *   3. **On failure** → toast "朗读失败，请稍后重试". No mechanical fallback.
  *
  * Implementation notes:
  *   - We reuse a single <Audio> element to avoid GC churn.
- *   - YouDao only reliably has recordings for words/short phrases. For
- *     anything containing whitespace longer than ~6 tokens we go straight
- *     to TTS — saves a wasted round-trip.
- *   - SpeechSynthesis voice picking still uses voiceschanged event so
- *     Chrome's lazy voice list works.
+ *   - YouDao only reliably has recordings for words/short phrases. Anything
+ *     with >6 tokens or >60 chars is treated as a sentence and skips YouDao.
  */
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { getCachedTTS, putCachedTTS } from "@/lib/tts/cache";
+import { toast } from "@/components/Toast";
 
 interface Props {
   text: string;
@@ -33,6 +35,10 @@ interface Props {
 }
 
 const YOUDAO_BASE = "https://dict.youdao.com/dictvoice";
+
+/** Neural voices for our /api/tts endpoint. */
+const NEURAL_VOICE_US = "en-US-JennyNeural";
+const NEURAL_VOICE_UK = "en-GB-SoniaNeural";
 
 function buildYouDaoUrl(text: string, variant: "uk" | "us"): string {
   // type=1 → UK English, type=2 → US English
@@ -48,27 +54,27 @@ function shouldSkipYouDao(text: string): boolean {
   return tokens.length > 6 || trimmed.length > 60;
 }
 
-function pickVoice(
-  voices: SpeechSynthesisVoice[],
-  variant: "uk" | "us",
-): SpeechSynthesisVoice | null {
-  if (voices.length === 0) return null;
-  const wantPrefix = variant === "uk" ? "en-GB" : "en-US";
-  const exact = voices.find((v) => v.lang === wantPrefix);
-  if (exact) return exact;
-  const prefix = voices.find((v) => v.lang.startsWith(wantPrefix.slice(0, 2)));
-  return prefix ?? voices[0];
+/** Show a user-facing failure toast. Kept in one place so wording is consistent. */
+function notifyFailure() {
+  toast("朗读失败，请稍后重试");
 }
 
-function speakViaTTS(text: string, variant: "uk" | "us", voice: SpeechSynthesisVoice | null) {
-  if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-  if (!text.trim()) return;
-  window.speechSynthesis.cancel();
-  const utt = new SpeechSynthesisUtterance(text);
-  utt.lang = variant === "uk" ? "en-GB" : "en-US";
-  utt.rate = 0.95;
-  if (voice) utt.voice = voice;
-  window.speechSynthesis.speak(utt);
+/** Fetch MP3 bytes from /api/tts. Returns null on any failure. */
+async function fetchNeuralMP3(
+  text: string,
+  voice: string,
+): Promise<ArrayBuffer | null> {
+  try {
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice }),
+    });
+    if (!res.ok) return null;
+    return await res.arrayBuffer();
+  } catch {
+    return null;
+  }
 }
 
 export default function SpeakButton({
@@ -78,77 +84,154 @@ export default function SpeakButton({
   className,
   children,
 }: Props) {
-  const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  // Track blob URLs we mint so we can revoke them and avoid a memory leak
+  // when the component unmounts or plays a different sentence.
+  const blobUrlRef = useRef<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
+  // Clean up the last blob URL when unmounting so we don't leak.
   useEffect(() => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    const update = () => {
-      voiceRef.current = pickVoice(
-        window.speechSynthesis.getVoices(),
-        variant,
-      );
-    };
-    update();
-    window.speechSynthesis.onvoiceschanged = update;
     return () => {
-      window.speechSynthesis.onvoiceschanged = null;
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
     };
-  }, [variant]);
+  }, []);
 
-  const speak = useCallback(() => {
-    if (typeof window === "undefined") return;
-    const trimmed = text.trim();
-    if (!trimmed) return;
-
-    // Cancel any pending TTS so playback feels snappy when hammered.
-    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-
-    // Long sentence → skip YouDao, go straight to system TTS.
-    if (shouldSkipYouDao(trimmed)) {
-      speakViaTTS(trimmed, variant, voiceRef.current);
-      return;
-    }
-
-    // Try YouDao real-human MP3 first.
+  /** Play a Blob (MP3) through the shared <audio> element. */
+  const playBlob = useCallback((blob: Blob) => {
     if (!audioRef.current) {
       audioRef.current = new Audio();
       audioRef.current.preload = "auto";
     }
+    // Revoke the previous URL, if any, before minting a new one.
+    if (blobUrlRef.current) {
+      URL.revokeObjectURL(blobUrlRef.current);
+    }
+    const url = URL.createObjectURL(blob);
+    blobUrlRef.current = url;
     const audio = audioRef.current;
     audio.pause();
-    audio.src = buildYouDaoUrl(trimmed, variant);
 
+    // Wire an error handler so a malformed MP3 doesn't fail silently.
     const onError = () => {
-      cleanup();
-      speakViaTTS(trimmed, variant, voiceRef.current);
-    };
-    const cleanup = () => {
+      console.warn(
+        `[tts] audio playback error (mediaError=${audio.error?.code ?? "?"})`,
+      );
       audio.removeEventListener("error", onError);
     };
     audio.addEventListener("error", onError, { once: true });
 
-    const playPromise = audio.play();
-    if (playPromise && typeof playPromise.then === "function") {
-      playPromise.catch(() => {
-        cleanup();
-        speakViaTTS(trimmed, variant, voiceRef.current);
+    audio.src = url;
+    const p = audio.play();
+    if (p && typeof p.catch === "function") {
+      p.catch((err) => {
+        console.warn("[tts] audio.play() rejected:", err?.message ?? err);
       });
     }
-  }, [text, variant]);
+  }, []);
+
+  const speak = useCallback(async () => {
+    if (typeof window === "undefined") return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    // Cancel any lingering Web Speech utterance from earlier versions of
+    // the app — cheap safety net, doesn't hurt if none is queued.
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+
+    // ── Word / short phrase → YouDao real-human recording ───────────────
+    if (!shouldSkipYouDao(trimmed)) {
+      if (!audioRef.current) {
+        audioRef.current = new Audio();
+        audioRef.current.preload = "auto";
+      }
+      const audio = audioRef.current;
+      // If the previous src was a blob URL, revoke it before overwriting.
+      if (blobUrlRef.current) {
+        URL.revokeObjectURL(blobUrlRef.current);
+        blobUrlRef.current = null;
+      }
+      audio.pause();
+      audio.src = buildYouDaoUrl(trimmed, variant);
+
+      const onError = () => {
+        cleanup();
+        console.warn(`[tts] YouDao playback failed for: "${trimmed}"`);
+        notifyFailure();
+      };
+      const cleanup = () => {
+        audio.removeEventListener("error", onError);
+      };
+      audio.addEventListener("error", onError, { once: true });
+
+      const playPromise = audio.play();
+      if (playPromise && typeof playPromise.then === "function") {
+        playPromise.catch((err) => {
+          cleanup();
+          console.warn(
+            `[tts] YouDao play() rejected: ${err?.message ?? err}`,
+          );
+          notifyFailure();
+        });
+      }
+      return;
+    }
+
+    // ── Sentence → IndexedDB cache → /api/tts → toast on failure ────────
+    const neuralVoice =
+      variant === "uk" ? NEURAL_VOICE_UK : NEURAL_VOICE_US;
+    const preview = trimmed.slice(0, 40);
+
+    // 1. Try local cache first — instant, offline-capable.
+    const cached = await getCachedTTS(neuralVoice, trimmed);
+    if (cached) {
+      console.debug(`[tts] cache hit (${neuralVoice}): "${preview}..."`);
+      playBlob(cached);
+      return;
+    }
+
+    // 2. Fetch from /api/tts (server retries once internally). Show a busy
+    //    indicator so the user knows something is happening — cold requests
+    //    can take 1-2s, and up to ~16s in the retry-worst-case.
+    console.debug(`[tts] cache miss, fetching /api/tts: "${preview}..."`);
+    setBusy(true);
+    try {
+      const bytes = await fetchNeuralMP3(trimmed, neuralVoice);
+      if (bytes && bytes.byteLength > 0) {
+        console.debug(
+          `[tts] /api/tts ok (${bytes.byteLength}B), playing: "${preview}..."`,
+        );
+        // Persist for next time (best effort — ignore failures).
+        void putCachedTTS(neuralVoice, trimmed, bytes.slice(0));
+        playBlob(new Blob([bytes], { type: "audio/mpeg" }));
+        return;
+      }
+      // 3. Neural TTS still unreachable after server-side retry → toast.
+      //    We deliberately do NOT fall back to Web Speech (mechanical voice).
+      console.warn(`[tts] /api/tts failed after retries: "${preview}..."`);
+      notifyFailure();
+    } finally {
+      setBusy(false);
+    }
+  }, [text, variant, playBlob]);
 
   return (
     <button
       type="button"
       onClick={speak}
+      disabled={busy}
       title={title ?? `朗读 (${variant === "uk" ? "英" : "美"}音)`}
       className={
         className ??
-        "inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--fg-soft)] transition hover:bg-[var(--bg-soft)] hover:text-[var(--accent)]"
+        "inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--fg-soft)] transition hover:bg-[var(--bg-soft)] hover:text-[var(--accent)] disabled:cursor-progress disabled:opacity-60"
       }
       aria-label={`朗读 ${text}`}
+      aria-busy={busy || undefined}
     >
-      {children ?? "🔊"}
+      {children ?? (busy ? "…" : "🔊")}
     </button>
   );
 }
