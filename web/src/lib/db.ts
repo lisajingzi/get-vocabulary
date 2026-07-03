@@ -14,6 +14,12 @@
  *   tts-cache     Cached MP3 blobs from /api/tts, keyed by "<voice>|<text>"
  *                 so the second click on the same sentence is instant and
  *                 doesn't re-hit the network.
+ *   syn-shards    Offline near-synonym table shards (key = "a".."z"|"other").
+ *                 Value = { lemma → { pos → string[] } }.
+ *   syn-ai        AI-fallback synonyms for lemmas absent from syn-shards
+ *                 (key = lemma, value = { pos → string[] }). Fetched at most
+ *                 once per lemma; the mock provider result is also cached
+ *                 (harmless; we just retry next session if it was empty).
  *
  * Bump DB_VERSION whenever you add or rename a store; remember the upgrade
  * callback runs once per version step, so it must stay idempotent.
@@ -22,12 +28,14 @@
 import { openDB, type IDBPDatabase } from "idb";
 
 export const DB_NAME = "get-dict";
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 
 export const STORE_META = "meta";
 export const STORE_SHARD = "shards";
 export const STORE_AI_EXAMPLES = "ai-examples";
 export const STORE_TTS_CACHE = "tts-cache";
+export const STORE_SYN_SHARD = "syn-shards";
+export const STORE_SYN_AI = "syn-ai";
 
 let dbPromise: Promise<IDBPDatabase> | null = null;
 
@@ -50,6 +58,14 @@ export function getAppDb(): Promise<IDBPDatabase> {
         if (!db.objectStoreNames.contains(STORE_TTS_CACHE)) {
           // Value = ArrayBuffer (MP3 bytes). Key = "<voice>|<text>".
           db.createObjectStore(STORE_TTS_CACHE);
+        }
+        if (!db.objectStoreNames.contains(STORE_SYN_SHARD)) {
+          // Value = { lemma → { pos → string[] } }. Key = shard letter.
+          db.createObjectStore(STORE_SYN_SHARD);
+        }
+        if (!db.objectStoreNames.contains(STORE_SYN_AI)) {
+          // Value = { pos → string[] }. Key = target lemma.
+          db.createObjectStore(STORE_SYN_AI);
         }
       },
     });

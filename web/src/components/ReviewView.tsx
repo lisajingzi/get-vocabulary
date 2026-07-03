@@ -9,15 +9,25 @@
  *                  │                                   ╲
  *                  └─fail (retry until correct)         ─grade not ok─→ stays in compose
  *
+ *              or
+ *
+ *   loading   →   spell  ─pass─→   compose   ─…
+ *                  │
+ *                  └─fail (retry until correct, marks failedOnce)
+ *
+ * The `spell` phase kicks in when the offline WordNet table has no usable
+ * synonym for the target lemma — rather than showing dubious "synonyms"
+ * we test recall via spelling. The user hears the word, types it, and
+ * we advance on an exact match.
+ *
  *   advance(pass) writes recordReview('pass'), bumps level, schedules next due,
  *   then moves to the next queue entry. If the queue is empty we land on
  *   the "done" screen.
  *
  *   advance(fail) only fires when the user couldn't pick the right synonym
- *   (we re-prompt until they get it right, per spec). The "lose a level"
- *   event happens once per item, regardless of how many wrong picks they
- *   made on the way to the right answer — that matches the user's brief:
- *   "失败一次退回一级".
+ *   (or spell the target). The "lose a level" event happens once per item,
+ *   regardless of how many wrong attempts they made — that matches the
+ *   user's brief: "失败一次退回一级".
  */
 
 import Link from "next/link";
@@ -40,6 +50,7 @@ type Phase =
   | { kind: "loading" }
   | { kind: "empty" }
   | { kind: "quiz"; q: SynonymQuestion; failedOnce: boolean }
+  | { kind: "spell"; target: string; failedOnce: boolean }
   | {
       kind: "compose";
       target: string;
@@ -113,14 +124,10 @@ export default function ReviewView() {
     setPhase({ kind: "loading" });
     const q = await buildSynonymQuestion(lemma);
     if (!q) {
-      // Fallback: skip directly to the compose phase using whatever sense
-      // info we can read off the first sense; the user still gets value.
-      setPhase({
-        kind: "compose",
-        target: lemma,
-        prompt: { def: undefined, chn: undefined, pos: undefined },
-        failedOnce,
-      });
+      // Offline synonym table has nothing usable for this lemma — typically
+      // a concrete noun ("quarry", "anvil") or a rare adjective. Instead
+      // of teaching the user a fake "synonym", we test recall via spelling.
+      setPhase({ kind: "spell", target: lemma, failedOnce });
       return;
     }
     setPhase({ kind: "quiz", q, failedOnce });
@@ -197,6 +204,30 @@ export default function ReviewView() {
           }
         />
       )}
+      {phase.kind === "spell" && (
+        <SpellPanel
+          target={phase.target}
+          failedOnce={phase.failedOnce}
+          onCorrect={() =>
+            setPhase({
+              kind: "compose",
+              target: phase.target,
+              // We deliberately don't pass a Chinese gloss into the compose
+              // step: showing it turns composing-with-the-word into a
+              // translation exercise. ComposePanel already handles this.
+              prompt: { def: undefined, chn: undefined, pos: undefined },
+              failedOnce: phase.failedOnce,
+            })
+          }
+          onWrong={() =>
+            setPhase({
+              kind: "spell",
+              target: phase.target,
+              failedOnce: true,
+            })
+          }
+        />
+      )}
       {phase.kind === "compose" && (
         <ComposePanel
           target={phase.target}
@@ -244,6 +275,189 @@ function ProgressBar({ current, total }: { current: number; total: number }) {
         />
       </div>
     </div>
+  );
+}
+
+/**
+ * Spelling-recall panel. Rendered when the offline synonym table has no
+ * usable entry for the target lemma, so the near-synonym multiple-choice
+ * quiz can't be constructed. The user hears the word (via <SpeakButton />)
+ * and types it back.
+ *
+ * Design decisions:
+ *   - The prompt intentionally does NOT display the Chinese gloss (per
+ *     spec: "拼写题的题干不要显示中文释义"). The audio is the only cue,
+ *     matching how the user actually needs to recall the word in the wild.
+ *   - Comparison is case-insensitive and whitespace-trimmed, but otherwise
+ *     exact — no fuzzy match, no first-letter hints. Getting close doesn't
+ *     count. This is a recall test.
+ *   - On wrong answers we surface the correct spelling AND the target's
+ *     Chinese gloss (safe now — the recall attempt is over) so the user
+ *     still learns something before advancing.
+ *   - The compose step that follows does the real "prove you understand
+ *     the meaning" work, so a wrong spelling here just means they see the
+ *     word first and then compose with it.
+ */
+function SpellPanel({
+  target,
+  failedOnce,
+  onCorrect,
+  onWrong,
+}: {
+  target: string;
+  failedOnce: boolean;
+  onCorrect: () => void;
+  onWrong: () => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [feedback, setFeedback] = useState<"right" | "wrong" | null>(null);
+  const [gloss, setGloss] = useState<{
+    pos?: string;
+    def?: string;
+    chn?: string;
+  } | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Reset every time the target changes (retry after wrong answer, or the
+  // outer queue moves us to a new lemma).
+  useEffect(() => {
+    setDraft("");
+    setFeedback(null);
+    setGloss(null);
+    inputRef.current?.focus();
+  }, [target]);
+
+  // Lazy-load the gloss for the "you got it wrong" and "you got it right"
+  // reveal panels. Cheap: `lookup` is memoised at the shard level.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const { lookup } = await import("@/lib/dict");
+      const got = await lookup(target);
+      if (cancelled) return;
+      const s = got?.entry.senses?.[0];
+      setGloss(s ? { pos: s.pos, def: s.def, chn: s.chn } : null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [target]);
+
+  function submit() {
+    const guess = draft.trim().toLowerCase();
+    if (!guess) return;
+    if (guess === target.toLowerCase()) {
+      setFeedback("right");
+    } else {
+      setFeedback("wrong");
+      onWrong();
+    }
+  }
+
+  function retry() {
+    setDraft("");
+    setFeedback(null);
+    inputRef.current?.focus();
+  }
+
+  return (
+    <section className="space-y-4 rounded-xl border border-[var(--border)] p-4">
+      <header className="space-y-1">
+        <div className="flex items-center gap-2">
+          <h2 className="text-2xl font-semibold tracking-tight">
+            <span aria-hidden>＿＿＿＿</span>
+          </h2>
+          <SpeakButton text={target} variant="us" />
+        </div>
+        <p className="pt-2 text-xs text-[var(--fg-soft)]">
+          请听音后拼写出这个单词：
+        </p>
+      </header>
+
+      <div className="flex items-center gap-2">
+        <input
+          ref={inputRef}
+          type="text"
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="none"
+          spellCheck={false}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              if (feedback === "right") onCorrect();
+              else if (feedback === "wrong") retry();
+              else submit();
+            }
+          }}
+          disabled={feedback === "right"}
+          placeholder="在此输入…"
+          className="flex-1 rounded-md border border-[var(--border)] bg-transparent px-3 py-2 text-base outline-none focus:border-[var(--accent)] disabled:opacity-60"
+        />
+        {feedback === "right" ? (
+          <button
+            type="button"
+            onClick={onCorrect}
+            className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-2 text-xs text-white transition hover:opacity-90"
+          >
+            下一步 →
+          </button>
+        ) : feedback === "wrong" ? (
+          <button
+            type="button"
+            onClick={retry}
+            className="rounded-md border border-[var(--border)] px-3 py-2 text-xs transition hover:border-[var(--accent)]"
+          >
+            再试一次
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!draft.trim()}
+            className="rounded-md border border-[var(--border)] px-3 py-2 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            提交
+          </button>
+        )}
+      </div>
+
+      {feedback === "wrong" && (
+        <div className="space-y-1.5 rounded-lg border border-red-200 bg-red-50/60 p-3 text-sm dark:border-red-900/40 dark:bg-red-950/20">
+          <p className="text-xs font-medium text-red-500">拼写不对，再试一次。</p>
+          <p className="text-xs text-[var(--fg-soft)]">
+            提示：仔细再听一遍读音。
+          </p>
+        </div>
+      )}
+
+      {feedback === "right" && (
+        <div className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--bg-soft)]/50 p-3 text-sm">
+          <p className="text-xs font-medium text-[var(--accent)]">
+            拼写正确
+            {failedOnce ? "（本题之前错过一次，本次将算作失败）" : ""}！
+          </p>
+          <div className="space-y-0.5">
+            <div className="flex items-baseline gap-2">
+              <span className="text-base font-semibold">{target}</span>
+              {gloss?.pos && (
+                <span className="text-[10px] text-[var(--fg-soft)]">
+                  ({gloss.pos})
+                </span>
+              )}
+            </div>
+            {gloss?.def && (
+              <p className="text-xs text-[var(--fg)]">{gloss.def}</p>
+            )}
+            {gloss?.chn && (
+              <p className="text-xs text-[var(--fg-soft)]">{gloss.chn}</p>
+            )}
+          </div>
+        </div>
+      )}
+    </section>
   );
 }
 

@@ -1,132 +1,145 @@
 /**
- * Synonym candidate sourcing for the review quiz (4-choice).
+ * Synonym question generator for the review quiz.
  *
- * The goal isn't to be a real thesaurus — it's to surface 3 *plausible
- * distractors* + 1 correct answer for a given target lemma, so the user
- * has to actually read the definition to pick.
+ * Design (offline-only):
+ *   1. CORRECT ANSWER comes from the offline WordNet-derived table
+ *      `/dict/synonyms-{shard}.json` (built by scripts/build_synonyms.py).
+ *      Every candidate must also exist in the OALD dict so the UI can
+ *      render its Chinese gloss on the answer-explanation panel.
+ *   2. If the offline table has no usable synonym for the target lemma
+ *      (the target is a concrete noun with no true single-word synonym,
+ *      or WordNet's coverage is thin for adjectives, etc.) we return
+ *      null. The caller (<ReviewView />) then falls back to a spelling
+ *      question rather than showing dubious "synonyms" like the previous
+ *      AI-fallback path did — better to test spelling than to teach the
+ *      user a wrong semantic association.
+ *   3. DISTRACTORS come from the same dict shard as the target, biased
+ *      toward same-POS + visually similar (first/last letter, length,
+ *      shared prefix). Never pulled from the user's own wordbook.
  *
- * Strategy (no external thesaurus dependency):
- *   1. Take the target's Chinese gloss(es) for its primary sense.
- *   2. Tokenise into Chinese keywords (drop punctuation + 1-char fillers).
- *   3. Walk the same-letter shard of the dictionary, score every other lemma
- *      by how many of those keywords appear in its own glosses (at least 1
- *      keyword shared, same part of speech preferred).
- *   4. Top-scoring lemma = the "correct" near-synonym; next 3 lemmas with
- *      ≥1 keyword overlap are the distractors.
- *   5. If we can't find enough hits in the same shard, fall back to scanning
- *      the user's own wordbook (still better than random English filler).
- *
- * This runs entirely in the browser against the cached dictionary shards.
- * It's not free (a full shard scan is O(N) where N ≈ 5–20k), but it only
- * fires once per review item and the data is already in IndexedDB / memory.
+ * Everything runs in the browser against cached IDB data — no network.
  */
 
 import { lookup, _loadShard, _shardOfLemma } from "@/lib/dict";
 import type { DictEntry } from "@/lib/types";
-import { getKnownLemmaSet } from "@/lib/wordbook/local";
+import { getAppDb, STORE_SYN_SHARD } from "@/lib/db";
 
-/** Coarse Chinese stopword list — drop these from gloss tokens. */
-const ZH_STOP = new Set([
-  "的",
-  "了",
-  "和",
-  "或",
-  "等",
-  "是",
-  "在",
-  "有",
-  "对",
-  "把",
-  "及",
-  "与",
-  "中",
-  "上",
-  "下",
-  "之",
-  "其",
-  "某",
-  "某人",
-  "某事",
-  "某物",
-  "某种",
-  "做",
-  "使",
-  "让",
-  "被",
-  "向",
-  "从",
-  "为",
-  "以",
-  "给",
-  "一",
-  "二",
-  "三",
-  "个",
-  "用",
-  "经",
-  "已",
-  "便",
-  "可",
-  "要",
-  "会",
-  "能",
-  "得",
-  "起",
-  "出",
-  "进",
-  "去",
-  "来",
-  "到",
-  "过",
-  "如",
-  "使得",
-  "因",
-  "若",
-  "都",
-  "也",
-  "再",
-  "又",
-  "便是",
-]);
+// ---------------------------------------------------------------------------
+// POS normalisation
+// ---------------------------------------------------------------------------
 
-function chineseTokens(gloss: string): string[] {
-  // Strip parentheticals "（…）" and English/punctuation noise; keep CJK runs.
-  const cleaned = gloss
-    .replace(/[（(].*?[)）]/g, " ")
-    .replace(/[\u3000-\u303F\uFF00-\uFFEF]/g, " ")
-    .replace(/[^\u4e00-\u9fff]/g, " ");
-  // Use 1- and 2-char sliding windows; CJK words in OALD glosses are usually
-  // 2 chars (e.g. 离弃 / 抛弃). 1-char windows alone are too noisy to score on.
-  const out = new Set<string>();
-  for (const run of cleaned.split(/\s+/)) {
-    if (!run) continue;
-    for (let i = 0; i < run.length - 1; i++) {
-      const tok = run.slice(i, i + 2);
-      if (!ZH_STOP.has(tok) && !ZH_STOP.has(tok[0]) && !ZH_STOP.has(tok[1])) {
-        out.add(tok);
-      }
-    }
-  }
-  return Array.from(out);
+/** Compact POS tag as stored in synonyms-*.json. */
+type PosShort = "n" | "v" | "adj" | "adv";
+
+/** Map an OALD `senses[i].pos` string to our short tag. Returns null for
+ *  parts of speech we don't ship synonyms for (prep / pron / conj / …). */
+function posToShort(pos: string | undefined): PosShort | null {
+  if (!pos) return null;
+  const p = pos.toLowerCase();
+  if (p.startsWith("noun")) return "n";
+  if (p.startsWith("verb")) return "v";
+  if (p.startsWith("adj")) return "adj";
+  if (p.startsWith("adv")) return "adv";
+  return null;
 }
 
-interface CandidateBucket {
-  lemma: string;
-  pos: string;
-  score: number;
-  chn: string;
+// ---------------------------------------------------------------------------
+// Synonym-shard loading (lazy + IDB-cached)
+// ---------------------------------------------------------------------------
+
+type SynShard = Record<string, Partial<Record<PosShort, string[]>>>;
+
+const synShardCache = new Map<string, SynShard>();
+/** Shard letters that returned 404 during dev, so we don't hammer the network. */
+const missingSynShards = new Set<string>();
+
+async function loadSynShard(shard: string): Promise<SynShard | null> {
+  if (missingSynShards.has(shard)) return null;
+  const cached = synShardCache.get(shard);
+  if (cached) return cached;
+  const db = await getAppDb();
+  const stored = (await db.get(STORE_SYN_SHARD, shard)) as SynShard | undefined;
+  if (stored) {
+    synShardCache.set(shard, stored);
+    return stored;
+  }
+  try {
+    const res = await fetch(`/dict/synonyms-${shard}.json`);
+    if (!res.ok) {
+      missingSynShards.add(shard);
+      return null;
+    }
+    const json = (await res.json()) as SynShard;
+    await db.put(STORE_SYN_SHARD, json, shard);
+    synShardCache.set(shard, json);
+    return json;
+  } catch {
+    missingSynShards.add(shard);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Distractor scoring — visually similar, same POS, not a synonym
+// ---------------------------------------------------------------------------
+
+function firstLetter(s: string): string {
+  return s[0]?.toLowerCase() ?? "";
+}
+function lastLetter(s: string): string {
+  return s[s.length - 1]?.toLowerCase() ?? "";
 }
 
 /**
- * Build a 4-option synonym question for `targetLemma`.
- *
- * Returns the four lemmas (the correct answer + 3 distractors) and which
- * index is correct. The order is shuffled so the UI can render directly.
- *
- * If we genuinely can't source 4 lemmas (very small dictionary cache yet,
- * or weird lemma), returns null and the caller should fall back to a
- * different review style (e.g. spelling).
+ * Score a candidate distractor against the target: higher = better distractor
+ * (more visually / lexically similar to the target lemma). Anything scoring 0
+ * is dropped — we don't want random filler.
  */
+function distractorScore(target: string, cand: string): number {
+  if (target === cand) return 0;
+  const dLen = Math.abs(target.length - cand.length);
+  if (dLen > 3) return 0;
+  let s = 0;
+  if (firstLetter(target) === firstLetter(cand)) s += 3;
+  if (lastLetter(target) === lastLetter(cand)) s += 2;
+  if (dLen === 0) s += 2;
+  else if (dLen === 1) s += 1;
+  // Prefix / suffix overlap of length ≥3 (e.g. "abandon" ↔ "abandoned").
+  const shared = commonPrefix(target, cand);
+  if (shared >= 3) s += shared;
+  return s;
+}
+
+function commonPrefix(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < n && a[i] === b[i]) i++;
+  return i;
+}
+
+/**
+ * Pick the sense whose POS matches `wantPos` (short tag). Falls back to the
+ * primary sense if no match exists. This matters when e.g. WordNet lists
+ * `fleet` as an adj-synonym of `swift`, but the OALD dict's `fleet` entry
+ * has "noun: 舰队" as senses[0] and the adj sense buried later — showing
+ * "舰队" would be misleading.
+ */
+function pickSenseByPos<T extends { pos?: string }>(
+  senses: T[],
+  wantPos: PosShort | null,
+): T | null {
+  if (!senses.length) return null;
+  if (wantPos) {
+    const hit = senses.find((s) => posToShort(s.pos) === wantPos);
+    if (hit) return hit;
+  }
+  return senses[0];
+}
+
+// ---------------------------------------------------------------------------
+// Public types (unchanged shape — ReviewView keeps working as-is)
+// ---------------------------------------------------------------------------
+
 export interface ChoiceGloss {
   pos?: string;
   def?: string;
@@ -135,20 +148,19 @@ export interface ChoiceGloss {
 
 export interface SynonymQuestion {
   target: string;
-  /** Definition / gloss shown above the choices to ground the user. */
   prompt: { def?: string; chn?: string; pos?: string };
-  /** 4 lemmas to render as choices. */
   choices: string[];
-  /** Index in `choices` that is the "correct" near-synonym. */
   answerIndex: number;
-  /** Per-choice gloss, keyed by lemma. Populated for ALL 4 choices so the
-   *  answer-explanation panel can show "what each option meant" without
-   *  re-fetching the dictionary. */
   glossMap: Record<string, ChoiceGloss>;
-  /** Tokens (中文 2-char) that target & correct answer share — used to
-   *  surface "why these two are similar" in the explanation panel. */
+  /** Kept for API compatibility with the old Chinese-token overlap heuristic;
+   *  the new implementation just leaves this empty. The explanation panel
+   *  gracefully hides the "shared tokens" hint when it's empty. */
   sharedTokens: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Main entry point
+// ---------------------------------------------------------------------------
 
 export async function buildSynonymQuestion(
   targetLemma: string,
@@ -156,112 +168,161 @@ export async function buildSynonymQuestion(
   const target = targetLemma.toLowerCase();
   const targetLookup = await lookup(target);
   if (!targetLookup) return null;
-  // If the user's lemma is a derived/inflected form (e.g. "arousal" → "arouse"),
-  // the dict's `senses` belong to the BASE lemma, not the user's word. Using
-  // `senses[0]` here would surface the wrong part of speech AND the wrong
-  // gloss (verb "激起" instead of noun "激起、唤醒"). Skip the synonym quiz
-  // entirely in that case — ReviewView falls back to a compose-only flow.
+  // Skip inflected/derived forms — the dict senses belong to the base lemma
+  // so the POS/gloss we'd surface is misleading.
   if (targetLookup.redirected) return null;
   const targetEntry = targetLookup.entry;
   const primary = targetEntry.senses[0];
   if (!primary) return null;
+  const targetPos = posToShort(primary.pos);
 
-  const targetTokens = new Set(chineseTokens(primary.chn ?? ""));
-  if (targetTokens.size === 0) return null;
-
-  // Pull all entries from the same shard for pos-and-gloss scoring.
+  // ---- 1. Correct answer + full synonym set ---------------------------
   const shardKey = _shardOfLemma(target);
-  const shardEntries = await _loadShard(shardKey);
+  const synShard = await loadSynShard(shardKey);
+  const offlineSyns: Partial<Record<PosShort, string[]>> =
+    synShard?.[target] ?? {};
 
-  const candidates: CandidateBucket[] = [];
-  // Also remember each candidate's English def so the explanation panel can
-  // show "错选词是什么意思" without a second dict lookup.
-  const defByLemma = new Map<string, string | undefined>();
-  for (const [lemma, rec] of Object.entries(shardEntries)) {
-    if (lemma === target) continue;
-    if ("alias_of" in rec) continue;
-    const e = rec as DictEntry;
-    const sense = e.senses[0];
-    if (!sense?.chn) continue;
-    if (sense.pos && primary.pos && sense.pos !== primary.pos) continue;
-    let score = 0;
-    for (const tok of chineseTokens(sense.chn)) {
-      if (targetTokens.has(tok)) score++;
-    }
-    if (score > 0) {
-      candidates.push({ lemma, pos: sense.pos ?? "", score, chn: sense.chn });
-      defByLemma.set(lemma, sense.def);
+  // Prefer the primary POS; fall back to whatever POS has synonyms.
+  let usedPos: PosShort | null = null;
+  let synList: string[] = [];
+  if (targetPos && offlineSyns[targetPos]?.length) {
+    usedPos = targetPos;
+    synList = offlineSyns[targetPos]!;
+  } else {
+    for (const p of ["n", "v", "adj", "adv"] as const) {
+      if (offlineSyns[p]?.length) {
+        usedPos = p;
+        synList = offlineSyns[p]!;
+        break;
+      }
     }
   }
 
-  // Need at least one hit for the correct answer + 3 for distractors.
-  if (candidates.length < 4) {
-    // Fall back to the user's own wordbook for filler (better than nothing).
-    const known = Array.from(getKnownLemmaSet()).filter(
-      (l) => l !== target && !candidates.some((c) => c.lemma === l),
-    );
-    while (candidates.length < 4 && known.length > 0) {
-      const pick = known.shift()!;
-      candidates.push({ lemma: pick, pos: "", score: 0, chn: "" });
+  // No offline synonyms → give up. ReviewView will fall back to spelling.
+  if (synList.length === 0) return null;
+
+  // The full "don't offer as a distractor" set = every synonym across every
+  // POS in the offline entry.
+  const forbid = new Set<string>([target]);
+  for (const p of ["n", "v", "adj", "adv"] as const) {
+    for (const s of offlineSyns[p] ?? []) forbid.add(s);
+  }
+
+  // ---- 2. Load dict shard once and pick a viable correct answer -------
+  const dictShard = await _loadShard(shardKey);
+  // For distractor selection we may need OTHER shards too (if the target's
+  // shard is thin — e.g. 'x' or 'z'). Load lazily on demand.
+  const loadedDictShards = new Map<string, Record<string, unknown>>();
+  loadedDictShards.set(shardKey, dictShard);
+
+  // Pick the FIRST synonym that resolves in the dict AND has a sense in the
+  // POS we're testing. Prefer a POS-matched sense so the gloss shown next to
+  // the correct answer actually corresponds to why it's a synonym (e.g.
+  // `fleet` as an adjective for `swift`, not the "舰队" noun sense).
+  let correctLemma: string | null = null;
+  let correctSense: DictEntry["senses"][number] | null = null;
+  for (const cand of synList) {
+    const got = await lookup(cand);
+    if (!got || got.redirected) continue;
+    const s = pickSenseByPos(got.entry.senses, usedPos);
+    if (!s) continue;
+    // If we have a POS to match and this candidate genuinely has no sense
+    // for that POS, skip it — otherwise we'd surface a mismatched gloss.
+    if (usedPos && posToShort(s.pos) !== usedPos) continue;
+    correctLemma = got.lemma;
+    correctSense = s;
+    break;
+  }
+  // Last-resort: if no candidate had a POS-matched sense, accept the first
+  // dict-resolvable one so the quiz still fires (better than null).
+  if (!correctLemma) {
+    for (const cand of synList) {
+      const got = await lookup(cand);
+      if (!got || got.redirected) continue;
+      const s = got.entry.senses[0];
+      if (!s) continue;
+      correctLemma = got.lemma;
+      correctSense = s;
+      break;
     }
   }
-  if (candidates.length < 4) return null;
+  if (!correctLemma || !correctSense) return null;
+  forbid.add(correctLemma);
 
-  // Top-scoring lemma is the "correct" answer; pick 3 distractors from
-  // the rest, biased toward lower scores so the wrong answers are clearly
-  // wrong on close inspection.
-  candidates.sort((a, b) => b.score - a.score);
-  const correct = candidates[0];
-  // Reverse-sample distractors from the back half for clearer wrongness.
-  const distractors: CandidateBucket[] = [];
-  const tail = candidates.slice(1);
-  // Shuffle tail for variety.
-  for (let i = tail.length - 1; i > 0; i--) {
+  // ---- 3. Build distractor pool ---------------------------------------
+  const scored: Array<{
+    lemma: string;
+    score: number;
+    sense: DictEntry["senses"][number];
+  }> = [];
+
+  const scanShard = (shard: Record<string, unknown>) => {
+    for (const [lemma, rec] of Object.entries(shard)) {
+      if (forbid.has(lemma)) continue;
+      // No hyphenated / space-y / sub-lemma forms as distractors.
+      if (!/^[a-z]{2,}$/.test(lemma)) continue;
+      if (rec && typeof rec === "object" && "alias_of" in (rec as object)) continue;
+      const entry = rec as DictEntry;
+      // Same-POS filter (only when we know the target POS): prefer a sense
+      // that matches so the gloss the user reads actually reflects why the
+      // word is a plausible-but-wrong option.
+      const sense = pickSenseByPos(entry.senses ?? [], usedPos);
+      if (!sense) continue;
+      if (usedPos && posToShort(sense.pos) !== usedPos) continue;
+      const score = distractorScore(target, lemma);
+      if (score > 0) scored.push({ lemma, score, sense });
+    }
+  };
+
+  scanShard(dictShard as Record<string, unknown>);
+
+  // If the same-shard pool is thin (rare — happens for 'x' / 'z'), broaden to
+  // a couple of neighbouring shards, keeping the same POS + similarity guard.
+  if (scored.length < 8) {
+    for (const other of ["a", "e", "s", "t", "r"] as const) {
+      if (scored.length >= 12) break;
+      if (other === shardKey) continue;
+      if (loadedDictShards.has(other)) continue;
+      const s = (await _loadShard(other)) as Record<string, unknown>;
+      loadedDictShards.set(other, s);
+      scanShard(s);
+    }
+  }
+
+  if (scored.length < 3) return null;
+
+  // Sort by descending score; break ties randomly so we don't always show
+  // the same 3 words for the same target.
+  scored.sort((a, b) => b.score - a.score || Math.random() - 0.5);
+
+  // Take the top-15 and pick 3 at random for variety across attempts.
+  const top = scored.slice(0, 15);
+  for (let i = top.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [tail[i], tail[j]] = [tail[j], tail[i]];
+    [top[i], top[j]] = [top[j], top[i]];
   }
-  for (const c of tail) {
-    if (distractors.length >= 3) break;
-    if (distractors.some((d) => d.lemma === c.lemma)) continue;
-    distractors.push(c);
-  }
+  const distractors = top.slice(0, 3);
   if (distractors.length < 3) return null;
 
-  // Compose & shuffle the 4 final choices.
-  const all = [correct, ...distractors];
+  // ---- 4. Assemble the final 4-choice question ------------------------
+  const all = [
+    { lemma: correctLemma, sense: correctSense },
+    ...distractors.map((d) => ({ lemma: d.lemma, sense: d.sense })),
+  ];
   for (let i = all.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [all[i], all[j]] = [all[j], all[i]];
   }
-  const answerIndex = all.findIndex((c) => c.lemma === correct.lemma);
+  const answerIndex = all.findIndex((c) => c.lemma === correctLemma);
 
-  // Build the per-choice gloss map. Distractors picked from the user's
-  // wordbook fallback path won't have chn populated here; resolve those
-  // via a fresh dict lookup so the explanation panel still gets data.
   const glossMap: Record<string, ChoiceGloss> = {};
   for (const c of all) {
-    let chn = c.chn;
-    let def = defByLemma.get(c.lemma);
-    let pos = c.pos;
-    if (!chn) {
-      // fallback path: candidate came from getKnownLemmaSet without sense info
-      const got = await lookup(c.lemma);
-      const s = got?.entry.senses[0];
-      chn = s?.chn ?? "";
-      def = s?.def;
-      pos = s?.pos ?? pos;
-    }
-    glossMap[c.lemma] = { pos: pos || undefined, def, chn: chn || undefined };
+    glossMap[c.lemma] = {
+      pos: c.sense.pos,
+      def: c.sense.def,
+      chn: c.sense.chn,
+    };
   }
-
-  // Tokens shared by target & correct answer — the "why they're synonyms"
-  // surface area. Limited to a handful so the UI stays compact.
-  const correctTokens = new Set(chineseTokens(correct.chn));
-  const sharedTokens: string[] = [];
-  targetTokens.forEach((tok) => {
-    if (sharedTokens.length >= 4) return;
-    if (correctTokens.has(tok)) sharedTokens.push(tok);
-  });
 
   return {
     target,
@@ -269,6 +330,6 @@ export async function buildSynonymQuestion(
     choices: all.map((c) => c.lemma),
     answerIndex,
     glossMap,
-    sharedTokens,
+    sharedTokens: [],
   };
 }
