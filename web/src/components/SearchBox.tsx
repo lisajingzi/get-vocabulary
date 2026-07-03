@@ -26,6 +26,7 @@ import {
   useState,
 } from "react";
 import { suggest } from "@/lib/dict";
+import { looksLikePhrase, phraseSlug } from "@/lib/notebook/local";
 
 interface Props {
   /** Optional initial value (used when the search page is opened with ?q=). */
@@ -111,12 +112,28 @@ export default function SearchBox({
     const trimmed = target.trim().toLowerCase();
     if (!trimmed) return;
     setOpen(false);
-    const dest = `/word/${encodeURIComponent(trimmed)}`;
-    // If we're already sitting on the same /word/<slug> URL (common when
-    // the sticky search box is reused on a detail page) router.push is a
-    // no-op and the page appears "frozen". Force a refresh in that case so
-    // the lookup re-runs and the user sees feedback either way.
-    if (pathname === dest) {
+    // Phrase heuristic: any input containing internal whitespace is treated
+    // as a phrase and routed to the notebook AI flow. Single hyphenated
+    // tokens like "e-mail" still fall through to the dictionary. See
+    // looksLikePhrase() for the exact rule.
+    let dest: string;
+    if (looksLikePhrase(trimmed)) {
+      const slug = phraseSlug(trimmed);
+      if (!slug) return;
+      // ?ai=1&text=<original> tells the phrase detail page: "if this slug
+      // has never been created before, create it via /api/ai/phrase using
+      // this exact text".
+      dest = `/notebook/phrase/${encodeURIComponent(
+        slug,
+      )}?ai=1&text=${encodeURIComponent(trimmed)}`;
+    } else {
+      dest = `/word/${encodeURIComponent(trimmed)}`;
+    }
+    // If we're already sitting on the same URL (common when the sticky
+    // search box is reused on a detail page) router.push is a no-op and
+    // the page appears "frozen". Force a refresh in that case so the
+    // lookup re-runs and the user sees feedback either way.
+    if (pathname === dest.split("?")[0]) {
       router.refresh();
     } else {
       router.push(dest);
@@ -145,14 +162,22 @@ export default function SearchBox({
 
   // ---- render -----------------------------------------------------------
 
+  // caret-[var(--accent)] gives the blinking insertion bar the theme color
+  // instead of the default thin black line, and leading-9/leading-8 sets an
+  // explicit line-height so the caret has a comfortable height even inside a
+  // roomy py-3 container.
   const inputClass =
     size === "lg"
-      ? "w-full bg-transparent text-base outline-none placeholder:text-[var(--fg-soft)]"
-      : "w-full bg-transparent text-sm outline-none placeholder:text-[var(--fg-soft)]";
+      ? "w-full appearance-none bg-transparent text-base leading-9 caret-[var(--accent)] outline-none ring-0 focus:outline-none focus:ring-0 focus:border-transparent placeholder:text-[var(--fg-soft)] [-webkit-appearance:none]"
+      : "w-full appearance-none bg-transparent text-sm leading-8 caret-[var(--accent)] outline-none ring-0 focus:outline-none focus:ring-0 focus:border-transparent placeholder:text-[var(--fg-soft)] [-webkit-appearance:none]";
+  // Keep the outer card (border + soft shadow) but do NOT change anything on
+  // focus: no focus-within border swap, no ring. Otherwise clicking into the
+  // input paints a second frame on top of the card, which the user flagged
+  // as an unwanted "inner frame".
   const wrapperClass =
     size === "lg"
-      ? "rounded-2xl border border-[#9dbecd] bg-white/94 px-4 py-3 shadow-[0_10px_22px_rgba(70,105,122,0.16)] transition focus-within:border-[var(--accent)]"
-      : "rounded-[14px] border border-[#9dbecd] bg-white/92 px-3 py-1.5 shadow-[0_8px_18px_rgba(70,105,122,0.14)] transition focus-within:border-[var(--accent)]";
+      ? "rounded-2xl border border-[#9dbecd] bg-white/94 px-4 py-3 shadow-[0_10px_22px_rgba(70,105,122,0.16)]"
+      : "rounded-[14px] border border-[#9dbecd] bg-white/92 px-3 py-1.5 shadow-[0_8px_18px_rgba(70,105,122,0.14)]";
 
   return (
     <div ref={wrapperRef} className="relative">
@@ -166,7 +191,7 @@ export default function SearchBox({
             autoCorrect="off"
             spellCheck={false}
             autoFocus={autoFocus}
-            placeholder="输入英文单词…"
+            placeholder="输入英文单词或短语…"
             value={value}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
@@ -212,14 +237,16 @@ export default function SearchBox({
             );
           })}
           <li className="border-t border-[var(--border)]">
-            <Link
-              href={`/word/${encodeURIComponent(value.trim().toLowerCase())}`}
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => setOpen(false)}
-              className="block px-4 py-2 text-xs text-[var(--fg-soft)] hover:text-[var(--accent)]"
+            <button
+              type="button"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                go(value);
+              }}
+              className="block w-full px-4 py-2 text-left text-xs text-[var(--fg-soft)] hover:text-[var(--accent)]"
             >
               直接查询「{value.trim()}」 →
-            </Link>
+            </button>
           </li>
         </ul>
       )}

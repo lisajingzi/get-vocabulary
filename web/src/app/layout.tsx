@@ -60,6 +60,12 @@ export default function RootLayout({
               >
                 单词本
               </Link>
+              <Link
+                href="/notebook"
+                className="ml-4 text-[var(--fg-soft)] transition hover:text-[var(--fg)]"
+              >
+                笔记本
+              </Link>
             </nav>
           </div>
         </header>

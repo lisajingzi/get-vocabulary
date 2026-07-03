@@ -258,7 +258,7 @@ export default function NotesPanel({
           onChange={(e) => setDraft(e.target.value)}
           placeholder={`关于 ${lemma} 的笔记…（可同时附图）`}
           rows={3}
-          className="w-full resize-none bg-transparent text-sm outline-none placeholder:text-[var(--fg-soft)]"
+className="w-full resize-none bg-transparent text-base leading-9 caret-[var(--accent)] outline-none placeholder:text-[var(--fg-soft)]"
         />
         {draftImage && (
           <div className="relative inline-block">
@@ -358,7 +358,7 @@ export default function NotesPanel({
                       value={editBody}
                       onChange={(e) => setEditBody(e.target.value)}
                       rows={3}
-                      className="w-full resize-none bg-transparent text-sm outline-none"
+className="w-full resize-none bg-transparent text-base leading-9 caret-[var(--accent)] outline-none"
                     />
                     {editImage && (
                       <div className="relative inline-block">
