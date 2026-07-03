@@ -16,7 +16,6 @@
  * the `suggest()` helper. Parent page just drops it in.
  */
 
-import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   type ChangeEvent,
