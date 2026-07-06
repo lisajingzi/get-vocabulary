@@ -28,7 +28,13 @@
 import { openDB, type IDBPDatabase } from "idb";
 
 export const DB_NAME = "get-dict";
-export const DB_VERSION = 4;
+// v5 (2026-07): the offline synonyms table was regenerated to drop misleading
+// entries like `quarry → prey` (WordNet's minor sense outweighed the primary
+// "采石场" meaning). Existing browsers still hold the old shard payloads in
+// STORE_SYN_SHARD, and the fetch is skipped once IDB has a hit — so we
+// force-clear syn-shards + syn-ai on upgrade to make the fresh /dict/*.json
+// visible without asking users to nuke site data manually.
+export const DB_VERSION = 5;
 
 export const STORE_META = "meta";
 export const STORE_SHARD = "shards";
@@ -42,7 +48,7 @@ let dbPromise: Promise<IDBPDatabase> | null = null;
 export function getAppDb(): Promise<IDBPDatabase> {
   if (!dbPromise) {
     dbPromise = openDB(DB_NAME, DB_VERSION, {
-      upgrade(db) {
+      upgrade(db, oldVersion, _newVersion, tx) {
         if (!db.objectStoreNames.contains(STORE_META)) {
           db.createObjectStore(STORE_META);
         }
@@ -66,6 +72,13 @@ export function getAppDb(): Promise<IDBPDatabase> {
         if (!db.objectStoreNames.contains(STORE_SYN_AI)) {
           // Value = { pos → string[] }. Key = target lemma.
           db.createObjectStore(STORE_SYN_AI);
+        }
+        // v4 → v5: force a one-time refresh of the synonyms tables so users
+        // pick up the regenerated /dict/synonyms-*.json (WordNet noise
+        // pruned). Both stores are pure caches — safe to clear.
+        if (oldVersion > 0 && oldVersion < 5) {
+          tx.objectStore(STORE_SYN_SHARD).clear();
+          tx.objectStore(STORE_SYN_AI).clear();
         }
       },
     });
