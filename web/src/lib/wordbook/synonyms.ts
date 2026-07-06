@@ -49,6 +49,31 @@ function posToShort(pos: string | undefined): PosShort | null {
 
 type SynShard = Record<string, Partial<Record<PosShort, string[]>>>;
 
+/**
+ * Bump this whenever `/dict/synonyms-*.json` is regenerated with materially
+ * different content. It's an in-payload schema tag we check when reading the
+ * IDB cache, so users pick up new shards even if the IDB `DB_VERSION` upgrade
+ * path silently fails (blocked by another tab, first-install skips the v4→v5
+ * branch, etc.). Bumping this is cheaper and more reliable than bumping
+ * DB_VERSION.
+ */
+const SYN_SHARD_SCHEMA = 2;
+
+interface SynShardEnvelope {
+  schema: number;
+  data: SynShard;
+}
+
+function isEnvelope(v: unknown): v is SynShardEnvelope {
+  return (
+    !!v &&
+    typeof v === "object" &&
+    typeof (v as { schema?: unknown }).schema === "number" &&
+    !!(v as { data?: unknown }).data &&
+    typeof (v as { data: unknown }).data === "object"
+  );
+}
+
 const synShardCache = new Map<string, SynShard>();
 /** Shard letters that returned 404 during dev, so we don't hammer the network. */
 const missingSynShards = new Set<string>();
@@ -58,19 +83,28 @@ async function loadSynShard(shard: string): Promise<SynShard | null> {
   const cached = synShardCache.get(shard);
   if (cached) return cached;
   const db = await getAppDb();
-  const stored = (await db.get(STORE_SYN_SHARD, shard)) as SynShard | undefined;
-  if (stored) {
-    synShardCache.set(shard, stored);
-    return stored;
+  const stored = (await db.get(STORE_SYN_SHARD, shard)) as unknown;
+  // Only trust the IDB copy when it's an envelope AND the schema matches.
+  // Legacy payloads from earlier releases were stored as the bare SynShard
+  // object (no `schema` field) and may contain retired synonyms; treat them
+  // as absent so the network fetch below refreshes them.
+  if (isEnvelope(stored) && stored.schema === SYN_SHARD_SCHEMA) {
+    synShardCache.set(shard, stored.data);
+    return stored.data;
   }
   try {
-    const res = await fetch(`/dict/synonyms-${shard}.json`);
+    const res = await fetch(`/dict/synonyms-${shard}.json`, {
+      // Bypass any lingering HTTP disk-cache too — belt-and-braces since we
+      // just invalidated the IDB copy.
+      cache: "no-cache",
+    });
     if (!res.ok) {
       missingSynShards.add(shard);
       return null;
     }
     const json = (await res.json()) as SynShard;
-    await db.put(STORE_SYN_SHARD, json, shard);
+    const envelope: SynShardEnvelope = { schema: SYN_SHARD_SCHEMA, data: json };
+    await db.put(STORE_SYN_SHARD, envelope, shard);
     synShardCache.set(shard, json);
     return json;
   } catch {
