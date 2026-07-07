@@ -310,7 +310,9 @@ function SpellPanel({
   onWrong: () => void;
 }) {
   const [draft, setDraft] = useState("");
-  const [feedback, setFeedback] = useState<"right" | "wrong" | null>(null);
+  const [feedback, setFeedback] = useState<
+    "right" | "wrong" | "revealed" | null
+  >(null);
   const [gloss, setGloss] = useState<{
     pos?: string;
     def?: string;
@@ -354,6 +356,14 @@ function SpellPanel({
     }
   }
 
+  function giveUp() {
+    // "我不会" — user surrenders. Book it as a wrong answer (same effect as
+    // typing the wrong spelling) and reveal the correct word + gloss. No
+    // retry offered; the only forward path is "下一步" into compose.
+    setFeedback("revealed");
+    onWrong();
+  }
+
   function retry() {
     setDraft("");
     setFeedback(null);
@@ -387,16 +397,16 @@ function SpellPanel({
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               e.preventDefault();
-              if (feedback === "right") onCorrect();
+              if (feedback === "right" || feedback === "revealed") onCorrect();
               else if (feedback === "wrong") retry();
               else submit();
             }
           }}
-          disabled={feedback === "right"}
+          disabled={feedback === "right" || feedback === "revealed"}
           placeholder="在此输入…"
           className="flex-1 rounded-md border border-[var(--border)] bg-transparent px-3 py-2 text-base outline-none focus:border-[var(--accent)] disabled:opacity-60"
         />
-        {feedback === "right" ? (
+        {feedback === "right" || feedback === "revealed" ? (
           <button
             type="button"
             onClick={onCorrect}
@@ -413,14 +423,24 @@ function SpellPanel({
             再试一次
           </button>
         ) : (
-          <button
-            type="button"
-            onClick={submit}
-            disabled={!draft.trim()}
-            className="rounded-md border border-[var(--border)] px-3 py-2 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            提交
-          </button>
+          <>
+            <button
+              type="button"
+              onClick={submit}
+              disabled={!draft.trim()}
+              className="rounded-md border border-[var(--border)] px-3 py-2 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              提交
+            </button>
+            <button
+              type="button"
+              onClick={giveUp}
+              title="放弃本题，直接查看答案（本题会记为失败）"
+              className="rounded-md border border-[var(--border)] px-3 py-2 text-xs text-[var(--fg-soft)] transition hover:border-red-400 hover:text-red-500"
+            >
+              我不会
+            </button>
+          </>
         )}
       </div>
 
@@ -430,6 +450,30 @@ function SpellPanel({
           <p className="text-xs text-[var(--fg-soft)]">
             提示：仔细再听一遍读音。
           </p>
+        </div>
+      )}
+
+      {feedback === "revealed" && (
+        <div className="space-y-2 rounded-lg border border-red-200 bg-red-50/60 p-3 text-sm dark:border-red-900/40 dark:bg-red-950/20">
+          <p className="text-xs font-medium text-red-500">
+            本题记为失败。正确答案：
+          </p>
+          <div className="space-y-0.5">
+            <div className="flex items-baseline gap-2">
+              <span className="text-base font-semibold">{target}</span>
+              {gloss?.pos && (
+                <span className="text-[10px] text-[var(--fg-soft)]">
+                  ({gloss.pos})
+                </span>
+              )}
+            </div>
+            {gloss?.def && (
+              <p className="text-xs text-[var(--fg)]">{gloss.def}</p>
+            )}
+            {gloss?.chn && (
+              <p className="text-xs text-[var(--fg-soft)]">{gloss.chn}</p>
+            )}
+          </div>
         </div>
       )}
 
