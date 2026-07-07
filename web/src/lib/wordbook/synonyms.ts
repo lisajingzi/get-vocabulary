@@ -212,19 +212,29 @@ export async function buildSynonymQuestion(
   const target = targetLemma.toLowerCase();
   const targetLookup = await lookup(target);
   if (!targetLookup) return null;
-  // Skip inflected/derived forms — the dict senses belong to the base lemma
-  // so the POS/gloss we'd surface is misleading.
-  if (targetLookup.redirected) return null;
+  // For inflected / derived forms (e.g. "complaint" → "complain",
+  // "arrival" → "arrive") the dict entry we got back already belongs to
+  // the base lemma. We used to bail here to avoid mismatched POS/gloss,
+  // which sent tons of common derived nouns down the spelling path. Now
+  // we keep going: the *quiz target* stays the user's word ("complaint"),
+  // but for synonym-table lookup we use the base lemma ("complain") so
+  // the offline WordNet coverage of derived forms rides on their base.
+  // The prompt/gloss come from the resolved entry (== the base lemma's
+  // senses), which is the best we can do without a separate derived-form
+  // gloss table — and matches what the user actually studies anyway.
+  const baseLemma = targetLookup.lemma;
   const targetEntry = targetLookup.entry;
   const primary = targetEntry.senses[0];
   if (!primary) return null;
   const targetPos = posToShort(primary.pos);
 
   // ---- 1. Correct answer + full synonym set ---------------------------
-  const shardKey = _shardOfLemma(target);
+  // Look up synonyms under the base lemma — that's where WordNet stores
+  // them. `complaint` has no shard entry, but `complain` does.
+  const shardKey = _shardOfLemma(baseLemma);
   const synShard = await loadSynShard(shardKey);
   const offlineSyns: Partial<Record<PosShort, string[]>> =
-    synShard?.[target] ?? {};
+    synShard?.[baseLemma] ?? {};
 
   // Prefer the primary POS; fall back to whatever POS has synonyms.
   let usedPos: PosShort | null = null;
@@ -246,8 +256,10 @@ export async function buildSynonymQuestion(
   if (synList.length === 0) return null;
 
   // The full "don't offer as a distractor" set = every synonym across every
-  // POS in the offline entry.
-  const forbid = new Set<string>([target]);
+  // POS in the offline entry. We also forbid the base lemma itself (so
+  // `complain` doesn't show up as an option when the target is `complaint`)
+  // and the user-facing target for the same reason.
+  const forbid = new Set<string>([target, baseLemma]);
   for (const p of ["n", "v", "adj", "adv"] as const) {
     for (const s of offlineSyns[p] ?? []) forbid.add(s);
   }
