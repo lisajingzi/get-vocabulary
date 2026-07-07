@@ -56,8 +56,14 @@ type SynShard = Record<string, Partial<Record<PosShort, string[]>>>;
  * path silently fails (blocked by another tab, first-install skips the v4→v5
  * branch, etc.). Bumping this is cheaper and more reliable than bumping
  * DB_VERSION.
+ *
+ * ALSO used as the query-string cache-buster on the network fetch — Vercel's
+ * CDN edge caches JSON aggressively and `cache: 'no-cache'` only bypasses
+ * the *browser* HTTP cache, not the CDN. Appending `?v=<SCHEMA>` makes each
+ * regenerated dataset a distinct URL from the CDN's point of view, forcing
+ * a fresh origin fetch on every schema bump.
  */
-const SYN_SHARD_SCHEMA = 2;
+const SYN_SHARD_SCHEMA = 3;
 
 interface SynShardEnvelope {
   schema: number;
@@ -93,11 +99,15 @@ async function loadSynShard(shard: string): Promise<SynShard | null> {
     return stored.data;
   }
   try {
-    const res = await fetch(`/dict/synonyms-${shard}.json`, {
-      // Bypass any lingering HTTP disk-cache too — belt-and-braces since we
-      // just invalidated the IDB copy.
-      cache: "no-cache",
-    });
+    const res = await fetch(
+      `/dict/synonyms-${shard}.json?v=${SYN_SHARD_SCHEMA}`,
+      {
+        // Bypass any lingering HTTP disk-cache too — belt-and-braces since we
+        // just invalidated the IDB copy. The `?v=` above additionally defeats
+        // Vercel's edge cache, which `no-cache` alone can't touch.
+        cache: "no-cache",
+      },
+    );
     if (!res.ok) {
       missingSynShards.add(shard);
       return null;
