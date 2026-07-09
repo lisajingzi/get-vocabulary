@@ -162,9 +162,23 @@ export default function WordbookPage() {
               type="button"
               onClick={() => goBack(router)}
               title="返回上一页"
-              className="rounded-md border border-[var(--border)] px-2 py-1 text-xs text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+              aria-label="返回上一页"
+              className="group inline-flex h-7 w-7 shrink-0 items-center justify-center self-center rounded-full text-[var(--fg-soft)] transition hover:text-[var(--accent)]"
             >
-              ← 返回
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+                className="h-6 w-6"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <path d="M14 8l-4 4 4 4" />
+                <path d="M10 12h6" />
+              </svg>
             </button>
             <h1 className="text-xl font-semibold tracking-tight">单词本</h1>
           </div>
