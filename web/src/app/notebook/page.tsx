@@ -82,7 +82,17 @@ export default function NotebookPage() {
     <div className="space-y-5">
       <header className="space-y-3">
         <div className="flex items-baseline justify-between gap-3">
-          <h1 className="text-xl font-semibold tracking-tight">笔记本</h1>
+          <div className="flex items-baseline gap-3">
+            <button
+              type="button"
+              onClick={() => goBack(router)}
+              title="返回上一页"
+              className="rounded-md border border-[var(--border)] px-2 py-1 text-xs text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+            >
+              ← 返回
+            </button>
+            <h1 className="text-xl font-semibold tracking-tight">笔记本</h1>
+          </div>
           <span className="text-xs text-[var(--fg-soft)]">
             共{" "}
             <span className="font-medium text-[var(--fg)]">
@@ -95,14 +105,6 @@ export default function NotebookPage() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           {/* Tabs */}
           <div className="inline-flex rounded-md border border-[var(--border)] p-0.5">
-            <button
-              type="button"
-              onClick={() => goBack(router)}
-              title="返回上一页"
-              className="rounded px-3 py-1 text-sm text-[var(--fg-soft)] transition hover:text-[var(--fg)]"
-            >
-              ← 返回
-            </button>
             {(
               [
                 { key: "phrase", label: `短语 · ${counts.phrase}` },
