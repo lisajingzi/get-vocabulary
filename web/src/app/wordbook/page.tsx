@@ -26,6 +26,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import {
   listEntries,
@@ -61,6 +62,7 @@ interface UndoState {
 }
 
 export default function WordbookPage() {
+  const router = useRouter();
   const [entries, setEntries] = useState<WordbookEntry[]>([]);
   const [tab, setTab] = useState<WordbookStatus>("new");
   const [pos, setPos] = useState<PosOption>("all");
@@ -163,6 +165,14 @@ export default function WordbookPage() {
 
         {/* Tabs */}
         <div className="inline-flex rounded-md border border-[var(--border)] p-0.5">
+          <button
+            type="button"
+            onClick={() => goBack(router)}
+            title="返回上一页"
+            className="rounded px-3 py-1 text-sm text-[var(--fg-soft)] transition hover:text-[var(--fg)]"
+          >
+            ← 返回
+          </button>
           {(
             [
               { key: "new", label: `新朋友 · ${counts.new}` },
@@ -336,6 +346,20 @@ export default function WordbookPage() {
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Navigate to the previous page. Falls back to the home surface when there
+ * is no in-app history (e.g. the user landed on /wordbook via a bookmark or
+ * an external share link) — otherwise router.back() would drop them out of
+ * the site entirely.
+ */
+function goBack(router: ReturnType<typeof useRouter>) {
+  if (typeof window !== "undefined" && window.history.length > 1) {
+    router.back();
+  } else {
+    router.push("/");
+  }
+}
 
 function matchPos(stored: string | undefined, want: PosOption): boolean {
   if (want === "all") return true;
