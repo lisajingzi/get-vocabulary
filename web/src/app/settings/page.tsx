@@ -48,7 +48,7 @@ export default function SettingsPage() {
     try {
       await push();
       setPushStatus("ok");
-    } catch (e) {
+    } catch {
       setPushStatus("error");
     }
     setTimeout(() => setPushStatus("idle"), 3000);
