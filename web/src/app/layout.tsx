@@ -3,6 +3,7 @@ import Link from "next/link";
 import Script from "next/script";
 import SearchBox from "@/components/SearchBox";
 import ToastHost from "@/components/Toast";
+import SyncProvider from "@/components/SyncProvider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -64,13 +65,20 @@ export default function RootLayout({
                 href="/notebook"
                 className="ml-4 text-[var(--fg-soft)] transition hover:text-[var(--fg)]"
               >
-                笔记本
+              笔记本
+              </Link>
+              <Link
+                href="/settings"
+                className="ml-4 text-[var(--fg-soft)] transition hover:text-[var(--fg)]"
+              >
+                设置
               </Link>
             </nav>
           </div>
         </header>
         <main className="mx-auto max-w-5xl px-6 py-6">{children}</main>
         <ToastHost />
+        <SyncProvider />
         {/*
           Service-worker registration. We only register in production so dev
           mode HMR isn't disrupted by stale cached chunks. The script is

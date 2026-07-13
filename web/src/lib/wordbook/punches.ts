@@ -37,11 +37,14 @@ function readPunches(): string[] {
   }
 }
 
-function writePunches(list: string[]): void {
+export function writePunches(list: string[]): void {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
   window.dispatchEvent(new CustomEvent("get:punch-change"));
 }
+
+/** Alias for cloud sync layer */
+export const writePunchesRaw = writePunches;
 
 /** Record today as a punch-in day. Idempotent. */
 export function recordPunchToday(): void {

@@ -78,7 +78,7 @@ type NotesStore = Record<string, WordNote[]>; // lemma → notes
 // shared low-level helpers
 // ---------------------------------------------------------------------------
 
-function readStore(): Store {
+export function readStore(): Store {
   if (typeof window === "undefined") return {};
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -89,14 +89,14 @@ function readStore(): Store {
   }
 }
 
-function writeStore(store: Store): void {
+export function writeStore(store: Store): void {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
   // Notify same-tab listeners; the native `storage` event only fires across tabs.
   window.dispatchEvent(new CustomEvent("get:wordbook-change"));
 }
 
-function readNotes(): NotesStore {
+export function readNotes(): NotesStore {
   if (typeof window === "undefined") return {};
   try {
     const raw = window.localStorage.getItem(NOTES_KEY);
@@ -107,7 +107,7 @@ function readNotes(): NotesStore {
   }
 }
 
-function writeNotes(notes: NotesStore): void {
+export function writeNotes(notes: NotesStore): void {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
   window.dispatchEvent(new CustomEvent("get:notes-change"));

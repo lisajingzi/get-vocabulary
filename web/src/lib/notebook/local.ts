@@ -87,7 +87,7 @@ type NotesStore = Record<string, NotebookNote[]>;
 // low-level IO
 // ---------------------------------------------------------------------------
 
-function readEntries(): EntryStore {
+export function readEntries(): EntryStore {
   if (typeof window === "undefined") return {};
   try {
     const raw = window.localStorage.getItem(ENTRIES_KEY);
@@ -98,13 +98,13 @@ function readEntries(): EntryStore {
   }
 }
 
-function writeEntries(store: EntryStore): void {
+export function writeEntries(store: EntryStore): void {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(ENTRIES_KEY, JSON.stringify(store));
   window.dispatchEvent(new CustomEvent("get:notebook-change"));
 }
 
-function readNotesStore(): NotesStore {
+export function readNotesStore(): NotesStore {
   if (typeof window === "undefined") return {};
   try {
     const raw = window.localStorage.getItem(NOTES_KEY);
@@ -115,7 +115,7 @@ function readNotesStore(): NotesStore {
   }
 }
 
-function writeNotesStore(store: NotesStore): void {
+export function writeNotesStore(store: NotesStore): void {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(NOTES_KEY, JSON.stringify(store));
   window.dispatchEvent(new CustomEvent("get:notebook-notes-change"));
