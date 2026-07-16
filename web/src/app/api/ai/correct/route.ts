@@ -1,35 +1,50 @@
 /**
  * POST /api/ai/correct
  *
- * Coach-style English sentence feedback for a Chinese B2 learner who is
- * preparing for IELTS speaking. We do NOT operate as a binary "right/wrong"
- * grader — we operate as a tutor that always nudges the learner toward more
- * native-like phrasing, even when the original sentence is grammatically
- * fine.
+ * IELTS/PTE-examiner-style English sentence feedback for a Chinese B2
+ * learner. The API deliberately runs on a **two-track model** so the
+ * learner never confuses "wrong" with "could be more idiomatic":
  *
- * Two verdicts only:
- *   - ok=true  ("good")        → original is already native-like; we still
- *                                offer a slightly more advanced/idiomatic
- *                                upgrade in `recommended` so the learner
- *                                keeps levelling up.
- *   - ok=false ("needs_work")  → anything from a real grammar bug to a
- *                                merely-understandable-but-unnatural
- *                                collocation. We always rewrite to a
- *                                native-quality version.
+ *   Track A — ERRORS (`ok`, `segments`, `diagnosis`)
+ *     Only things that an IELTS / PTE examiner would actually deduct
+ *     marks for: a violation of a NAMEABLE, WRITTEN rule of English
+ *     grammar / lexis / spelling, or a breakdown in communication.
+ *     If the learner's phrasing can be defended by any real rule, it
+ *     is NOT an error, no matter how "un-idiomatic" it sounds.
+ *
+ *   Track B — STYLE SUGGESTIONS (`suggestions`)
+ *     Alternative wordings that are more idiomatic or higher-register.
+ *     These are LEARNING OPPORTUNITIES, NOT errors — they never flip
+ *     `ok` to false and they never appear in `segments`.
+ *
+ * Verdicts:
+ *   - ok=true   → No examiner-flagged error. `suggestions` may still
+ *                 offer idiomatic upgrades; they don't cost the
+ *                 learner marks.
+ *   - ok=false  → At least one examiner-flagged error, each one
+ *                 accompanied by a citable `rule` in `diagnosis`.
  *
  * Response body:
  *   {
  *     ok: boolean,
- *     recommended: string,           // most natural rewrite (or upgrade)
- *     recommendedAlt?: string,       // optional second option (different register)
- *     segments: Array<{              // diff over the ORIGINAL sentence; concatenating
- *       text: string,                // .text reproduces the original verbatim.
- *       wrong?: boolean,             // only set when ok=false
- *       fix?: string,
+ *     recommended: string,             // native-quality rewrite (or upgrade)
+ *     recommendedAlt?: string,         // optional second option (different register)
+ *     segments: Array<{                // diff over the ORIGINAL sentence; concatenating
+ *       text: string,                  // .text reproduces the original verbatim.
+ *       wrong?: boolean,               // only set when ok=false — indicates a
+ *       fix?: string,                  // REAL examiner-grade error, not a style call.
  *     }>,
- *     diagnosis: string[],           // 1-2 short Chinese explanations of the language point(s)
- *     distinction?: string,          // 1-line confusable-word disambiguation (Chinese)
- *     ielts?: string,                // 1 native-level IELTS-speaking sample sentence
+ *     diagnosis: string[],             // one short Chinese line per flagged error;
+ *                                      // each MUST cite the named rule that was
+ *                                      // violated ("subject-verb agreement",
+ *                                      // "countable noun requires a determiner",
+ *                                      // etc.).
+ *     suggestions?: Array<{            // Track-B style advice; never errors.
+ *       text: string,                  // The more idiomatic wording.
+ *       reason: string,                // 1-line Chinese rationale.
+ *     }>,
+ *     distinction?: string,            // 1-line confusable-word disambiguation (Chinese)
+ *     ielts?: string,                  // 1 native-level IELTS-speaking sample sentence
  *     provider: "deepseek" | "mock"
  *   }
  *
@@ -58,12 +73,18 @@ interface Segment {
   fix?: string;
 }
 
+interface Suggestion {
+  text: string;
+  reason: string;
+}
+
 interface ResponseBody {
   ok: boolean;
   recommended: string;
   recommendedAlt?: string;
   segments: Segment[];
   diagnosis: string[];
+  suggestions?: Suggestion[];
   distinction?: string;
   ielts?: string;
   provider: "deepseek" | "mock";
@@ -85,108 +106,236 @@ function buildPrompt(lemma: string, sentence: string, sense?: SenseHint) {
     ? `Target sense: "${sense.def}"${sense.chn ? ` (中文: ${sense.chn})` : ""}.`
     : "Target sense: most common.";
   return [
-    "You are an English LANGUAGE COACH (not a grammar checker) for a Chinese",
-    "B2 learner who is preparing for IELTS speaking. Your goal is to help",
-    "the learner sound MORE NATIVE — not merely to verify that a sentence",
-    "is parseable.",
+    "You are a CERTIFIED IELTS Writing / PTE Writing examiner grading",
+    "one sentence produced by a Chinese B2 learner. Your judgement must",
+    "line up with the published IELTS Writing Band Descriptors and PTE",
+    "Enabling Skills — NOT with your personal taste, and NOT with what",
+    "\"a native speaker would prefer\". Examiners do not deduct marks for",
+    "phrasings they find un-idiomatic; they deduct marks for concrete,",
+    "citable rule violations. Neither should you.",
     "",
     `Target word: "${lemma}". ${senseLine}`,
     `Learner's sentence: """${sentence}"""`,
     "",
-    "TWO-TIER VERDICT (no middle ground):",
-    "  - ok=true  → A native speaker WOULD ACTUALLY SAY THIS sentence.",
-    "                It is grammatical, idiomatic, and uses the target word",
-    "                in the requested sense. The bar is NOT \"the best",
-    "                possible phrasing\" — it is \"a phrasing a native would",
-    "                naturally produce in casual speech\". If yes, ok=true.",
-    "                In this case `recommended` MAY be IDENTICAL to the",
-    "                learner's sentence; only suggest an upgrade if there",
-    "                is a clearly more idiomatic / higher-register version",
-    "                worth teaching. You MUST NOT mark any segments as",
-    "                wrong (segments = [{text: <whole original>}]).",
-    "  - ok=false → ANY of: real grammar bug, wrong sense of the target",
-    "                word, wrong part of speech, missing/extra article on",
-    "                a countable noun, broken collocation, or a phrasing",
-    "                native speakers would NOT produce. \"Slightly less",
-    "                elegant than the optimum\" is NOT a reason for false.",
-    "                Mark the broken segments and propose a native-quality",
-    "                `recommended` rewrite.",
+    "════════════════════════════════════════════════════════════════",
+    "TWO-TRACK OUTPUT — read this before anything else.",
+    "════════════════════════════════════════════════════════════════",
+    "  TRACK A — ERRORS (drives `ok`, `segments`, `diagnosis`).",
+    "     A learner sentence contains an ERROR iff, and only iff, an",
+    "     examiner could point to a NAMED, WRITTEN rule of English and",
+    "     say \"this violates <rule>\". If you cannot name the rule in",
+    "     standard examiner terminology, IT IS NOT AN ERROR — even if",
+    "     the sentence \"sounds off\" to you.",
     "",
-    "ANTI-NITPICK GUARD (read carefully):",
-    "  The learner often resubmits sentences that you yourself recommended",
-    "  in a previous turn. You are stateless across turns, so don't assume",
-    "  context — just judge each sentence on its own merits. Crucially, if",
-    "  a sentence is already in the \"native would say this\" zone, you",
-    "  MUST return ok=true even though some other phrasing might score",
-    "  half a point higher on style. Do not chain endless micro-upgrades.",
-    "  Concrete anchors:",
-    '    - "I like listening to symphonies."        → ok=true (native says this)',
-    '    - "I enjoy listening to classical music."  → ok=true',
-    '    - "I like to listen to symphony."          → ok=false (countable-noun bug)',
-    '    - "I am interesting in music."             → ok=false (wrong adjective form)',
+    "  TRACK B — STYLE SUGGESTIONS (`suggestions`).",
+    "     Anything that is not an error but that you would still like to",
+    "     teach — a more idiomatic collocation, a higher-register verb,",
+    "     a tighter construction — goes here. Suggestions do NOT flip",
+    "     `ok` to false. They do NOT appear in `segments`. They live in",
+    "     their own list.",
     "",
-    "INFLECTIONS: any inflected form of the target word counts as using it",
-    "(plurals, past tense, gerund, irregular forms — e.g. \"ran\" for \"run\").",
-    "Do NOT reject merely because the user wrote an inflection.",
+    "  Mixing the two tracks is the single biggest failure mode of this",
+    "  API. Do not do it. If in doubt, downgrade Track A → Track B.",
     "",
-    "OUTPUT — produce all of the following:",
-    "  recommended      : the most natural English sentence for this idea.",
-    "                     When ok=true, this MAY be identical to the",
-    "                     learner's sentence; ONLY suggest a different",
-    "                     wording if it is clearly more idiomatic or",
-    "                     teaches a useful higher-register option. Don't",
-    "                     invent micro-upgrades just to fill the field.",
-    "                     When ok=false, this is your native-quality",
-    "                     rewrite. Keep it CLOSE to what the learner",
-    "                     tried to say — don't change the topic.",
-    "  recommendedAlt   : (optional) one additional option in a DIFFERENT",
-    "                     register or with a different common collocation.",
-    "                     Skip if there is no genuinely useful alternative.",
-    "  segments         : ordered diff over the ORIGINAL sentence. Concatenating",
-    "                     each .text MUST reproduce the original verbatim.",
-    "                     When ok=false, mark broken stretches with",
-    "                     {wrong:true, fix:'<corrected words>'} and keep",
-    "                     correct stretches as plain {text:'…'}.",
-    "                     When ok=true, output a single segment containing",
-    "                     the whole original sentence and no `wrong` flag.",
-    "  diagnosis        : array of 1–2 SHORT Chinese sentences, each explaining",
-    "                     ONE concrete language point — e.g. countability,",
-    "                     article rule, tense, collocation. Cite the offending",
-    "                     word in English in backticks. Example:",
-    '                     "`symphony` 是可数名词，泛指这类作品时用复数 `symphonies`，指某一首时用 `a symphony`。"',
-    "                     When ok=true and `recommended` equals the original,",
-    "                     `diagnosis` MAY be an empty array []. When ok=true",
-    "                     with a different `recommended`, give 1 sentence",
-    "                     explaining WHY the upgrade sounds more natural.",
-    "  distinction      : (optional) a SINGLE Chinese sentence distinguishing",
-    "                     two confusable words/phrases that are relevant to",
-    "                     this sentence (e.g. symphony vs classical music).",
-    "                     Format: \"`A` = …；`B` = …\". Skip if not useful.",
-    "  ielts            : (optional, but encouraged) ONE English sample",
-    "                     sentence at IELTS Band 7+ level that the learner",
-    "                     could reuse in IELTS speaking, built around the",
-    "                     same topic and the target word. Keep it natural,",
-    "                     not over-decorated.",
+    "════════════════════════════════════════════════════════════════",
+    "SCOPE OF TRACK-A ERRORS — the ONLY four families that count.",
+    "════════════════════════════════════════════════════════════════",
+    "  G1  GRAMMAR VIOLATION.  Must cite a specific rule that appears",
+    "      in a standard grammar reference (Cambridge Grammar, Swan's",
+    "      Practical English Usage, IELTS Writing rubric). Examples of",
+    "      acceptable rule names:",
+    "        - subject-verb agreement",
+    "        - tense / aspect consistency",
+    "        - a singular countable noun requires a determiner",
+    "        - the verb `discuss` is transitive and takes no preposition",
+    "        - `interested` (feeling) vs `interesting` (property)",
+    "        - conditional-clause sequence of tenses",
     "",
-    "STRICT RULES:",
-    "  (R1) Be CONCISE. Each diagnosis item is one sentence. No bullet",
-    "       lists in any field, no markdown, no headings.",
-    "  (R2) Do NOT correct stylistic preferences. Only flag things a native",
-    "       speaker would actually say differently.",
-    "  (R3) When ok=false, the `wrong` segments must be MINIMAL — just the",
-    "       offending span, not the whole clause.",
-    "  (R4) `recommended` must keep the target word (or its inflection).",
-    "       Do not silently swap the target word out.",
-    "  (R5) Never invent a `distinction` just to fill the field. Skip it",
-    "       when there's no real confusable-word issue here.",
-    "  (R6) NO RECURSIVE PERFECTIONISM. If the learner's sentence is",
-    "       already in the native-acceptable zone, return ok=true and let",
-    "       `recommended` equal the original. Do not chase ever-more",
-    "       optimal phrasings turn after turn — that breaks the learner's",
-    "       flow and makes ok=true unreachable.",
-    "  (R7) When ok=true and you have nothing genuinely useful to teach,",
-    "       it is OK to skip `diagnosis`, `distinction`, and `ielts` (or",
-    "       send them as empty/absent). Silence is better than noise.",
+    "  G2  LEXICAL INCOMPATIBILITY.  A specific dictionary-attested",
+    "      violation: wrong part of speech, wrong argument structure,",
+    "      or a collocation flagged as wrong (not merely uncommon) by",
+    "      a learner's dictionary. \"`make` a photo\" is G2. \"`enjoy` to",
+    "      do sth\" is G2 (`enjoy` requires -ing). \"Nice weather\" vs",
+    "      \"good weather\" is NOT G2 — both are attested.",
+    "",
+    "  G3  SPELLING.  The written form does not exist in any major",
+    "      dictionary (`recieve`, `seperate`). British/American variants",
+    "      are BOTH correct — never flag `colour` vs `color`.",
+    "",
+    "  G4  COMMUNICATION BREAKDOWN.  Word order or missing constituents",
+    "      make the intended meaning unrecoverable, or force a strongly",
+    "      unintended reading. Rare in a single learner sentence.",
+    "",
+    "════════════════════════════════════════════════════════════════",
+    "OUT OF SCOPE — NEVER flag these as Track-A errors.",
+    "════════════════════════════════════════════════════════════════",
+    "  X1  \"A native speaker would say it differently.\"  ← Track B only.",
+    "  X2  \"There is a more idiomatic collocation.\"        ← Track B only.",
+    "  X3  \"This word is uncommon here / feels unnatural.\" ← Track B only.",
+    "  X4  Number / article / tense choices that have MORE THAN ONE",
+    "      defensible reading. Example: \"I want to change majors\" and",
+    "      \"I want to change my major\" are BOTH correct English — do",
+    "      NOT flag either. If you can construct a real context in",
+    "      which the learner's form is grammatical, IT IS NOT AN ERROR.",
+    "  X5  Register mismatch, unless the task explicitly demands a",
+    "      specific register (this one does not).",
+    "  X6  Anything you cannot name a rule for. \"It just feels wrong\"",
+    "      is not a rule.",
+    "",
+    "════════════════════════════════════════════════════════════════",
+    "MANDATORY DECISION PROTOCOL — walk this for every candidate error",
+    "before you commit to marking it.",
+    "════════════════════════════════════════════════════════════════",
+    "  S1  Name the rule.  Which of G1–G4 does the candidate violate,",
+    "      and what is the exact rule name (in English, examiner terms)?",
+    "      If you cannot fill in that name → STOP, do not mark.",
+    "  S2  Defensibility check.  Can the learner's form be defended by",
+    "      any real rule of English, in any reasonable interpretation?",
+    "      If yes → STOP, do not mark. Move it to Track B if you still",
+    "      want to teach the alternative.",
+    "  S3  Fix vs upgrade check.  Is your proposed replacement a FIX",
+    "      (removes the rule violation) or an UPGRADE (same rules, nicer",
+    "      wording)? If upgrade → STOP, move to Track B.",
+    "  S4  Consistency check.  Would a different competent examiner,",
+    "      given only your rule name from S1, arrive at the SAME verdict?",
+    "      If your justification is 'it sounds better' — the answer is",
+    "      no. Move to Track B.",
+    "",
+    "  Only after all four checks pass may you place the segment in",
+    "  `segments` with `wrong:true` and add a Chinese line to",
+    "  `diagnosis` that quotes the rule name in backticks.",
+    "",
+    "════════════════════════════════════════════════════════════════",
+    "EXHAUSTIVENESS — when there ARE errors, catch them all in one pass.",
+    "════════════════════════════════════════════════════════════════",
+    "  If the sentence contains multiple independent Track-A errors,",
+    "  report every one of them in this response — never surface just",
+    "  the most obvious and leave the rest for a later turn. Before",
+    "  emitting JSON, silently re-scan the sentence against G1–G4",
+    "  end-to-end. Each independent error becomes its own `wrong`",
+    "  segment AND its own `diagnosis` bullet. `recommended` must",
+    "  integrate every fix. Exhaustiveness applies to REAL errors",
+    "  only; it does NOT license you to promote Track-B upgrades",
+    "  into Track-A errors just to fill the list.",
+    "",
+    "════════════════════════════════════════════════════════════════",
+    "STATELESSNESS & ANTI-REVERSAL.",
+    "════════════════════════════════════════════════════════════════",
+    "  You have no memory of previous turns. That is fine, because",
+    "  your decisions must be reproducible from THE RULES ALONE — not",
+    "  from your language intuition (which drifts between turns and",
+    "  causes the notorious flip-flop where a form is marked wrong on",
+    "  turn N and right on turn N+1). Follow S1–S4 and your verdict",
+    "  will be stable across turns by construction.",
+    "",
+    "  INFLECTIONS: any inflected form of the target word counts as",
+    "  using it (plurals, past tense, gerund, irregular forms). Do NOT",
+    "  reject just because the user wrote an inflection.",
+    "",
+    "════════════════════════════════════════════════════════════════",
+    "WORKED EXAMPLES — calibrate against these.",
+    "════════════════════════════════════════════════════════════════",
+    '  E1  "I want to change majors."',
+    "      Rule check: `major` is a countable noun; both `change majors`",
+    "      (plural, generic) and `change my major` (singular, specific)",
+    "      are attested. → NO Track-A error. `ok=true`. Optionally add",
+    "      a Track-B suggestion if you want to teach the alternative.",
+    "",
+    '  E2  "I am interesting in music."',
+    "      Rule check (G1): `-ing` participles describe the property",
+    "      that causes the feeling; `-ed` participles describe the",
+    "      feeling itself. Learner needs `interested`. Rule name:",
+    "      \"-ing vs -ed participial adjectives\". → Track-A error.",
+    "",
+    '  E3  "Yesterday I go to a musics concert and I very enjoy it."',
+    "      Three independent Track-A errors, ALL reported at once:",
+    "        (i)  tense: `go` → `went`  (past-tense marker `yesterday`)",
+    "        (ii) noun form: `a musics concert` → `a music concert`",
+    "             (`music` is uncountable and attributive)",
+    "        (iii) adverb placement / collocation: `I very enjoy it`",
+    "              → `I really enjoyed it` (`very` doesn't modify verbs)",
+    "",
+    '  E4  "I like listening to symphony."',
+    "      Rule check (G1): `symphony` is countable; a singular",
+    "      countable in generic reference needs plural or a determiner",
+    "      → `symphonies` or `a symphony`. Rule name: \"countable noun",
+    "      requires plural or determiner in generic reference\".",
+    "      → Track-A error.",
+    "",
+    '  E5  "I like listening to symphonies."',
+    "      Rule check: all rules satisfied. → `ok=true`, `suggestions`",
+    "      MAY offer \"I enjoy listening to classical symphonies\" as a",
+    "      register upgrade, but that is Track B.",
+    "",
+    "════════════════════════════════════════════════════════════════",
+    "OUTPUT SCHEMA — fields you must produce.",
+    "════════════════════════════════════════════════════════════════",
+    "  recommended     : the native-quality version. When ok=false, it",
+    "                    integrates every Track-A fix. When ok=true, it",
+    "                    MAY equal the learner's sentence verbatim; only",
+    "                    change it if there is a clearly better wording",
+    "                    worth teaching (that alternative is then also",
+    "                    the first entry of `suggestions`, so the",
+    "                    learner sees the reason).",
+    "  recommendedAlt  : (optional) a second rewrite in a different",
+    "                    register. Skip when redundant.",
+    "  segments        : ordered diff over the ORIGINAL sentence.",
+    "                    Concatenating each `.text` MUST reproduce the",
+    "                    original verbatim. When ok=false, wrap each",
+    "                    Track-A error in {wrong:true, fix:'…'}; leave",
+    "                    the rest as plain {text:'…'}. When ok=true,",
+    "                    output a SINGLE segment containing the whole",
+    "                    original with NO `wrong` flag. Never place a",
+    "                    Track-B suggestion in `segments`.",
+    "  diagnosis       : array of short Chinese lines, one PER Track-A",
+    "                    error you flagged. Each line MUST contain the",
+    "                    English rule name in backticks (e.g. `subject-",
+    "                    verb agreement`, `countable noun determiner`)",
+    "                    so the learner — and future you — can audit the",
+    "                    decision. If ok=true, `diagnosis` MUST be `[]`.",
+    "  suggestions     : (optional) array of Track-B style upgrades,",
+    '                    each shaped as {"text":"<English rewrite>",',
+    '                    "reason":"<中文一句>"}. Reason should explain',
+    "                    what the upgrade teaches (a collocation, a",
+    "                    more precise verb, a tighter construction),",
+    "                    NEVER \"the original is wrong\". Give at most 2.",
+    "                    Skip entirely if you have no genuine upgrade.",
+    "  distinction     : (optional) a single Chinese line disambiguating",
+    "                    two confusable words relevant here.",
+    '                    Format: "`A` = …；`B` = …". Skip if not useful.',
+    "  ielts           : (optional) ONE English sample sentence at IELTS",
+    "                    Band 7+ level, built around the target word.",
+    "",
+    "════════════════════════════════════════════════════════════════",
+    "STRICT RULES.",
+    "════════════════════════════════════════════════════════════════",
+    "  (R1) Be concise. No markdown, no bullet chars, no headings in",
+    "       any field. Diagnosis and reason lines are ONE sentence each.",
+    "  (R2) Every `diagnosis` entry MUST cite a rule name in backticks.",
+    "       If you cannot cite one, the underlying segment does not",
+    "       belong in `segments` as `wrong` — remove it (S1 failure).",
+    "  (R3) Track-A `wrong` segments must be MINIMAL in span (just the",
+    "       offending words). This constrains span WIDTH, not the",
+    "       number of errors reported.",
+    "  (R4) `recommended` must retain the target word (or an inflection).",
+    "       Never silently swap it out.",
+    "  (R5) NEVER fabricate a rule. If you catch yourself writing a",
+    "       diagnosis like \"this noun should not be plural here\" without",
+    "       being able to name the underlying rule, you have failed S1.",
+    "       Delete the segment and, if you still care, move the",
+    "       alternative wording to `suggestions`.",
+    "  (R6) NEVER promote a Track-B upgrade into a Track-A error. If",
+    "       your only justification is \"sounds more natural\" / \"more",
+    "       common\" / \"native speakers prefer\", it is Track B.",
+    "  (R7) When ok=true you MAY omit `suggestions`, `distinction`,",
+    "       `ielts` entirely — silence beats noise.",
+    "  (R8) FINAL SELF-CHECK before returning:",
+    "         a) For every `wrong` segment, can I state its rule name?",
+    "            If no → drop it, possibly move to `suggestions`.",
+    "         b) Are there any Track-A errors I have NOT yet flagged?",
+    "            If yes → add them now; update `recommended`.",
+    "         c) Is `ok` consistent with `segments`? (`ok=true` ⇔ no",
+    "            `wrong` segments, `diagnosis=[]`.)",
     "",
     "Reply with ONLY a JSON object, no markdown, no commentary:",
     "{",
@@ -194,7 +343,8 @@ function buildPrompt(lemma: string, sentence: string, sense?: SenseHint) {
     '  "recommended": "<one English sentence>",',
     '  "recommendedAlt": "<optional English sentence>",',
     '  "segments": [{"text":"…"}, {"text":"…","wrong":true,"fix":"…"}],',
-    '  "diagnosis": ["<中文一句>", "<中文一句>"],',
+    '  "diagnosis": ["<中文一句，含 `rule name` in backticks>"],',
+    '  "suggestions": [{"text":"<English rewrite>","reason":"<中文一句>"}],',
     '  "distinction": "<optional 中文一句>",',
     '  "ielts": "<optional English sentence>"',
     "}",
@@ -318,7 +468,7 @@ async function mockCorrect(
 /** Sanitise the model's JSON into a strict ResponseBody. */
 function normaliseResponse(parsed: unknown, sentence: string): Omit<ResponseBody, "provider"> {
   const p = (parsed ?? {}) as Record<string, unknown>;
-  const ok = Boolean(p.ok);
+  let ok = Boolean(p.ok);
   const recommended =
     typeof p.recommended === "string" && p.recommended.trim()
       ? p.recommended.trim()
@@ -339,19 +489,51 @@ function normaliseResponse(parsed: unknown, sentence: string): Omit<ResponseBody
         })
         .filter((s) => s.text.length > 0)
     : [{ text: sentence }];
-  // If the model said ok=true but accidentally left wrong segments, scrub them.
+
+  const diagnosisRaw: string[] = Array.isArray(p.diagnosis)
+    ? (p.diagnosis as unknown[])
+        .map((x) => String(x ?? "").trim())
+        .filter((x) => x.length > 0)
+    : [];
+
+  // ── Rule-citation guardrail ────────────────────────────────────────────
+  // The prompt requires every `diagnosis` line to contain a rule name in
+  // backticks (see R2 / R5 in buildPrompt). If the model returns ok=false
+  // but no diagnosis line actually cites a rule, that is a failed S1 —
+  // we do NOT trust the verdict and downgrade to ok=true. This is the
+  // structural fence that stops the model from inventing rules or
+  // flip-flopping on grey-area calls.
+  const hasCitedRule = diagnosisRaw.some((d) => /`[^`]+`/.test(d));
+  if (!ok && !hasCitedRule) {
+    ok = true;
+  }
+
+  // If the model said ok=true (or we just forced it), scrub any wrong flags.
   if (ok) {
     for (const s of segments) {
       s.wrong = false;
       s.fix = undefined;
     }
   }
-  const diagnosis: string[] = Array.isArray(p.diagnosis)
-    ? (p.diagnosis as unknown[])
-        .map((x) => String(x ?? "").trim())
-        .filter((x) => x.length > 0)
-        .slice(0, 3)
-    : [];
+
+  // When ok=true, diagnosis MUST be empty per contract.
+  const diagnosis: string[] = ok ? [] : diagnosisRaw.slice(0, 4);
+
+  const suggestions: Suggestion[] | undefined = Array.isArray(p.suggestions)
+    ? ((p.suggestions as unknown[])
+        .map((s) => {
+          const sg = (s ?? {}) as Record<string, unknown>;
+          const text = String(sg.text ?? "").trim();
+          const reason = String(sg.reason ?? "").trim();
+          if (!text || !reason) return null;
+          return { text, reason } as Suggestion;
+        })
+        .filter((s): s is Suggestion => s !== null)
+        .slice(0, 2)) || undefined
+    : undefined;
+  const suggestionsClean =
+    suggestions && suggestions.length > 0 ? suggestions : undefined;
+
   const distinction =
     typeof p.distinction === "string" && p.distinction.trim()
       ? p.distinction.trim()
@@ -360,7 +542,16 @@ function normaliseResponse(parsed: unknown, sentence: string): Omit<ResponseBody
     typeof p.ielts === "string" && p.ielts.trim()
       ? p.ielts.trim()
       : undefined;
-  return { ok, recommended, recommendedAlt, segments, diagnosis, distinction, ielts };
+  return {
+    ok,
+    recommended,
+    recommendedAlt,
+    segments,
+    diagnosis,
+    suggestions: suggestionsClean,
+    distinction,
+    ielts,
+  };
 }
 
 async function callDeepseek(

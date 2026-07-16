@@ -65,6 +65,13 @@ interface CorrectionResult {
   recommendedAlt?: string;
   segments: Array<{ text: string; wrong?: boolean; fix?: string }>;
   diagnosis: string[];
+  /**
+   * Track-B style suggestions (NOT errors). These are idiomatic upgrades
+   * offered even when the sentence is examiner-correct, and they never
+   * flip `ok` to false. Rendered in a separate, visually neutral zone
+   * so the learner never confuses "more natural" with "wrong".
+   */
+  suggestions?: Array<{ text: string; reason: string }>;
   distinction?: string;
   ielts?: string;
   provider: "deepseek" | "mock";
@@ -918,7 +925,7 @@ function CoachFeedback({
         </div>
       )}
 
-      {/* 3. Diagnosis + distinction */}
+      {/* 3. Diagnosis + distinction (Track-A: real errors only) */}
       {(result.diagnosis.length > 0 || result.distinction) && (
         <div className="space-y-1 border-t border-[var(--border)]/60 pt-2">
           <p className="text-[11px] font-medium text-[var(--fg-soft)]">
@@ -941,6 +948,32 @@ function CoachFeedback({
                 />
               </li>
             )}
+          </ul>
+        </div>
+      )}
+
+      {/* 3b. Track-B style suggestions — visually distinct from errors:
+              neutral slate palette, explicit "不算错" label. Rendered
+              regardless of ok, because idiomatic upgrades exist on top
+              of a grammatically fine sentence too. */}
+      {result.suggestions && result.suggestions.length > 0 && (
+        <div className="space-y-1.5 border-t border-[var(--border)]/60 pt-2">
+          <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+            更地道的说法
+            <span className="ml-1.5 rounded-sm bg-[var(--fg-soft)]/10 px-1 py-0.5 text-[9px] font-normal uppercase tracking-wider text-[var(--fg-soft)]">
+              不算错
+            </span>
+          </p>
+          <ul className="space-y-1.5">
+            {result.suggestions.map((s, i) => (
+              <li key={i} className="space-y-0.5">
+                <p className="leading-relaxed text-[var(--fg)]">{s.text}</p>
+                <p
+                  className="pl-2 text-xs leading-relaxed text-[var(--fg-soft)]"
+                  dangerouslySetInnerHTML={{ __html: renderInlineCode(s.reason) }}
+                />
+              </li>
+            ))}
           </ul>
         </div>
       )}
