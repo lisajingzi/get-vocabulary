@@ -39,6 +39,8 @@ export default function SettingsPage() {
   const [importMsg, setImportMsg] = useState("");
   // `null` in state means "无上限"; we store it verbatim in preferences.
   const [dailyCap, setDailyCapState] = useState<number | null>(null);
+  // Brief "已保存 ✓" flash after the user picks a new cap.
+  const [capSavedFlash, setCapSavedFlash] = useState(false);
 
   useEffect(() => {
     setSyncIdState(getSyncId());
@@ -54,6 +56,8 @@ export default function SettingsPage() {
   function handleDailyCapChange(next: number | null) {
     setDailyCap(next);
     setDailyCapState(next);
+    setCapSavedFlash(true);
+    window.setTimeout(() => setCapSavedFlash(false), 2000);
   }
 
   async function handleCopy() {
@@ -122,7 +126,7 @@ export default function SettingsPage() {
       <section className="rounded-xl border border-[var(--border)] p-5 space-y-3">
         <h2 className="font-medium text-base">每日复习节奏</h2>
         <p className="text-sm text-[var(--fg-soft)]">
-          每天到期的单词默认全部进入今日队列，严格遵循艾宾浩斯间隔。如果某些天到期量太大、想限制一下每日上限，可以在下面选一个档位（超过上限的单词会自动顺延到中未来几天）。
+          每天到期的单词默认全部进入今日队列，严格遵循艾宾浩斯间隔。如果某些天到期量太大、想限制一下每日上限，可以在下面选一个档位（超过上限的单词会自动顺延到未来几天）。
         </p>
         <p className="text-xs text-[var(--fg-soft)]">
           ℹ️ 修改不会影响今天已经冻结的队列，从明天开始生效。
@@ -130,7 +134,7 @@ export default function SettingsPage() {
         <div className="flex flex-wrap gap-2 pt-1">
           {DAILY_CAP_CHOICES.map((choice) => {
             const active = choice === dailyCap;
-            const label = choice === null ? "无上限" : `${choice} 个日`;
+            const label = choice === null ? "无上限" : `${choice} 个`;
             const key = choice === null ? "unlimited" : String(choice);
             return (
               <button
@@ -149,6 +153,15 @@ export default function SettingsPage() {
             );
           })}
         </div>
+        <p className="text-xs text-[var(--fg-soft)] pt-1">
+          当前档位：
+          <span className="font-medium text-[var(--fg)]">
+            {dailyCap === null ? "无上限" : `${dailyCap} 个 / 天`}
+          </span>
+          {capSavedFlash && (
+            <span className="ml-2 text-green-600">已保存 ✓ 明天生效</span>
+          )}
+        </p>
       </section>
 
       {/* ── My Sync Code ─────────────────────────────────────── */}
