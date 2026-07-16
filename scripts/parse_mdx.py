@@ -32,6 +32,11 @@ Each entry has the shape (after structural extraction):
       },
       …
     ],
+    "phrases": [
+      { "pattern": "~ to sth",
+        "filled":  "prone to sth",
+        "example": { "en": "prone to injury", "cn": "容易受伤" } }
+    ],
     "alias_of": "abandoned"   # only present for cross-ref entries
   }
 
@@ -312,6 +317,101 @@ def _extract_examples(sense_html: str) -> List[dict]:
     return examples
 
 
+def _extract_phrases(lemma: str, html_str: str) -> List[dict]:
+    """Pull collocation frames (`<cf-blk><cf>~ to sth</cf></cf-blk>`) out of
+    the full entry HTML, along with the nearest following example sentence.
+
+    Oxford encodes typical patterns via a `<cf>` box that sits inside an
+    `<x-g-blk>` right before the example itself, e.g.
+
+        <x-g-blk>
+          <cf-blk><cf><exp>~</exp> to sth</cf></cf-blk>
+          <x>prone to injury <chn>容易受伤</chn></x>
+        </x-g-blk>
+
+    The `~` inside `<exp>` is a placeholder for the lemma, so we render both
+    the raw `pattern` (kept for reference) and a `filled` form with `~`
+    substituted so the UI can display "prone to sth" directly.
+
+    De-duplicates by `pattern` (case-insensitive, whitespace-normalised) to
+    avoid ~10 copies of "~ sth" for verbs like `take`. Preserves entry order
+    so the most-important patterns (which Oxford lists first) stay on top.
+    """
+    phrases: List[dict] = []
+    seen: set = set()
+
+    # Iterate every <cf-blk>. For each one, find the enclosing <x-g-blk> so
+    # we can pull the accompanying example. If the cf sits outside any
+    # <x-g-blk> (rare) we still keep the pattern, just without an example.
+    xg_blocks: List[Tuple[int, int]] = []
+    for m in re.finditer(r"<x-g-blk\b[^>]*>", html_str, re.IGNORECASE):
+        # find matching </x-g-blk>. Use a shallow scan — these blocks don't
+        # nest in the mdx we care about.
+        end_m = re.search(r"</x-g-blk>", html_str[m.end():], re.IGNORECASE)
+        if not end_m:
+            continue
+        xg_blocks.append((m.start(), m.end() + end_m.end()))
+
+    def _find_containing_xg(offset: int) -> Optional[Tuple[int, int]]:
+        for a, b in xg_blocks:
+            if a <= offset < b:
+                return a, b
+        return None
+
+    for cf_m in re.finditer(
+        r"<cf-blk\b[^>]*>(.*?)</cf-blk>", html_str,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        pattern = _strip_tags(cf_m.group(1))
+        if not pattern:
+            continue
+        # Normalise a bit: collapse spaces around the ~ but leave the rest
+        # verbatim; Oxford's own copy is already good.
+        pattern = re.sub(r"\s+", " ", pattern).strip()
+        norm = pattern.lower()
+        if norm in seen:
+            continue
+        seen.add(norm)
+        # Render a human-readable form with `~` replaced by the lemma.
+        # Handle "~ sth" → "<lemma> sth" and also patterns where `~` sits
+        # inside parentheses ("(~ sth)") — a plain substring replace works
+        # because `~` never legitimately appears anywhere else.
+        filled = pattern.replace("~", lemma) if "~" in pattern else pattern
+
+        phrase: dict = {"pattern": pattern, "filled": filled}
+        # Attach the nearest example inside the same <x-g-blk>, if any.
+        xg = _find_containing_xg(cf_m.start())
+        if xg is not None:
+            a, b = xg
+            xg_inner = html_str[a:b]
+            m_x = re.search(
+                r"<x\b(?![a-z-])[^>]*>(.*?)</x>", xg_inner,
+                re.IGNORECASE | re.DOTALL,
+            )
+            if m_x:
+                x_inner = m_x.group(1)
+                m_chn = re.search(
+                    r"<chn\b[^>]*>(.*?)</chn>", x_inner,
+                    re.IGNORECASE | re.DOTALL,
+                )
+                if m_chn:
+                    en = _strip_tags(x_inner[:m_chn.start()])
+                    cn = _strip_tags(m_chn.group(1))
+                else:
+                    en = _strip_tags(x_inner)
+                    cn = ""
+                if en and re.search(r"[A-Za-z]", en):
+                    ex: dict = {"en": en}
+                    if cn:
+                        ex["cn"] = cn
+                    phrase["example"] = ex
+        phrases.append(phrase)
+        # Hard cap — even `take` doesn't need more than 20 in the payload.
+        if len(phrases) >= 20:
+            break
+    return phrases
+
+
 def _extract_senses(html_str: str) -> List[dict]:
     """Walk every <sn-g …>…</sn-g> and pull out def / chn / examples.
 
@@ -380,6 +480,9 @@ def extract_entry(lemma: str, html_str: str) -> Optional[dict]:
     phon = _extract_phonetics(html_str)
     if phon:
         out["phon"] = phon
+    phrases = _extract_phrases(lemma, html_str)
+    if phrases:
+        out["phrases"] = phrases
     return out
 
 

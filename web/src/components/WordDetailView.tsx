@@ -31,6 +31,7 @@ import NotesPanel from "@/components/NotesPanel";
 import SpeakButton from "@/components/SpeakButton";
 import { toast } from "@/components/Toast";
 import { lookup, type LookupResult } from "@/lib/dict";
+import type { DictPhrase } from "@/lib/types";
 import {
   getEntry,
   getKnownLemmaSet,
@@ -497,6 +498,11 @@ export default function WordDetailView({ slug, from }: Props) {
         </section>
       ))}
 
+      {/* 常用搭配（牛津 <cf-blk> 抽取）—— 方便备考 PTE / 雅思的习惯用法 */}
+      {entry.phrases && entry.phrases.length > 0 && (
+        <PhrasesSection phrases={entry.phrases} />
+      )}
+
       {/* AI 例句区（Day 4）—— 围绕用户搜的词（typed），不是字典原形。
           这样 arousal 的例句不会跑到 arouse 的缓存键上去。 */}
       <AIExamplesPanel lemma={typed} senses={entry.senses} />
@@ -610,4 +616,72 @@ function groupByPos(
     else out.push([pos, [s]]);
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * <PhrasesSection /> — renders the collocation frames Oxford ships with the
+ * entry (extracted by `scripts/parse_mdx.py` from `<cf-blk><cf>~ to sth</cf>`).
+ *
+ * UX intent
+ * ---------
+ *  - Show the first 6 phrases by default; expand-on-click for the rest.
+ *    Entries like `take` have 20 patterns, but the first few are the ones
+ *    a learner actually needs to memorise.
+ *  - Each row shows the "filled" form ("prone to sth") as a chunky label
+ *    plus the mdx example under it. The example carries the accent —
+ *    that's what turns an abstract pattern into something a PTE/IELTS
+ *    student can actually recall.
+ *  - Provide a small speak button per example so the user can hear the
+ *    natural intonation of the phrase in context.
+ */
+const DEFAULT_VISIBLE = 6;
+
+function PhrasesSection({ phrases }: { phrases: DictPhrase[] }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasMore = phrases.length > DEFAULT_VISIBLE;
+  const visible = expanded ? phrases : phrases.slice(0, DEFAULT_VISIBLE);
+
+  return (
+    <section className="space-y-3">
+      <h2 className="text-sm font-medium uppercase tracking-wide text-[var(--accent)]">
+        常用搭配
+      </h2>
+      <ul className="space-y-2">
+        {visible.map((p, i) => (
+          <li
+            key={`${p.pattern}-${i}`}
+            className="rounded-lg border border-[var(--border)] p-3"
+          >
+            <p className="font-medium text-sm">{p.filled}</p>
+            {p.example && (
+              <div className="mt-1.5 space-y-0.5 border-l border-[var(--border)] pl-3">
+                <div className="flex items-start gap-2">
+                  <p className="flex-1 text-sm">{p.example.en}</p>
+                  <SpeakButton text={p.example.en} variant="us" />
+                </div>
+                {p.example.cn && (
+                  <p className="text-xs text-[var(--fg-soft)]">
+                    {p.example.cn}
+                  </p>
+                )}
+              </div>
+            )}
+          </li>
+        ))}
+      </ul>
+      {hasMore && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="text-xs text-[var(--accent)] hover:underline"
+        >
+          {expanded
+            ? "收起"
+            : `展开全部 ${phrases.length} 条搭配 →`}
+        </button>
+      )}
+    </section>
+  );
 }

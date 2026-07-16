@@ -31,6 +31,33 @@ import { getAppDb, STORE_META, STORE_SHARD } from "@/lib/db";
 /** Where the static JSON shards are served from (relative to web/public). */
 const DICT_BASE = "/dict";
 
+/**
+ * Bump this whenever `scripts/parse_mdx.py` changes the on-disk shape.
+ *
+ *   1 → initial shape { lemma, senses, phon? }
+ *   2 → adds `phrases?` (collocation frames extracted from <cf-blk>)
+ *
+ * A mismatch (or a value stored in the old, un-enveloped format) causes the
+ * cached IDB copy to be discarded and re-fetched. We also append the schema
+ * as a query string to the JSON URL so the *browser* HTTP cache doesn't
+ * feed stale bytes back to us.
+ */
+const DICT_SCHEMA = 2;
+
+interface Envelope<T> {
+  schema: number;
+  data: T;
+}
+
+function isCurrentEnvelope<T>(v: unknown): v is Envelope<T> {
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    (v as Envelope<T>).schema === DICT_SCHEMA &&
+    "data" in (v as Record<string, unknown>)
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Index + lemma list (the "always-loaded" small files)
 // ---------------------------------------------------------------------------
@@ -50,15 +77,21 @@ const shardCache = new Map<string, Record<string, DictRecord>>();
 async function loadIndex(): Promise<IndexMap> {
   if (indexCache) return indexCache;
   const db = await getAppDb();
-  const cached = (await db.get(STORE_META, "index")) as IndexMap | undefined;
-  if (cached) {
-    indexCache = cached;
-    return cached;
+  const cached = await db.get(STORE_META, "index");
+  if (isCurrentEnvelope<IndexMap>(cached)) {
+    indexCache = cached.data;
+    return cached.data;
   }
-  const res = await fetch(`${DICT_BASE}/dictionary-index.json`);
+  const res = await fetch(
+    `${DICT_BASE}/dictionary-index.json?v=${DICT_SCHEMA}`,
+  );
   if (!res.ok) throw new Error(`failed to load dictionary index: ${res.status}`);
   const json = (await res.json()) as IndexMap;
-  await db.put(STORE_META, json, "index");
+  await db.put(
+    STORE_META,
+    { schema: DICT_SCHEMA, data: json } satisfies Envelope<IndexMap>,
+    "index",
+  );
   indexCache = json;
   return json;
 }
@@ -67,15 +100,19 @@ async function loadIndex(): Promise<IndexMap> {
 async function loadLemmaList(): Promise<string[]> {
   if (lemmaListCache) return lemmaListCache;
   const db = await getAppDb();
-  const cached = (await db.get(STORE_META, "lemmaList")) as string[] | undefined;
-  if (cached) {
-    lemmaListCache = cached;
-    return cached;
+  const cached = await db.get(STORE_META, "lemmaList");
+  if (isCurrentEnvelope<string[]>(cached)) {
+    lemmaListCache = cached.data;
+    return cached.data;
   }
-  const res = await fetch(`${DICT_BASE}/lemma-list.json`);
+  const res = await fetch(`${DICT_BASE}/lemma-list.json?v=${DICT_SCHEMA}`);
   if (!res.ok) throw new Error(`failed to load lemma list: ${res.status}`);
   const json = (await res.json()) as string[];
-  await db.put(STORE_META, json, "lemmaList");
+  await db.put(
+    STORE_META,
+    { schema: DICT_SCHEMA, data: json } satisfies Envelope<string[]>,
+    "lemmaList",
+  );
   lemmaListCache = json;
   return json;
 }
@@ -94,17 +131,22 @@ export async function _loadShard(
   const cached = shardCache.get(shard);
   if (cached) return cached;
   const db = await getAppDb();
-  const stored = (await db.get(STORE_SHARD, shard)) as
-    | Record<string, DictRecord>
-    | undefined;
-  if (stored) {
-    shardCache.set(shard, stored);
-    return stored;
+  const stored = await db.get(STORE_SHARD, shard);
+  type ShardData = Record<string, DictRecord>;
+  if (isCurrentEnvelope<ShardData>(stored)) {
+    shardCache.set(shard, stored.data);
+    return stored.data;
   }
-  const res = await fetch(`${DICT_BASE}/dictionary-${shard}.json`);
+  const res = await fetch(
+    `${DICT_BASE}/dictionary-${shard}.json?v=${DICT_SCHEMA}`,
+  );
   if (!res.ok) throw new Error(`failed to load shard ${shard}: ${res.status}`);
-  const json = (await res.json()) as Record<string, DictRecord>;
-  await db.put(STORE_SHARD, json, shard);
+  const json = (await res.json()) as ShardData;
+  await db.put(
+    STORE_SHARD,
+    { schema: DICT_SCHEMA, data: json } satisfies Envelope<ShardData>,
+    shard,
+  );
   shardCache.set(shard, json);
   return json;
 }

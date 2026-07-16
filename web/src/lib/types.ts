@@ -26,6 +26,24 @@ export interface DictSense {
 }
 
 /**
+ * One collocation / grammatical frame ("common phrase") attached to an
+ * entry. Extracted from <cf-blk><cf>~ to sth</cf></cf-blk> in the Oxford 9
+ * mdx by `scripts/parse_mdx.py`.
+ *
+ *   pattern:  original Oxford form, with `~` standing in for the lemma
+ *             ("~ to sth", "~ (with sb) (about/on sth)").
+ *   filled:   same but with `~` substituted by the lemma, so the UI can
+ *             render "prone to sth" directly without more processing.
+ *   example:  the nearest example sentence attached to this frame in the
+ *             mdx, if any (a lot of frames come with one, some don't).
+ */
+export interface DictPhrase {
+  pattern: string;
+  filled: string;
+  example?: DictExample;
+}
+
+/**
  * Full structured entry, as written by `scripts/parse_mdx.py` into the
  * per-shard `dictionary-{a..z}.json` files.
  *
@@ -40,6 +58,8 @@ export interface DictEntry {
   lemma: string;
   senses: DictSense[];
   phon?: { uk?: string; us?: string };
+  /** Common collocation frames; omitted for entries that have none. */
+  phrases?: DictPhrase[];
 }
 
 export interface DictAlias {
