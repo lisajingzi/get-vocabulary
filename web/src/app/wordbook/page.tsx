@@ -34,6 +34,7 @@ import {
   type WordbookEntry,
   type WordbookStatus,
 } from "@/lib/wordbook/local";
+import SpeakButton from "@/components/SpeakButton";
 
 type SortKey = "recent" | "count" | "alpha";
 
@@ -69,6 +70,11 @@ export default function WordbookPage() {
   const [month, setMonth] = useState<string>("all"); // "all" | "YYYY-MM"
   const [sortKey, setSortKey] = useState<SortKey>("recent");
   const [undo, setUndo] = useState<UndoState | null>(null);
+  // "听力训练"模式：把 lemma 遮成 •••••，只留朗读按钮可用。
+  // A 方案 — 单词区域点击时临时揭示（onPointerDown 揭开、松手/离开恢复），
+  // 手滑不会跳转到详情页。
+  const [masked, setMasked] = useState(false);
+  const [revealedLemma, setRevealedLemma] = useState<string | null>(null);
 
   // Seed from localStorage and live-refresh on changes from any source
   // (detail page, sibling tab, etc).
@@ -188,30 +194,52 @@ export default function WordbookPage() {
         </div>
 
         {/* Tabs */}
-        <div className="inline-flex rounded-md border border-[var(--border)] p-0.5">
-          {(
-            [
-              { key: "new", label: `新朋友 · ${counts.new}` },
-              { key: "old", label: `老朋友 · ${counts.old}` },
-            ] as const
-          ).map((it) => {
-            const active = tab === it.key;
-            return (
-              <button
-                key={it.key}
-                type="button"
-                onClick={() => setTab(it.key)}
-                className={[
-                  "rounded px-3 py-1 text-sm transition",
-                  active
-                    ? "bg-[var(--accent)] text-white"
-                    : "text-[var(--fg-soft)] hover:text-[var(--fg)]",
-                ].join(" ")}
-              >
-                {it.label}
-              </button>
-            );
-          })}
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div className="inline-flex rounded-md border border-[var(--border)] p-0.5">
+            {(
+              [
+                { key: "new", label: `新朋友 · ${counts.new}` },
+                { key: "old", label: `老朋友 · ${counts.old}` },
+              ] as const
+            ).map((it) => {
+              const active = tab === it.key;
+              return (
+                <button
+                  key={it.key}
+                  type="button"
+                  onClick={() => setTab(it.key)}
+                  className={[
+                    "rounded px-3 py-1 text-sm transition",
+                    active
+                      ? "bg-[var(--accent)] text-white"
+                      : "text-[var(--fg-soft)] hover:text-[var(--fg)]",
+                  ].join(" ")}
+                >
+                  {it.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {/* 听力训练开关：遮住单词字面，只留朗读按钮。 */}
+          <button
+            type="button"
+            onClick={() => {
+              setMasked((v) => !v);
+              setRevealedLemma(null);
+            }}
+            title={masked ? "显示所有单词" : "遮住单词，只听音训练"}
+            aria-pressed={masked}
+            className={[
+              "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition",
+              masked
+                ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                : "border-[var(--border)] text-[var(--fg-soft)] hover:text-[var(--fg)] hover:border-[var(--fg-soft)]",
+            ].join(" ")}
+          >
+            <span aria-hidden>{masked ? "👁" : "🙈"}</span>
+            <span>{masked ? "显示单词" : "听力训练"}</span>
+          </button>
         </div>
 
         {/* Filters */}
@@ -274,30 +302,96 @@ export default function WordbookPage() {
             const isNew = e.status === "new";
             const moveTitle =
               isNew ? "已掌握，移到老朋友" : "还想再看，移回新朋友";
+            const isRevealed = revealedLemma === e.lemma;
+            const showLemma = !masked || isRevealed;
+            // 加密态下点单词区不再跳详情页（避免手滑穿帮），
+            // 而是"按住揭示"：pointerdown 显示，抬起/离开恢复遮罩。
+            const wordAreaProps = masked
+              ? {
+                  role: "button" as const,
+                  tabIndex: 0,
+                  title: isRevealed ? "松开恢复遮罩" : "按住可临时查看单词",
+                  onPointerDown: () => setRevealedLemma(e.lemma),
+                  onPointerUp: () => setRevealedLemma(null),
+                  onPointerLeave: () => setRevealedLemma(null),
+                  onPointerCancel: () => setRevealedLemma(null),
+                  onKeyDown: (ev: React.KeyboardEvent) => {
+                    if (ev.key === " " || ev.key === "Enter") {
+                      ev.preventDefault();
+                      setRevealedLemma(e.lemma);
+                    }
+                  },
+                  onKeyUp: () => setRevealedLemma(null),
+                }
+              : {};
             return (
               <li key={e.lemma} className="group">
                 <div className="flex items-center gap-3 px-4 py-3 transition hover:bg-[var(--bg-soft)]">
-                  <Link
-                    href={`/word/${encodeURIComponent(e.lemma)}?from=wordbook`}
-                    className="flex min-w-0 flex-1 items-baseline justify-between gap-3"
+                  {/* 朗读按钮：不管加不加密，始终可点。 */}
+                  <div
+                    className="shrink-0"
+                    onClick={(ev) => ev.stopPropagation()}
                   >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-baseline gap-2">
-                        <span className="font-medium">{e.lemma}</span>
-                        {e.pos && (
-                          <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
-                            {shortPos(e.pos)}
+                    <SpeakButton
+                      text={e.lemma}
+                      variant="us"
+                      title={masked ? "朗读（听音辨词）" : `朗读 ${e.lemma}`}
+                    />
+                  </div>
+
+                  {masked ? (
+                    <div
+                      {...wordAreaProps}
+                      className="flex min-w-0 flex-1 cursor-pointer items-baseline justify-between gap-3 select-none"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline gap-2">
+                          <span
+                            className={
+                              showLemma
+                                ? "font-medium"
+                                : "font-medium tracking-[0.15em] text-[var(--fg-soft)]"
+                            }
+                          >
+                            {showLemma ? e.lemma : maskLemma(e.lemma)}
                           </span>
-                        )}
+                          {e.pos && (
+                            <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
+                              {shortPos(e.pos)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="shrink-0 space-x-3 text-xs text-[var(--fg-soft)]">
+                        <span title="查询次数">×{e.queryCount}</span>
+                        <span title="最近查询日期">
+                          {formatQueryDate(e.lastQueriedAt ?? e.lastSeenAt)}
+                        </span>
                       </div>
                     </div>
-                    <div className="shrink-0 space-x-3 text-xs text-[var(--fg-soft)]">
-                      <span title="查询次数">×{e.queryCount}</span>
-                      <span title="最近查询日期">
-                        {formatQueryDate(e.lastQueriedAt ?? e.lastSeenAt)}
-                      </span>
-                    </div>
-                  </Link>
+                  ) : (
+                    <Link
+                      href={`/word/${encodeURIComponent(e.lemma)}?from=wordbook`}
+                      className="flex min-w-0 flex-1 items-baseline justify-between gap-3"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-baseline gap-2">
+                          <span className="font-medium">{e.lemma}</span>
+                          {e.pos && (
+                            <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
+                              {shortPos(e.pos)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="shrink-0 space-x-3 text-xs text-[var(--fg-soft)]">
+                        <span title="查询次数">×{e.queryCount}</span>
+                        <span title="最近查询日期">
+                          {formatQueryDate(e.lastQueriedAt ?? e.lastSeenAt)}
+                        </span>
+                      </div>
+                    </Link>
+                  )}
                   <button
                     type="button"
                     title={moveTitle}
@@ -437,6 +531,18 @@ function shortPos(pos: string): string {
   if (lc.includes("conjunction")) return "conj.";
   if (lc.includes("pronoun")) return "pron.";
   return pos.slice(0, 5);
+}
+
+/**
+ * 把 lemma 遮成同长度的圆点串。保留字母数量作为微弱视觉线索，
+ * 但既不透露首字母也不透露拼写。空格 / 连字符原样保留，避免
+ * 词组类的条目变成一坨点看不出结构。
+ */
+function maskLemma(lemma: string): string {
+  return lemma
+    .split("")
+    .map((ch) => (/[a-zA-Z]/.test(ch) ? "•" : ch))
+    .join("");
 }
 
 /** Show absolute month/day for the current year, year-prefixed otherwise. */
