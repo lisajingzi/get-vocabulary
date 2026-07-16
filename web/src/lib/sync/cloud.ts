@@ -36,6 +36,11 @@ import {
   type NotebookNote,
 } from "@/lib/notebook/local";
 import { listPunches, writePunchesRaw } from "@/lib/wordbook/punches";
+import {
+  getPreferences,
+  replacePreferences,
+  type Preferences,
+} from "@/lib/wordbook/preferences";
 
 // ---------------------------------------------------------------------------
 // Sync ID (persisted in localStorage)
@@ -77,6 +82,11 @@ export interface SyncSnapshot {
   notebook: Record<string, NotebookEntry>;
   notebookNotes: Record<string, NotebookNote[]>;
   punches: string[];
+  /**
+   * User preferences (review pace, etc). Optional so older snapshots that
+   * pre-date this field still parse cleanly.
+   */
+  preferences?: Preferences;
 }
 
 function buildSnapshot(): SyncSnapshot {
@@ -88,6 +98,7 @@ function buildSnapshot(): SyncSnapshot {
     notebook: readNotebookRaw(),
     notebookNotes: readNotebookNotesRaw(),
     punches: listPunches(),
+    preferences: getPreferences(),
   };
 }
 
@@ -220,6 +231,9 @@ export async function pull(overrideSyncId?: string): Promise<{
   writeNotebookRaw(mergedNotebook);
   writeNotebookNotesRaw(mergedNotebookNotes);
   writePunchesRaw(mergedPunches);
+  // Preferences: no timestamp on either side, so just take the remote value
+  // if present. Small blob, low stakes; last-write-wins is fine.
+  if (remote.preferences) replacePreferences(remote.preferences);
 
   return { merged: true };
 }

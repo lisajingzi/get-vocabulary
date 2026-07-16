@@ -7,50 +7,29 @@
  * from localStorage), so this MUST be a client component. The wrapping page
  * stays server-rendered for everything else.
  *
- * Two pieces of progress live here:
- *   - `dueTotal`     how many cards the scheduler picked for today
- *   - `finishedToday` how many of them have already been reviewed today
+ * Progress model:
+ *   We delegate to `getDailyProgress()` from `lib/wordbook/daily-snapshot`,
+ *   which reads today's frozen queue snapshot and reports:
+ *     - `total`     how many cards are expected today (Y)
+ *     - `finished`  how many of them the user has reviewed today (X)
+ *     - `remaining` = total - finished
  *
- * The "finished today" derivation is intentionally cheap: we count the
- * wordbook entries whose `lastSeenAt` is on the same local calendar day as
- * `now` AND whose level is greater than 0 (i.e. at least one review has
- * landed since their first lookup). This mirrors what the user sees in the
- * review flow without needing a separate review-log store.
+ *   Sharing this source with <CheckinSection /> means both surfaces show
+ *   identical numbers and both automatically honour the user's daily-cap
+ *   preference (see lib/wordbook/preferences.ts) via the same snapshot.
  */
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { listEntries } from "@/lib/wordbook/local";
-import { pickDailyQueue } from "@/lib/wordbook/scheduler";
-
-function localDayKey(d: Date): string {
-  // YYYY-MM-DD in the user's local TZ — matches what the punch-in table
-  // will use on Day 7.
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
-}
+import { getDailyProgress } from "@/lib/wordbook/daily-snapshot";
 
 export default function HomeReviewCard() {
   const [dueTotal, setDueTotal] = useState(0);
   const [finishedToday, setFinishedToday] = useState(0);
 
   const refresh = useCallback(() => {
-    const all = listEntries();
-    const todayKey = localDayKey(new Date());
-    // Today's queue size = items still due RIGHT NOW. As the user finishes
-    // them in /review, they get rescheduled into the future and drop out
-    // of this list, so dueTotal naturally counts down.
-    const due = pickDailyQueue(all);
-    setDueTotal(due.length);
-    // "已完成" = entries reviewed today (level > 0 implies at least one
-    // review attempt has landed; lastSeenAt on today implies it landed
-    // on this calendar day in local time).
-    const finished = all.filter((e) => {
-      if (e.level <= 0) return false;
-      return localDayKey(new Date(e.lastSeenAt)) === todayKey;
-    }).length;
+    const { total, finished } = getDailyProgress(new Date());
+    setDueTotal(Math.max(0, total - finished));
     setFinishedToday(finished);
   }, []);
 
@@ -60,10 +39,14 @@ export default function HomeReviewCard() {
       refresh();
     }
     window.addEventListener("get:wordbook-change", onChange);
+    window.addEventListener("get:daily-snapshot-change", onChange);
+    window.addEventListener("get:preferences-change", onChange);
     // Also refresh when the page becomes visible again (user came back from /review).
     document.addEventListener("visibilitychange", onChange);
     return () => {
       window.removeEventListener("get:wordbook-change", onChange);
+      window.removeEventListener("get:daily-snapshot-change", onChange);
+      window.removeEventListener("get:preferences-change", onChange);
       document.removeEventListener("visibilitychange", onChange);
     };
   }, [refresh]);

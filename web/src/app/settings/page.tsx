@@ -11,6 +11,11 @@
 
 import { useState, useEffect } from "react";
 import { getSyncId, setSyncId, push, pull } from "@/lib/sync/cloud";
+import {
+  getDailyCap,
+  setDailyCap,
+  DAILY_CAP_CHOICES,
+} from "@/lib/wordbook/preferences";
 
 type Status = "idle" | "loading" | "ok" | "error";
 
@@ -32,10 +37,24 @@ export default function SettingsPage() {
   const [pullStatus, setPullStatus] = useState<Status>("idle");
   const [importStatus, setImportStatus] = useState<Status>("idle");
   const [importMsg, setImportMsg] = useState("");
+  // `null` in state means "无上限"; we store it verbatim in preferences.
+  const [dailyCap, setDailyCapState] = useState<number | null>(null);
 
   useEffect(() => {
     setSyncIdState(getSyncId());
+    setDailyCapState(getDailyCap());
+    // If cloud sync pulls in a new preference blob after mount, mirror it.
+    const onPrefsChange = () => setDailyCapState(getDailyCap());
+    window.addEventListener("get:preferences-change", onPrefsChange);
+    return () => {
+      window.removeEventListener("get:preferences-change", onPrefsChange);
+    };
   }, []);
+
+  function handleDailyCapChange(next: number | null) {
+    setDailyCap(next);
+    setDailyCapState(next);
+  }
 
   async function handleCopy() {
     await navigator.clipboard.writeText(syncId);
@@ -98,6 +117,39 @@ export default function SettingsPage() {
           云同步让你在多台设备之间保持单词本、笔记本、复习进度同步，无需登录。
         </p>
       </div>
+
+      {/* ── Daily review pace ──────────────────────────── */}
+      <section className="rounded-xl border border-[var(--border)] p-5 space-y-3">
+        <h2 className="font-medium text-base">每日复习节奏</h2>
+        <p className="text-sm text-[var(--fg-soft)]">
+          每天到期的单词默认全部进入今日队列，严格遵循艾宾浩斯间隔。如果某些天到期量太大、想限制一下每日上限，可以在下面选一个档位（超过上限的单词会自动顺延到中未来几天）。
+        </p>
+        <p className="text-xs text-[var(--fg-soft)]">
+          ℹ️ 修改不会影响今天已经冻结的队列，从明天开始生效。
+        </p>
+        <div className="flex flex-wrap gap-2 pt-1">
+          {DAILY_CAP_CHOICES.map((choice) => {
+            const active = choice === dailyCap;
+            const label = choice === null ? "无上限" : `${choice} 个日`;
+            const key = choice === null ? "unlimited" : String(choice);
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => handleDailyCapChange(choice)}
+                className={[
+                  "rounded-lg border px-3.5 py-1.5 text-sm font-medium transition",
+                  active
+                    ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                    : "border-[var(--border)] hover:bg-[var(--surface-hover)]",
+                ].join(" ")}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </section>
 
       {/* ── My Sync Code ─────────────────────────────────────── */}
       <section className="rounded-xl border border-[var(--border)] p-5 space-y-3">

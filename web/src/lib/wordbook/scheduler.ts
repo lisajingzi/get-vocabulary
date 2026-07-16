@@ -5,8 +5,11 @@
  *   - 7 successful reviews graduate a word to "老朋友" (status='old', level=7).
  *   - One failure drops the level by 1 (never below 0).
  *   - "老朋友" never appears in the daily queue — manual review only.
- *   - Daily queue size cap = 10. If wordbook has fewer due items, take what
- *     we have (don't pad with未到期 cards — that fights the schedule).
+ *   - Daily queue size cap: user-tunable (see lib/wordbook/preferences.ts).
+ *     Default is UNLIMITED — every due card is surfaced today so intervals
+ *     aren't silently violated by a hardcoded ceiling. Users who want a
+ *     gentler pace can pick 10 / 20 / 30 / 50 in /settings.
+ *   - Never pads with未到期 cards — that would fight the schedule.
  *   - Sources: ALL "新朋友" entries the user has ever looked up, not just
  *     today's lookups.
  *
@@ -23,8 +26,15 @@
  */
 
 import { listEntries, type WordbookEntry } from "@/lib/wordbook/local";
+import { getDailyCap } from "@/lib/wordbook/preferences";
 
 export const MAX_LEVEL = 7;
+/**
+ * Legacy hardcoded cap. Kept exported for callers that still reference it,
+ * but the runtime cap now comes from `getDailyCap()` in `preferences.ts`
+ * and defaults to unlimited. Treat this constant as a suggested UI preset,
+ * not a scheduling law.
+ */
 export const DAILY_QUEUE_CAP = 10;
 
 const INTERVAL_DAYS = [0, 1, 2, 4, 7, 15, 30] as const;
@@ -67,7 +77,12 @@ export function applyReviewResult(
  *      field so this works for entries created before the scheduler shipped:
  *      anything without an explicit schedule is treated as "due".
  *   3. Sort due items by oldest lastSeenAt first (least recently practised),
- *      then take up to DAILY_QUEUE_CAP.
+ *      then apply the optional `cap`.
+ *
+ * `cap`:
+ *   - `undefined` → read the user's preference (default: null / unlimited).
+ *   - `null`      → return every due card.
+ *   - `number`    → return at most that many.
  *
  * The user's spec said: "如果凑不满就不用凑了；没有查新词也可以复习以前查过的词".
  * That's what this gives them — pure due-based selection, no padding.
@@ -75,6 +90,7 @@ export function applyReviewResult(
 export function pickDailyQueue(
   entries: WordbookEntry[] = listEntries(),
   now: Date = new Date(),
+  cap?: number | null,
 ): WordbookEntry[] {
   const dueBy = now.getTime();
   const due = entries.filter((e) => {
@@ -87,5 +103,17 @@ export function pickDailyQueue(
     return new Date(due).getTime() <= dueBy;
   });
   due.sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? -1 : 1));
-  return due.slice(0, DAILY_QUEUE_CAP);
+  // Resolve the effective cap:
+  //   - explicit null      → unlimited
+  //   - explicit number    → use it
+  //   - undefined (caller didn't specify) → read the current user preference
+  let effectiveCap: number | null;
+  if (cap === null) {
+    effectiveCap = null;
+  } else if (typeof cap === "number") {
+    effectiveCap = cap;
+  } else {
+    effectiveCap = getDailyCap();
+  }
+  return effectiveCap === null ? due : due.slice(0, effectiveCap);
 }

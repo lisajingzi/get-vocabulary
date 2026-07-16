@@ -23,6 +23,7 @@ const CHANGE_EVENTS = [
   "get:notebook-change",
   "get:notebook-notes-change",
   "get:punch-change",
+  "get:preferences-change",
 ];
 
 // Minimum gap between visibility-driven pulls, to avoid hammering the API

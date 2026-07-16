@@ -33,11 +33,16 @@ export default function CheckinSection() {
     window.addEventListener("get:punch-change", refresh);
     window.addEventListener("get:wordbook-change", refresh);
     window.addEventListener("get:daily-snapshot-change", refresh);
+    // Listen for preference changes too — the snapshot itself won't resize
+    // mid-day, but if the user has never opened /review today the snapshot
+    // is still un-frozen, and a fresh cap should be picked up immediately.
+    window.addEventListener("get:preferences-change", refresh);
     document.addEventListener("visibilitychange", refresh);
     return () => {
       window.removeEventListener("get:punch-change", refresh);
       window.removeEventListener("get:wordbook-change", refresh);
       window.removeEventListener("get:daily-snapshot-change", refresh);
+      window.removeEventListener("get:preferences-change", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
   }, [refresh]);
