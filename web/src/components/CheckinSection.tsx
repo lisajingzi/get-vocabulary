@@ -178,16 +178,24 @@ export default function CheckinSection() {
             const nextPunched = punched.has(d + 1) && dayOfWeek !== 6;
 
             return (
-              <div key={i} className="relative flex items-center justify-center">
+              <div key={i} className="relative flex h-9 items-center justify-center">
                 {/* Connector bars — visible tinted pills that link adjacent
                     punched days in the same week. Kept behind the circles
                     (z-0) so the deep-colored dots still read as the day
-                    markers, while the bar communicates "streak". */}
+                    markers, while the bar communicates "streak".
+                    Uses inline rgba to sidestep Tailwind's alpha-modifier
+                    parsing on CSS variables (which can silently fail). */}
                 {isPunched && prevPunched && (
-                  <div className="absolute inset-y-[32%] left-0 right-1/2 bg-[var(--accent)]/45" />
+                  <div
+                    className="pointer-events-none absolute top-1/2 left-0 right-1/2 h-3 -translate-y-1/2"
+                    style={{ backgroundColor: "rgba(106, 167, 195, 0.55)" }}
+                  />
                 )}
                 {isPunched && nextPunched && (
-                  <div className="absolute inset-y-[32%] left-1/2 right-0 bg-[var(--accent)]/45" />
+                  <div
+                    className="pointer-events-none absolute top-1/2 left-1/2 right-0 h-3 -translate-y-1/2"
+                    style={{ backgroundColor: "rgba(106, 167, 195, 0.55)" }}
+                  />
                 )}
                 <div
                   className={[
