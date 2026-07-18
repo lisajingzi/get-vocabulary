@@ -177,24 +177,37 @@ export default function CheckinSection() {
             const prevPunched = punched.has(d - 1) && dayOfWeek !== 0;
             const nextPunched = punched.has(d + 1) && dayOfWeek !== 6;
 
+            // Highlight-strike style (per user's reference image):
+            //  - Punched days share a single continuous soft-colored pill
+            //    that runs through the whole streak segment.
+            //  - Segment ends get rounded caps; middle days are flat.
+            //  - An isolated punched day is a fully rounded pill.
+            //  - "Today" keeps its white circle + accent ring on top so it
+            //    is still visually distinguishable, and the pill passes
+            //    through underneath it.
+            const pillBg = "rgba(106, 167, 195, 0.32)";
+            const roundLeft = !prevPunched;
+            const roundRight = !nextPunched;
+            // Extend the pill to the cell edges when connecting to a
+            // neighbor so adjacent cells' pills visually merge without
+            // any gap.
+            const pillLeft = prevPunched ? "0" : "4px";
+            const pillRight = nextPunched ? "0" : "4px";
+
             return (
               <div key={i} className="relative flex h-9 items-center justify-center">
-                {/* Connector bars — visible tinted pills that link adjacent
-                    punched days in the same week. Kept behind the circles
-                    (z-0) so the deep-colored dots still read as the day
-                    markers, while the bar communicates "streak".
-                    Uses inline rgba to sidestep Tailwind's alpha-modifier
-                    parsing on CSS variables (which can silently fail). */}
-                {isPunched && prevPunched && (
+                {isPunched && (
                   <div
-                    className="pointer-events-none absolute top-1/2 left-0 right-1/2 h-3 -translate-y-1/2"
-                    style={{ backgroundColor: "rgba(106, 167, 195, 0.55)" }}
-                  />
-                )}
-                {isPunched && nextPunched && (
-                  <div
-                    className="pointer-events-none absolute top-1/2 left-1/2 right-0 h-3 -translate-y-1/2"
-                    style={{ backgroundColor: "rgba(106, 167, 195, 0.55)" }}
+                    className="pointer-events-none absolute top-1/2 h-8 -translate-y-1/2"
+                    style={{
+                      backgroundColor: pillBg,
+                      left: pillLeft,
+                      right: pillRight,
+                      borderTopLeftRadius: roundLeft ? "9999px" : 0,
+                      borderBottomLeftRadius: roundLeft ? "9999px" : 0,
+                      borderTopRightRadius: roundRight ? "9999px" : 0,
+                      borderBottomRightRadius: roundRight ? "9999px" : 0,
+                    }}
                   />
                 )}
                 <div
@@ -203,7 +216,7 @@ export default function CheckinSection() {
                     isToday
                       ? "bg-white ring-2 ring-[var(--accent)] text-[var(--accent)] font-semibold shadow-[0_4px_10px_rgba(106,167,195,0.35)]"
                       : isPunched
-                      ? "bg-[var(--accent)] text-white shadow-[0_2px_6px_rgba(106,167,195,0.35)]"
+                      ? "text-[var(--accent)] font-semibold"
                       : "text-[var(--fg)]/85 hover:bg-white/50",
                   ].join(" ")}
                 >
