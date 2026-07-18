@@ -64,7 +64,14 @@ export default function WordDetailView({ slug, from }: Props) {
 
   // Whether to count this mount as a fresh lookup. Stable per mount so even
   // if `from` changes mid-route we don't second-guess the original intent.
-  const countAsLookupRef = useRef<boolean>(from !== "wordbook");
+  //
+  // Sources that must NOT inflate queryCount / lastQueriedAt:
+  //   • `wordbook`  — re-entering an already-known word from the list.
+  //   • `review`    — clicking the headword during a review session to peek
+  //                   at the meaning is part of studying, not a new lookup.
+  const countAsLookupRef = useRef<boolean>(
+    from !== "wordbook" && from !== "review",
+  );
 
   useEffect(() => {
     let cancelled = false;
