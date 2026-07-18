@@ -179,28 +179,23 @@ export default function CheckinSection() {
 
             return (
               <div key={i} className="relative flex items-center justify-center">
-                {isPunched && (
-                  <div
-                    className={`absolute inset-y-[30%] ${
-                      prevPunched && nextPunched
-                        ? "inset-x-0"
-                        : prevPunched
-                        ? "left-0 right-1/2"
-                        : nextPunched
-                        ? "left-1/2 right-0"
-                        : "hidden"
-                    } bg-[var(--accent)]/18`}
-                  />
+                {/* Connector bars — visible tinted pills that link adjacent
+                    punched days in the same week. Kept behind the circles
+                    (z-0) so the deep-colored dots still read as the day
+                    markers, while the bar communicates "streak". */}
+                {isPunched && prevPunched && (
+                  <div className="absolute inset-y-[32%] left-0 right-1/2 bg-[var(--accent)]/45" />
+                )}
+                {isPunched && nextPunched && (
+                  <div className="absolute inset-y-[32%] left-1/2 right-0 bg-[var(--accent)]/45" />
                 )}
                 <div
                   className={[
                     "relative z-10 flex h-9 w-9 items-center justify-center rounded-full mx-auto text-[13px] tabular-nums transition",
                     isToday
                       ? "bg-white ring-2 ring-[var(--accent)] text-[var(--accent)] font-semibold shadow-[0_4px_10px_rgba(106,167,195,0.35)]"
-                      : isPunched && (!prevPunched || !nextPunched)
-                      ? "bg-[var(--accent)] text-white shadow-[0_2px_6px_rgba(106,167,195,0.35)]"
                       : isPunched
-                      ? "text-[var(--accent)] font-semibold"
+                      ? "bg-[var(--accent)] text-white shadow-[0_2px_6px_rgba(106,167,195,0.35)]"
                       : "text-[var(--fg)]/85 hover:bg-white/50",
                   ].join(" ")}
                 >
