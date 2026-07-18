@@ -775,8 +775,10 @@ function ComposePanel({
         <div className="flex items-baseline gap-2">
           <Link
             href={`/word/${encodeURIComponent(target)}?from=review`}
+            target="_blank"
+            rel="noopener"
             className="text-xl font-semibold underline decoration-transparent underline-offset-4 transition hover:decoration-[var(--accent)] hover:text-[var(--accent)]"
-            title="查看单词详情"
+            title="在新标签页查看单词详情（保留造句进度）"
           >
             {target}
           </Link>
