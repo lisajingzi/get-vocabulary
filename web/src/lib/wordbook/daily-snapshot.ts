@@ -102,6 +102,27 @@ export interface DailyProgress {
   remaining: number;
 }
 
+/**
+ * Drop today's frozen snapshot if it is empty.
+ *
+ * Called after a successful cloud pull on a device that had no local data
+ * yet: the snapshot would have been frozen to an empty queue *before* the
+ * pull merged remote words in, which then makes "开始复习" stay disabled
+ * for the rest of the day. Clearing the empty snapshot lets the next read
+ * refreeze it against the freshly-merged wordbook.
+ *
+ * Non-empty snapshots are left alone — that preserves the product rule
+ * "words added mid-day go to tomorrow's queue".
+ */
+export function invalidateSnapshotIfEmpty(): void {
+  if (typeof window === "undefined") return;
+  const existing = readRaw();
+  if (!existing) return;
+  if (existing.lemmas.length > 0) return;
+  window.localStorage.removeItem(STORAGE_KEY);
+  window.dispatchEvent(new CustomEvent("get:daily-snapshot-change"));
+}
+
 export function getDailyProgress(now: Date = new Date()): DailyProgress {
   const snapshot = getTodaySnapshot(now);
   if (snapshot.size === 0) {

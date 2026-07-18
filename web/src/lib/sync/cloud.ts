@@ -41,6 +41,7 @@ import {
   replacePreferences,
   type Preferences,
 } from "@/lib/wordbook/preferences";
+import { invalidateSnapshotIfEmpty } from "@/lib/wordbook/daily-snapshot";
 
 // ---------------------------------------------------------------------------
 // Sync ID (persisted in localStorage)
@@ -234,6 +235,12 @@ export async function pull(overrideSyncId?: string): Promise<{
   // Preferences: no timestamp on either side, so just take the remote value
   // if present. Small blob, low stakes; last-write-wins is fine.
   if (remote.preferences) replacePreferences(remote.preferences);
+
+  // If today's snapshot was frozen empty *before* this pull merged data in
+  // (typical on a device that just bound to an existing sync code), drop it
+  // so the next read refreezes against the fresh wordbook. Non-empty
+  // snapshots are preserved to keep the "new words wait for tomorrow" rule.
+  invalidateSnapshotIfEmpty();
 
   return { merged: true };
 }
