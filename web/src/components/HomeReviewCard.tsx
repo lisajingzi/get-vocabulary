@@ -26,11 +26,15 @@ import { getDailyProgress } from "@/lib/wordbook/daily-snapshot";
 export default function HomeReviewCard() {
   const [dueTotal, setDueTotal] = useState(0);
   const [finishedToday, setFinishedToday] = useState(0);
+  const [activeRemaining, setActiveRemaining] = useState(0);
+  const [passiveRemaining, setPassiveRemaining] = useState(0);
 
   const refresh = useCallback(() => {
-    const { total, finished } = getDailyProgress(new Date());
-    setDueTotal(Math.max(0, total - finished));
-    setFinishedToday(finished);
+    const progress = getDailyProgress(new Date());
+    setDueTotal(Math.max(0, progress.total - progress.finished));
+    setFinishedToday(progress.finished);
+    setActiveRemaining(progress.active.remaining);
+    setPassiveRemaining(progress.passive.remaining);
   }, []);
 
   useEffect(() => {
@@ -68,9 +72,18 @@ export default function HomeReviewCard() {
             ✅ 今日 {finishedToday} 个单词已完成
           </p>
         ) : (
-          <p className="text-sm text-[var(--fg-soft)]">
-            进度 {finishedToday} / {totalToday}
-          </p>
+          <div className="space-y-1">
+            <p className="text-sm text-[var(--fg-soft)]">
+              进度 {finishedToday} / {totalToday}
+            </p>
+            {(activeRemaining > 0 || passiveRemaining > 0) && (
+              <p className="text-xs text-[var(--fg-soft)]">
+                听说写剩 <span className="font-medium text-[var(--fg)]">{activeRemaining}</span>
+                <span className="mx-1 opacity-50">·</span>
+                阅读剩 <span className="font-medium text-[var(--fg)]">{passiveRemaining}</span>
+              </p>
+            )}
+          </div>
         )}
       </div>
       {hasNothingToReview ? (

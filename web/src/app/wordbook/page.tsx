@@ -32,11 +32,14 @@ import {
   listEntries,
   setStatus,
   type WordbookEntry,
+  type WordbookPurpose,
   type WordbookStatus,
 } from "@/lib/wordbook/local";
 import SpeakButton from "@/components/SpeakButton";
 
 type SortKey = "recent" | "count" | "alpha";
+/** “all” = 不筛选。后两项对应 WordbookPurpose。 */
+type PurposeFilter = "all" | WordbookPurpose;
 
 const POS_OPTIONS = [
   { value: "all", label: "全部" },
@@ -67,6 +70,7 @@ export default function WordbookPage() {
   const [entries, setEntries] = useState<WordbookEntry[]>([]);
   const [tab, setTab] = useState<WordbookStatus>("new");
   const [pos, setPos] = useState<PosOption>("all");
+  const [purpose, setPurpose] = useState<PurposeFilter>("all");
   const [month, setMonth] = useState<string>("all"); // "all" | "YYYY-MM"
   const [sortKey, setSortKey] = useState<SortKey>("recent");
   const [undo, setUndo] = useState<UndoState | null>(null);
@@ -138,9 +142,10 @@ export default function WordbookPage() {
     const filtered = entries
       .filter((e) => e.status === tab)
       .filter((e) => matchPos(e.pos, pos))
+      .filter((e) => matchPurpose(e.purpose, purpose))
       .filter((e) => matchMonth(e.lastQueriedAt ?? e.lastSeenAt, month));
     return [...filtered].sort(buildComparator(sortKey));
-  }, [entries, tab, pos, month, sortKey]);
+  }, [entries, tab, pos, purpose, month, sortKey]);
 
   function handleMove(entry: WordbookEntry) {
     const to: WordbookStatus = entry.status === "new" ? "old" : "new";
@@ -244,6 +249,40 @@ export default function WordbookPage() {
 
         {/* Filters */}
         <div className="flex flex-wrap items-center gap-3 text-xs">
+          {/* 复习方式（听说写 / 阅读）— 专门拉出成一组胶囊按钮，
+              方便快速在两类词之间切换。选中项高亮；默认“全部”。 */}
+          <div
+            className="inline-flex rounded-md border border-[var(--border)] p-0.5"
+            role="radiogroup"
+            aria-label="复习方式筛选"
+          >
+            {(
+              [
+                { key: "all", label: "全部" },
+                { key: "active", label: "听说写" },
+                { key: "passive", label: "阅读" },
+              ] as const
+            ).map((it) => {
+              const active = it.key === purpose;
+              return (
+                <button
+                  key={it.key}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => setPurpose(it.key)}
+                  className={[
+                    "rounded px-2.5 py-1 transition",
+                    active
+                      ? "bg-[var(--accent)] text-white"
+                      : "text-[var(--fg-soft)] hover:text-[var(--fg)]",
+                  ].join(" ")}
+                >
+                  {it.label}
+                </button>
+              );
+            })}
+          </div>
           <label className="inline-flex items-center gap-1.5 text-[var(--fg-soft)]">
             词性
             <select
@@ -478,6 +517,16 @@ function matchPos(stored: string | undefined, want: PosOption): boolean {
     return !["verb", "noun", "adjective", "adverb"].some((p) => s.includes(p));
   }
   return s.includes(want);
+}
+
+/** “all” 匹配全部；否则严格比对 purpose，未设置时视为 “active”（与其他代码一致）。 */
+function matchPurpose(
+  stored: WordbookPurpose | undefined,
+  want: PurposeFilter,
+): boolean {
+  if (want === "all") return true;
+  const actual: WordbookPurpose = stored ?? "active";
+  return actual === want;
 }
 
 /** Returns "YYYY-MM" for the given ISO timestamp, or null if unparseable. */

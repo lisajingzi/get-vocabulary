@@ -37,8 +37,10 @@ import {
   getKnownLemmaSet,
   recordLookup,
   setPos,
+  setPurpose,
   setStatus,
   type WordbookEntry,
+  type WordbookPurpose,
 } from "@/lib/wordbook/local";
 
 interface Props {
@@ -168,6 +170,22 @@ export default function WordDetailView({ slug, from }: Props) {
     [state, query, bookEntry?.status],
   );
 
+  // Change the word's review-flow purpose (听说写 vs 阅读). Same lemma-
+  // resolution rules as handleToggleStatus above.
+  const handleTogglePurpose = useCallback(
+    (next: WordbookPurpose) => {
+      let lemma: string | null = null;
+      if (state.kind === "ok") lemma = state.result.query;
+      else if (state.kind === "not-found") lemma = query;
+      if (!lemma) return;
+      const updated = setPurpose(lemma, next);
+      if (!updated) return;
+      setBookEntry(updated);
+      toast(next === "active" ? "已标为听说写词" : "已标为阅读词");
+    },
+    [state, query],
+  );
+
   // Snapshot of "already-looked-up" lemmas; used to highlight them in every
   // dictionary example sentence on the page. Lazy-initialized so first paint
   // already has the data (avoids the brief "black, then highlighted" flash
@@ -291,7 +309,7 @@ export default function WordDetailView({ slug, from }: Props) {
           {/* Same 新朋友 / 不收藏 toggle as canonical entries. "老朋友" is
               still owned exclusively by the review flow. */}
           {bookEntry && (
-            <div className="flex items-center gap-2 pt-1">
+            <div className="flex flex-wrap items-center gap-2 pt-1">
               {bookEntry.status === "old" ? (
                 <FriendBadge />
               ) : (
@@ -300,6 +318,10 @@ export default function WordDetailView({ slug, from }: Props) {
                   onChange={handleToggleStatus}
                 />
               )}
+              <PurposeToggle
+                purpose={bookEntry.purpose ?? "active"}
+                onChange={handleTogglePurpose}
+              />
               <span className="text-xs text-[var(--fg-soft)]">
                 已查 {bookEntry.queryCount} 次
               </span>
@@ -382,9 +404,10 @@ export default function WordDetailView({ slug, from }: Props) {
         {/* 新朋友 / 不收藏 二选一开关。
             "老朋友" 状态由艾宾浩斯打卡流程自动产生（level 升到 7 时），
             这里不能手动切换 —— 否则就绕过了复习曲线。已是老朋友的词，
-            位置上换成只读徽标 <FriendBadge />。 */}
+            位置上换成只读徽标 <FriendBadge />。
+            右侧附带一个 听说写 / 阅读 开关，控制这个词走哪套复习流程。 */}
         {bookEntry && (
-          <div className="flex items-center gap-2 pt-2">
+          <div className="flex flex-wrap items-center gap-2 pt-2">
             {bookEntry.status === "old" ? (
               <FriendBadge />
             ) : (
@@ -393,6 +416,10 @@ export default function WordDetailView({ slug, from }: Props) {
                 onChange={handleToggleStatus}
               />
             )}
+            <PurposeToggle
+              purpose={bookEntry.purpose ?? "active"}
+              onChange={handleTogglePurpose}
+            />
             <span className="text-xs text-[var(--fg-soft)]">
               已查 {bookEntry.queryCount} 次
             </span>
@@ -600,6 +627,57 @@ function FriendBadge() {
       <span aria-hidden>✓</span>
       <span>老朋友 · 已掌握</span>
     </span>
+  );
+}
+
+/**
+ * Two-state pill: 听说写 / 阅读.
+ *
+ * Chooses which review flow this word takes:
+ *   - active  (听说写) → 听音拼写 / 同义词选择 + AI 造句批改（默认）。
+ *   - passive (阅读)  → 看到自评 “认识 / 不认识”，不需习写。
+ * 听说写 / 阅读 二者共享一条艾宾浩斯曲线，只是检验形式不同，
+ * 因此在详情页随时可以切换而不影响 level / nextReviewAt。
+ */
+function PurposeToggle({
+  purpose,
+  onChange,
+}: {
+  purpose: WordbookPurpose;
+  onChange: (next: WordbookPurpose) => void;
+}) {
+  const items: Array<{ key: WordbookPurpose; label: string; hint: string }> = [
+    { key: "active", label: "听说写", hint: "听音辨词、拼写、造句（完整复习）" },
+    { key: "passive", label: "阅读", hint: "只求看到认识，自评认识 / 不认识" },
+  ];
+  return (
+    <div
+      className="inline-flex rounded-md border border-[var(--border)] p-0.5"
+      role="radiogroup"
+      aria-label="复习方式"
+    >
+      {items.map((it) => {
+        const active = it.key === purpose;
+        return (
+          <button
+            key={it.key}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            onClick={() => onChange(it.key)}
+            title={it.hint}
+            className={[
+              "rounded px-2.5 py-1 text-xs transition",
+              active
+                ? "bg-[var(--accent)] text-white"
+                : "text-[var(--fg-soft)] hover:text-[var(--fg)]",
+            ].join(" ")}
+          >
+            {it.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

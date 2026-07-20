@@ -52,6 +52,13 @@ type Phase =
   | { kind: "quiz"; q: SynonymQuestion; failedOnce: boolean }
   | { kind: "spell"; target: string; failedOnce: boolean }
   | {
+      kind: "recognize";
+      target: string;
+      /** Set once the user has self-graded (认识 / 忘了). Drives the result
+       *  panel + the advance call after they hit “下一题”. */
+      graded: "pass" | "fail" | null;
+    }
+  | {
       kind: "compose";
       target: string;
       prompt: SynonymQuestion["prompt"];
@@ -127,14 +134,20 @@ export default function ReviewView() {
   }, []);
 
   // ----- whenever cursor moves to a new in-bounds item, build its quiz ----
-  const buildQuestion = useCallback(async (lemma: string, failedOnce: boolean) => {
+  const buildQuestion = useCallback(async (item: WordbookEntry, failedOnce: boolean) => {
     setPhase({ kind: "loading" });
-    const q = await buildSynonymQuestion(lemma);
+    // 阅读词（purpose === "passive")走轻量识记流程：看词形 → 自评
+    // "认识 / 忘了" → 揭示释义 → 下一题。不轰 quiz、不拼写、不造句。
+    if (item.purpose === "passive") {
+      setPhase({ kind: "recognize", target: item.lemma, graded: null });
+      return;
+    }
+    const q = await buildSynonymQuestion(item.lemma);
     if (!q) {
       // Offline synonym table has nothing usable for this lemma — typically
       // a concrete noun ("quarry", "anvil") or a rare adjective. Instead
       // of teaching the user a fake "synonym", we test recall via spelling.
-      setPhase({ kind: "spell", target: lemma, failedOnce });
+      setPhase({ kind: "spell", target: item.lemma, failedOnce });
       return;
     }
     setPhase({ kind: "quiz", q, failedOnce });
@@ -149,7 +162,7 @@ export default function ReviewView() {
       return;
     }
     const item = queue[cursor];
-    void buildQuestion(item.lemma, false);
+    void buildQuestion(item, false);
   }, [cursor, queue, buildQuestion]);
 
   // ----- advance helper: persist outcome + step the cursor ----------------
@@ -233,6 +246,16 @@ export default function ReviewView() {
               failedOnce: true,
             })
           }
+        />
+      )}
+      {phase.kind === "recognize" && (
+        <RecognizePanel
+          target={phase.target}
+          graded={phase.graded}
+          onGrade={(g) =>
+            setPhase({ kind: "recognize", target: phase.target, graded: g })
+          }
+          onNext={() => advance(phase.graded === "pass" ? "pass" : "fail")}
         />
       )}
       {phase.kind === "compose" && (
@@ -505,6 +528,153 @@ function SpellPanel({
             {gloss?.chn && (
               <p className="text-xs text-[var(--fg-soft)]">{gloss.chn}</p>
             )}
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * <RecognizePanel /> — 阅读词（purpose === "passive")的轻量复记面板。
+ *
+ * 流程：
+ *   1. 显示词形 + 发音按钮（不先看中文释义）。
+ *   2. 用户自评 “认识 ✓” 或 “忘了 ✗”。
+ *   3. 显示释义（到这一步才知晓对不对），
+ *      提供 “重新选择” 以防止滑手，确认后 “下一题” advance。
+ *
+ * 不走 QuizPanel/SpellPanel/ComposePanel，也不调用 AI 批改 ——
+ * “阅读词”的目标就是 “看到能想起意思”，不需要写作。
+ */
+function RecognizePanel({
+  target,
+  graded,
+  onGrade,
+  onNext,
+}: {
+  target: string;
+  graded: "pass" | "fail" | null;
+  onGrade: (g: "pass" | "fail") => void;
+  onNext: () => void;
+}) {
+  const [gloss, setGloss] = useState<{
+    pos?: string;
+    def?: string;
+    chn?: string;
+  } | null>(null);
+
+  useEffect(() => {
+    setGloss(null);
+    let cancelled = false;
+    void (async () => {
+      const { lookup } = await import("@/lib/dict");
+      const got = await lookup(target);
+      if (cancelled) return;
+      const s = got?.entry.senses?.[0];
+      setGloss(s ? { pos: s.pos, def: s.def, chn: s.chn } : null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [target]);
+
+  return (
+    <section className="space-y-4 rounded-xl border border-[var(--border)] p-4">
+      <header className="space-y-1">
+        <div className="flex flex-wrap items-baseline gap-2">
+          <Link
+            href={`/word/${encodeURIComponent(target)}?from=review`}
+            target="_blank"
+            rel="noopener"
+            className="text-2xl font-semibold tracking-tight underline decoration-transparent underline-offset-4 transition hover:decoration-[var(--accent)] hover:text-[var(--accent)]"
+            title="在新标签页查看详情"
+          >
+            {target}
+          </Link>
+          <SpeakButton text={target} variant="us" />
+          <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
+            阅读词
+          </span>
+        </div>
+        <p className="pt-1 text-xs text-[var(--fg-soft)]">
+          {graded === null
+            ? "看这个单词，你能想起它的意思吗？先自评，再看释义。"
+            : "看释义看看自评对不对："}
+        </p>
+      </header>
+
+      {/* 自评按钮。graded === null 时两个都可点；
+          已自评后保留高亮，但仍然允许 “重新选择” 以防止滑手。 */}
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onGrade("pass")}
+          className={[
+            "rounded-md border px-3 py-1.5 text-sm transition",
+            graded === "pass"
+              ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+              : "border-[var(--border)] hover:border-[var(--accent)]",
+          ].join(" ")}
+        >
+          ✓ 认识
+        </button>
+        <button
+          type="button"
+          onClick={() => onGrade("fail")}
+          className={[
+            "rounded-md border px-3 py-1.5 text-sm transition",
+            graded === "fail"
+              ? "border-red-400 bg-red-500 text-white"
+              : "border-[var(--border)] hover:border-red-400 hover:text-red-500",
+          ].join(" ")}
+        >
+          ✗ 忘了
+        </button>
+      </div>
+
+      {/* 显示释义：仅在自评后显示，避免“先看释义再自评”。 */}
+      {graded !== null && (
+        <div
+          className={[
+            "space-y-2 rounded-lg border p-3 text-sm",
+            graded === "pass"
+              ? "border-[var(--accent)]/40 bg-[var(--accent-soft)]/40"
+              : "border-red-200 bg-red-50/60 dark:border-red-900/40 dark:bg-red-950/20",
+          ].join(" ")}
+        >
+          <div className="space-y-0.5">
+            <div className="flex items-baseline gap-2">
+              <span className="text-base font-semibold">{target}</span>
+              {gloss?.pos && (
+                <span className="text-[10px] text-[var(--fg-soft)]">
+                  ({gloss.pos})
+                </span>
+              )}
+            </div>
+            {gloss?.def && (
+              <p className="text-xs text-[var(--fg)]">{gloss.def}</p>
+            )}
+            {gloss?.chn && (
+              <p className="text-xs text-[var(--fg-soft)]">{gloss.chn}</p>
+            )}
+            {!gloss && (
+              <p className="text-xs text-[var(--fg-soft)]">未找到详细释义，可点词形查看详情页。</p>
+            )}
+          </div>
+          <div className="flex items-center justify-between pt-1">
+            <p className="text-[11px] text-[var(--fg-soft)]">
+              {graded === "pass"
+                ? "自评认识 —— 本题记为通过，level +1。"
+                : "自评忘了 —— 本题记为失败，level -1。"}
+            </p>
+            <button
+              type="button"
+              onClick={onNext}
+              className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-1.5 text-xs text-white transition hover:opacity-90"
+            >
+              下一题 →
+            </button>
           </div>
         </div>
       )}

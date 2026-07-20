@@ -26,14 +26,17 @@
  */
 
 import { listEntries, type WordbookEntry } from "@/lib/wordbook/local";
-import { getDailyCap } from "@/lib/wordbook/preferences";
+import {
+  getDailyCapActive,
+  getDailyCapPassive,
+} from "@/lib/wordbook/preferences";
 
 export const MAX_LEVEL = 7;
 /**
  * Legacy hardcoded cap. Kept exported for callers that still reference it,
- * but the runtime cap now comes from `getDailyCap()` in `preferences.ts`
- * and defaults to unlimited. Treat this constant as a suggested UI preset,
- * not a scheduling law.
+ * but the runtime cap now comes from `getDailyCapActive()` /
+ * `getDailyCapPassive()` in `preferences.ts` and defaults to unlimited.
+ * Treat this constant as a suggested UI preset, not a scheduling law.
  */
 export const DAILY_QUEUE_CAP = 10;
 
@@ -73,24 +76,31 @@ export function applyReviewResult(
  * Strategy:
  *   1. Filter to status === 'new' AND level < MAX_LEVEL.
  *   2. Prefer entries whose `nextReviewAt` is null OR <= now (i.e. due).
- *      We track the schedule on `lastSeenAt` rather than introducing a new
- *      field so this works for entries created before the scheduler shipped:
- *      anything without an explicit schedule is treated as "due".
- *   3. Sort due items by oldest lastSeenAt first (least recently practised),
- *      then apply the optional `cap`.
+ *      Anything without an explicit schedule is treated as "due" — covers
+ *      entries created before scheduling fields existed.
+ *   3. Sort due items by oldest lastSeenAt first (least recently practised).
+ *   4. Split into two groups by `purpose` (missing = "active"), apply each
+ *      group's own cap independently, then merge back into one ordered
+ *      queue — still sorted by lastSeenAt so the review page interleaves
+ *      them naturally.
  *
- * `cap`:
- *   - `undefined` → read the user's preference (default: null / unlimited).
- *   - `null`      → return every due card.
- *   - `number`    → return at most that many.
+ * `caps`:
+ *   - `undefined`  → read the user's preferences.
+ *   - `{ active?: number|null, passive?: number|null }`  → use verbatim
+ *     (either or both keys can be null for unlimited on that side).
  *
- * The user's spec said: "如果凑不满就不用凑了；没有查新词也可以复习以前查过的词".
- * That's what this gives them — pure due-based selection, no padding.
+ * The user's spec is: pure due-based selection, no padding, but with
+ * independent 说写 / 阅读 daily ceilings so 阅读量大不成为说写的障碍。
  */
+export interface DailyCaps {
+  active?: number | null;
+  passive?: number | null;
+}
+
 export function pickDailyQueue(
   entries: WordbookEntry[] = listEntries(),
   now: Date = new Date(),
-  cap?: number | null,
+  caps?: DailyCaps,
 ): WordbookEntry[] {
   const dueBy = now.getTime();
   const due = entries.filter((e) => {
@@ -98,22 +108,37 @@ export function pickDailyQueue(
     if (e.level >= MAX_LEVEL) return false;
     // Treat an entry without an explicit due time as immediately due —
     // covers anything created before scheduling fields existed.
-    const due = (e as WordbookEntry & { nextReviewAt?: string | null }).nextReviewAt;
-    if (!due) return true;
-    return new Date(due).getTime() <= dueBy;
+    const dueAt = (e as WordbookEntry & { nextReviewAt?: string | null }).nextReviewAt;
+    if (!dueAt) return true;
+    return new Date(dueAt).getTime() <= dueBy;
   });
   due.sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? -1 : 1));
-  // Resolve the effective cap:
-  //   - explicit null      → unlimited
-  //   - explicit number    → use it
-  //   - undefined (caller didn't specify) → read the current user preference
-  let effectiveCap: number | null;
-  if (cap === null) {
-    effectiveCap = null;
-  } else if (typeof cap === "number") {
-    effectiveCap = cap;
-  } else {
-    effectiveCap = getDailyCap();
+
+  // Resolve effective caps: explicit values win; undefined falls back to
+  // the user's stored preferences.
+  const activeCap =
+    caps?.active === undefined ? getDailyCapActive() : caps.active;
+  const passiveCap =
+    caps?.passive === undefined ? getDailyCapPassive() : caps.passive;
+
+  // Partition by purpose (undefined = active for legacy rows), each side
+  // gets its own cap slice, then we re-merge in the original lastSeenAt
+  // order. Using two counters on a single pass keeps the merged output
+  // stable without a second sort.
+  let takenActive = 0;
+  let takenPassive = 0;
+  const out: WordbookEntry[] = [];
+  for (const e of due) {
+    const isPassive = e.purpose === "passive";
+    if (isPassive) {
+      if (passiveCap !== null && takenPassive >= passiveCap) continue;
+      takenPassive++;
+      out.push(e);
+    } else {
+      if (activeCap !== null && takenActive >= activeCap) continue;
+      takenActive++;
+      out.push(e);
+    }
   }
-  return effectiveCap === null ? due : due.slice(0, effectiveCap);
+  return out;
 }

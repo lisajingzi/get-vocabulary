@@ -12,8 +12,10 @@
 import { useState, useEffect } from "react";
 import { getSyncId, setSyncId, push, pull } from "@/lib/sync/cloud";
 import {
-  getDailyCap,
-  setDailyCap,
+  getDailyCapActive,
+  getDailyCapPassive,
+  setDailyCapActive,
+  setDailyCapPassive,
   DAILY_CAP_CHOICES,
 } from "@/lib/wordbook/preferences";
 
@@ -38,24 +40,38 @@ export default function SettingsPage() {
   const [importStatus, setImportStatus] = useState<Status>("idle");
   const [importMsg, setImportMsg] = useState("");
   // `null` in state means "无上限"; we store it verbatim in preferences.
-  const [dailyCap, setDailyCapState] = useState<number | null>(null);
-  // Brief "已保存 ✓" flash after the user picks a new cap.
+  // 两组 cap 分别控制 说写 / 阅读 的每日上限；两者互不影响。
+  const [capActive, setCapActiveState] = useState<number | null>(null);
+  const [capPassive, setCapPassiveState] = useState<number | null>(null);
+  // Brief "已保存 ✓" flash after the user picks a new cap. 两侧共用同一个
+  // 提示，因为一次只会改一侧。
   const [capSavedFlash, setCapSavedFlash] = useState(false);
 
   useEffect(() => {
     setSyncIdState(getSyncId());
-    setDailyCapState(getDailyCap());
+    setCapActiveState(getDailyCapActive());
+    setCapPassiveState(getDailyCapPassive());
     // If cloud sync pulls in a new preference blob after mount, mirror it.
-    const onPrefsChange = () => setDailyCapState(getDailyCap());
+    const onPrefsChange = () => {
+      setCapActiveState(getDailyCapActive());
+      setCapPassiveState(getDailyCapPassive());
+    };
     window.addEventListener("get:preferences-change", onPrefsChange);
     return () => {
       window.removeEventListener("get:preferences-change", onPrefsChange);
     };
   }, []);
 
-  function handleDailyCapChange(next: number | null) {
-    setDailyCap(next);
-    setDailyCapState(next);
+  function handleCapActiveChange(next: number | null) {
+    setDailyCapActive(next);
+    setCapActiveState(next);
+    setCapSavedFlash(true);
+    window.setTimeout(() => setCapSavedFlash(false), 2000);
+  }
+
+  function handleCapPassiveChange(next: number | null) {
+    setDailyCapPassive(next);
+    setCapPassiveState(next);
     setCapSavedFlash(true);
     window.setTimeout(() => setCapSavedFlash(false), 2000);
   }
@@ -123,45 +139,102 @@ export default function SettingsPage() {
       </div>
 
       {/* ── Daily review pace ──────────────────────────── */}
-      <section className="rounded-xl border border-[var(--border)] p-5 space-y-3">
-        <h2 className="font-medium text-base">每日复习节奏</h2>
-        <p className="text-sm text-[var(--fg-soft)]">
-          每天到期的单词默认全部进入今日队列，严格遵循艾宾浩斯间隔。如果某些天到期量太大、想限制一下每日上限，可以在下面选一个档位（超过上限的单词会自动顺延到未来几天）。
-        </p>
-        <p className="text-xs text-[var(--fg-soft)]">
-          ℹ️ 修改不会影响今天已经冻结的队列，从明天开始生效。
-        </p>
-        <div className="flex flex-wrap gap-2 pt-1">
-          {DAILY_CAP_CHOICES.map((choice) => {
-            const active = choice === dailyCap;
-            const label = choice === null ? "无上限" : `${choice} 个`;
-            const key = choice === null ? "unlimited" : String(choice);
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => handleDailyCapChange(choice)}
-                className={[
-                  "rounded-lg border px-3.5 py-1.5 text-sm font-medium transition",
-                  active
-                    ? "border-[var(--accent)] bg-[var(--accent)] text-white"
-                    : "border-[var(--border)] hover:bg-[var(--surface-hover)]",
-                ].join(" ")}
-              >
-                {label}
-              </button>
-            );
-          })}
+      <section className="rounded-xl border border-[var(--border)] p-5 space-y-4">
+        <div className="space-y-1.5">
+          <h2 className="font-medium text-base">每日复习节奏</h2>
+          <p className="text-sm text-[var(--fg-soft)]">
+            单词分为两类发送到今日复习队列：说写单词需要听写、拼写、造句（完整流程），阅读单词只需要自评“认识 / 忘了”。两类可以分别设每日上限，互不影响。超过上限的单词会自动顺延到未来几天。
+          </p>
+          <p className="text-xs text-[var(--fg-soft)]">
+            ℹ️ 修改不会影响今天已经冻结的队列，从明天开始生效。
+          </p>
         </div>
-        <p className="text-xs text-[var(--fg-soft)] pt-1">
-          当前档位：
-          <span className="font-medium text-[var(--fg)]">
-            {dailyCap === null ? "无上限" : `${dailyCap} 个 / 天`}
-          </span>
-          {capSavedFlash && (
-            <span className="ml-2 text-green-600">已保存 ✓ 明天生效</span>
-          )}
-        </p>
+
+        {/* 说写 */}
+        <div className="space-y-2 border-t border-[var(--border)]/60 pt-3">
+          <div className="flex items-baseline justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium">说写单词</p>
+              <p className="text-[11px] text-[var(--fg-soft)]">
+                听写 · 拼写 · 造句 + AI 批改
+              </p>
+            </div>
+            <p className="text-xs text-[var(--fg-soft)]">
+              当前：
+              <span className="font-medium text-[var(--fg)]">
+                {capActive === null ? "无上限" : `${capActive} 个 / 天`}
+              </span>
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {DAILY_CAP_CHOICES.map((choice) => {
+              const active = choice === capActive;
+              const label = choice === null ? "无上限" : `${choice} 个`;
+              const key = choice === null ? "unlimited" : String(choice);
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => handleCapActiveChange(choice)}
+                  className={[
+                    "rounded-lg border px-3.5 py-1.5 text-sm font-medium transition",
+                    active
+                      ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                      : "border-[var(--border)] hover:bg-[var(--surface-hover)]",
+                  ].join(" ")}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 阅读 */}
+        <div className="space-y-2 border-t border-[var(--border)]/60 pt-3">
+          <div className="flex items-baseline justify-between gap-2">
+            <div>
+              <p className="text-sm font-medium">阅读单词</p>
+              <p className="text-[11px] text-[var(--fg-soft)]">
+                看词自评 “认识 / 忘了”，不需要写
+              </p>
+            </div>
+            <p className="text-xs text-[var(--fg-soft)]">
+              当前：
+              <span className="font-medium text-[var(--fg)]">
+                {capPassive === null ? "无上限" : `${capPassive} 个 / 天`}
+              </span>
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {DAILY_CAP_CHOICES.map((choice) => {
+              const active = choice === capPassive;
+              const label = choice === null ? "无上限" : `${choice} 个`;
+              const key = choice === null ? "unlimited" : String(choice);
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => handleCapPassiveChange(choice)}
+                  className={[
+                    "rounded-lg border px-3.5 py-1.5 text-sm font-medium transition",
+                    active
+                      ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                      : "border-[var(--border)] hover:bg-[var(--surface-hover)]",
+                  ].join(" ")}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {capSavedFlash && (
+          <p className="text-xs text-green-600 pt-1">
+            已保存 ✓ 明天生效
+          </p>
+        )}
       </section>
 
       {/* ── My Sync Code ─────────────────────────────────────── */}

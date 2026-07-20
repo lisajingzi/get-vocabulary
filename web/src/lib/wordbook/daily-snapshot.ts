@@ -95,11 +95,21 @@ export function getTodaySnapshot(now: Date = new Date()): Set<string> {
  *               graduated. (Moves to 老朋友 / archived shrink this.)
  *   finished  — subset of `total` that have lastReviewedAt === today.
  *   remaining — total - finished (== how many genuinely still due today).
+ *
+ * `active` and `passive` break the same numbers down by the entry's
+ * `purpose` (missing = "active") so the home page can show:
+ *   听说写 3/10 · 阅读 5/20
+ * and the settings page can advise on caps.
  */
-export interface DailyProgress {
+export interface DailyProgressBucket {
   total: number;
   finished: number;
   remaining: number;
+}
+
+export interface DailyProgress extends DailyProgressBucket {
+  active: DailyProgressBucket;
+  passive: DailyProgressBucket;
 }
 
 /**
@@ -125,16 +135,19 @@ export function invalidateSnapshotIfEmpty(): void {
 
 export function getDailyProgress(now: Date = new Date()): DailyProgress {
   const snapshot = getTodaySnapshot(now);
+  const empty: DailyProgressBucket = { total: 0, finished: 0, remaining: 0 };
   if (snapshot.size === 0) {
-    return { total: 0, finished: 0, remaining: 0 };
+    return { ...empty, active: { ...empty }, passive: { ...empty } };
   }
   const today = localDayKey(now);
   const entries = listEntries();
   const byLemma = new Map<string, WordbookEntry>();
   for (const e of entries) byLemma.set(e.lemma, e);
 
-  let total = 0;
-  let finished = 0;
+  const buckets = {
+    active: { total: 0, finished: 0 },
+    passive: { total: 0, finished: 0 },
+  };
   snapshot.forEach((lemma) => {
     const e = byLemma.get(lemma);
     // Entry vanished (e.g. cleared) — drop from total.
@@ -143,10 +156,29 @@ export function getDailyProgress(now: Date = new Date()): DailyProgress {
     if (e.status !== "new") return;
     // Already maxed out level — drop (defensive; shouldn't happen for new).
     if (e.level >= MAX_LEVEL) return;
-    total++;
+    const bucket = e.purpose === "passive" ? buckets.passive : buckets.active;
+    bucket.total++;
     if (e.lastReviewedAt && localDayKey(new Date(e.lastReviewedAt)) === today) {
-      finished++;
+      bucket.finished++;
     }
   });
-  return { total, finished, remaining: Math.max(0, total - finished) };
+  const active: DailyProgressBucket = {
+    total: buckets.active.total,
+    finished: buckets.active.finished,
+    remaining: Math.max(0, buckets.active.total - buckets.active.finished),
+  };
+  const passive: DailyProgressBucket = {
+    total: buckets.passive.total,
+    finished: buckets.passive.finished,
+    remaining: Math.max(0, buckets.passive.total - buckets.passive.finished),
+  };
+  const total = active.total + passive.total;
+  const finished = active.finished + passive.finished;
+  return {
+    total,
+    finished,
+    remaining: Math.max(0, total - finished),
+    active,
+    passive,
+  };
 }

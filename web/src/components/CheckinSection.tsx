@@ -14,6 +14,9 @@ export default function CheckinSection() {
 
   const [dueTotal, setDueTotal] = useState(0);
   const [finishedToday, setFinishedToday] = useState(0);
+  // 分组进度：让用户看到 听说写 / 阅读 各自还剩多少，方便去 setting 调上限。
+  const [activeRemaining, setActiveRemaining] = useState(0);
+  const [passiveRemaining, setPassiveRemaining] = useState(0);
 
   const refresh = useCallback(() => {
     const now = new Date();
@@ -23,9 +26,11 @@ export default function CheckinSection() {
     // Y = words frozen in today's snapshot that are still 新朋友 & ungraduated.
     // X = subset of Y that has been actually reviewed (recordReview) today.
     // See lib/wordbook/daily-snapshot.ts for the why.
-    const { total, finished } = getDailyProgress(now);
-    setDueTotal(Math.max(0, total - finished));
-    setFinishedToday(finished);
+    const progress = getDailyProgress(now);
+    setDueTotal(Math.max(0, progress.total - progress.finished));
+    setFinishedToday(progress.finished);
+    setActiveRemaining(progress.active.remaining);
+    setPassiveRemaining(progress.passive.remaining);
   }, []);
 
   useEffect(() => {
@@ -243,6 +248,23 @@ export default function CheckinSection() {
                 {finishedToday}/{totalToday}
               </span>
             </div>
+            {(activeRemaining > 0 || passiveRemaining > 0) && (
+              <div className="flex items-baseline gap-2 text-[11px] text-[var(--fg-soft)] whitespace-nowrap">
+                <span title="听说写词今日剩余待复习">
+                  听说写
+                  <span className="ml-0.5 font-semibold text-[var(--fg)] tabular-nums">
+                    {activeRemaining}
+                  </span>
+                </span>
+                <span className="opacity-50">·</span>
+                <span title="阅读词今日剩余待复习">
+                  阅读
+                  <span className="ml-0.5 font-semibold text-[var(--fg)] tabular-nums">
+                    {passiveRemaining}
+                  </span>
+                </span>
+              </div>
+            )}
           </div>
 
           {hasNothingToReview ? (

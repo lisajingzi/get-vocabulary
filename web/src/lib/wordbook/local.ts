@@ -25,9 +25,22 @@ const NOTES_KEY = "get:notes:v1";
  */
 export type WordbookStatus = "new" | "old" | "archived";
 
+/**
+ * How the user wants to use this word — drives which review flow it gets.
+ *   - "active"  → 听说写：听音辨词 / 拼写 / 造句 + AI 批改（完整流程）。
+ *   - "passive" → 阅读：只求认识，看到能想起中文意思即可（recognize 流程）。
+ *
+ * Missing / undefined on an entry is treated as "active" everywhere, so
+ * legacy rows keep working with zero migration. The user can flip a word
+ * between the two via the detail-page toggle.
+ */
+export type WordbookPurpose = "active" | "passive";
+
 export interface WordbookEntry {
   lemma: string;
   status: WordbookStatus;
+  /** Review-flow mode. Undefined = legacy row, treated as "active". */
+  purpose?: WordbookPurpose;
   /** Total successful lookups (also the input to "按查询次数排序"). */
   queryCount: number;
   /** Ebbinghaus level 0..7. 7 == graduated to "old friend". */
@@ -307,6 +320,31 @@ export function setStatus(lemma: string, status: WordbookStatus): WordbookEntry 
     level: nextLevel,
     lastSeenAt: new Date().toISOString(),
     nextReviewAt,
+  };
+  store[key] = next;
+  writeStore(store);
+  return next;
+}
+
+/**
+ * Set / toggle the word's review-flow purpose ("active" 听说写 vs
+ * "passive" 阅读). No-op (returns null) if the lemma isn't in the wordbook
+ * yet — purpose only makes sense on a real entry. Level / status /
+ * nextReviewAt are all left untouched: the Ebbinghaus schedule is the
+ * same for both flows, only the check-in form differs.
+ */
+export function setPurpose(
+  lemma: string,
+  purpose: WordbookPurpose,
+): WordbookEntry | null {
+  const key = lemma.toLowerCase().trim();
+  const store = readStore();
+  const existing = store[key];
+  if (!existing) return null;
+  const next: WordbookEntry = {
+    ...existing,
+    purpose,
+    lastSeenAt: new Date().toISOString(),
   };
   store[key] = next;
   writeStore(store);
