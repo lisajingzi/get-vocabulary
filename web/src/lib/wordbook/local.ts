@@ -179,6 +179,11 @@ export function recordLookup(
     : {
         lemma: key,
         status: "new",
+        // 新查的词默认走 “阅读” 流程（看词识义、自评认识/记错）。
+        // 用户按需可在详情页切到 “听说写” 上更完整的复习流程。
+        // 注意：历史存量条目的 purpose 仍为 undefined，读取侧会以
+        // `?? "active"` 兜底为 active，保持第一轮 “老数据不迁移” 的承诺。
+        purpose: "passive",
         queryCount: 1,
         level: 0,
         firstSeenAt: now,
