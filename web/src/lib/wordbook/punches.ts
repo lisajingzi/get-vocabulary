@@ -53,6 +53,12 @@ export function recordPunchToday(): void {
   if (all.has(today)) return;
   all.add(today);
   writePunches(Array.from(all).sort());
+  // Punch-in is low-frequency but high-value: bypass the 3 s push debounce
+  // and flush to the cloud immediately, so we don't lose it if the user
+  // closes the tab right after finishing today's review queue.
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("get:punch-flush"));
+  }
 }
 
 /** All punched days, ascending YYYY-MM-DD. */

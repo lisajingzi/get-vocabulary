@@ -32,7 +32,7 @@ import { pickDailyQueue, MAX_LEVEL } from "@/lib/wordbook/scheduler";
 
 const STORAGE_KEY = "get:daily-snapshot:v1";
 
-interface SnapshotPayload {
+export interface SnapshotPayload {
   /** Local YYYY-MM-DD the snapshot was captured on. */
   date: string;
   /** Lemmas (lowercased keys) frozen as "today's review queue". */
@@ -62,6 +62,33 @@ function readRaw(): SnapshotPayload | null {
 }
 
 function writeRaw(payload: SnapshotPayload): void {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  window.dispatchEvent(new CustomEvent("get:daily-snapshot-change"));
+  // Extra event fired ONLY when the local device freezes its own snapshot
+  // (as opposed to receiving one from the cloud via `applyRemoteSnapshot`).
+  // The cloud-sync layer listens to this to push the freshly frozen queue
+  // so all devices land on the same daily lemma set.
+  window.dispatchEvent(new CustomEvent("get:daily-snapshot-local-write"));
+}
+
+/**
+ * Read the raw stored snapshot payload (SSR-safe: returns null on the server).
+ * Exposed for the cloud-sync layer so it can package the snapshot into the
+ * cross-device SyncSnapshot blob.
+ */
+export function readSnapshotPayload(): SnapshotPayload | null {
+  return readRaw();
+}
+
+/**
+ * Overwrite the local snapshot with a payload received from the cloud
+ * (or merged remote+local). Silently no-ops on the server. Dispatches the
+ * standard change event so the home progress card re-renders. Does NOT
+ * schedule another push — caller decides whether the write originated
+ * locally (push-worthy) or from a pull (would loop).
+ */
+export function applyRemoteSnapshot(payload: SnapshotPayload): void {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   window.dispatchEvent(new CustomEvent("get:daily-snapshot-change"));

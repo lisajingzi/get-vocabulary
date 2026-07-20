@@ -41,7 +41,12 @@ import {
   replacePreferences,
   type Preferences,
 } from "@/lib/wordbook/preferences";
-import { invalidateSnapshotIfEmpty } from "@/lib/wordbook/daily-snapshot";
+import {
+  invalidateSnapshotIfEmpty,
+  readSnapshotPayload,
+  applyRemoteSnapshot,
+  type SnapshotPayload,
+} from "@/lib/wordbook/daily-snapshot";
 
 // ---------------------------------------------------------------------------
 // Sync ID (persisted in localStorage)
@@ -88,9 +93,18 @@ export interface SyncSnapshot {
    * pre-date this field still parse cleanly.
    */
   preferences?: Preferences;
+  /**
+   * Today's frozen review queue (lemma list + date). Optional so older
+   * snapshots without this field still parse. Sharing this across devices
+   * makes the "进度 X/Y" counter identical everywhere — otherwise each
+   * device freezes its own 20 words at first-open and users see different
+   * queues when they resume review on another device.
+   */
+  dailySnapshot?: SnapshotPayload;
 }
 
 function buildSnapshot(): SyncSnapshot {
+  const daily = readSnapshotPayload();
   return {
     version: 1,
     savedAt: new Date().toISOString(),
@@ -100,6 +114,7 @@ function buildSnapshot(): SyncSnapshot {
     notebookNotes: readNotebookNotesRaw(),
     punches: listPunches(),
     preferences: getPreferences(),
+    dailySnapshot: daily ?? undefined,
   };
 }
 
@@ -225,7 +240,8 @@ export async function pull(overrideSyncId?: string): Promise<{
     readNotebookNotesRaw(),
     remote.notebookNotes ?? {},
   );
-  const mergedPunches = mergePunches(listPunches(), remote.punches ?? []);
+  const localPunches = listPunches();
+  const mergedPunches = mergePunches(localPunches, remote.punches ?? []);
 
   writeWordbookRaw(mergedWordbook);
   writeWordNotesRaw(mergedWordNotes);
@@ -242,6 +258,55 @@ export async function pull(overrideSyncId?: string): Promise<{
   // snapshots are preserved to keep the "new words wait for tomorrow" rule.
   invalidateSnapshotIfEmpty();
 
+  // Merge today's frozen review queue across devices. Rule:
+  //   - If remote has a snapshot for today, adopt it (cloud is the shared
+  //     source of truth for "which 20 words are we tackling today").
+  //   - If local has a snapshot for today and remote doesn't, keep local
+  //     as-is — the sync push triggered by writeRaw will upload it soon.
+  //   - If both are today but with different lemma lists (rare: two devices
+  //     both froze independently before this feature deployed, or a race),
+  //     union the lemmas so no word gets dropped. The device that pulls
+  //     first "absorbs" the other side's queue.
+  //   - If remote's snapshot is from an earlier day (yesterday), ignore it
+  //     and let today's local logic freeze a fresh one.
+  const remoteDaily = remote.dailySnapshot;
+  const localDaily = readSnapshotPayload();
+  const today = new Date();
+  const localDay = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  if (remoteDaily && remoteDaily.date === localDay) {
+    if (!localDaily || localDaily.date !== localDay) {
+      applyRemoteSnapshot(remoteDaily);
+    } else {
+      const union = Array.from(
+        new Set([...localDaily.lemmas, ...remoteDaily.lemmas]),
+      );
+      const sameSet =
+        union.length === localDaily.lemmas.length &&
+        union.length === remoteDaily.lemmas.length;
+      if (!sameSet) {
+        applyRemoteSnapshot({ date: localDay, lemmas: union });
+      }
+    }
+  }
+
+  // Fallback safety net: if the local snapshot contained punches that the
+  // remote didn't yet have (typical when a previous push was aborted before
+  // the 3 s debounce fired), immediately push the merged snapshot back so
+  // other devices can see them on their next pull. Also trigger a push
+  // when we just adopted or unioned today's daily snapshot above, so the
+  // cloud copy converges to the merged version.
+  const remotePunchSet = new Set(remote.punches ?? []);
+  const localHasExtraPunches = localPunches.some((d) => !remotePunchSet.has(d));
+  const localHasFresherDaily =
+    !!localDaily &&
+    localDaily.date === localDay &&
+    (!remoteDaily ||
+      remoteDaily.date !== localDay ||
+      localDaily.lemmas.some((l) => !remoteDaily.lemmas.includes(l)));
+  if (localHasExtraPunches || localHasFresherDaily) {
+    push().catch((e) => console.warn("[sync] catch-up push failed:", e));
+  }
+
   return { merged: true };
 }
 
@@ -256,4 +321,19 @@ export function schedulePush(delayMs = 3000): void {
   pushTimer = setTimeout(() => {
     push().catch((e) => console.warn("[sync] push failed:", e));
   }, delayMs);
+}
+
+/**
+ * Cancel any pending debounced push and push immediately. Used for low-
+ * frequency but high-value actions (like recording a daily punch-in) where
+ * we can't afford to lose the write if the user closes the tab within the
+ * 3 s debounce window.
+ */
+export function flushPush(): void {
+  if (typeof window === "undefined") return;
+  if (pushTimer) {
+    clearTimeout(pushTimer);
+    pushTimer = null;
+  }
+  push().catch((e) => console.warn("[sync] flush push failed:", e));
 }
