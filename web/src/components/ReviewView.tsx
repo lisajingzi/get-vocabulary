@@ -54,9 +54,15 @@ type Phase =
   | {
       kind: "recognize";
       target: string;
-      /** Set once the user has self-graded (认识 / 忘了). Drives the result
-       *  panel + the advance call after they hit “下一题”. */
+      /** 一级自评：用户看到词形时的 “认识 / 忘了”。仅当 graded === "pass"
+       *  时，用户才会看到释义 + 例句，然后进入二级自评（记对了/记错了）。
+       *  graded === "fail" 直接展示释义作为学习材料，然后 fail advance。 */
       graded: "pass" | "fail" | null;
+      /** 二级自评：仅当 graded === "pass" 时有意义。
+       *   - "pass"（记对了）→ 最终 advance("pass")
+       *   - "fail"（记错了）→ 最终 advance("fail")
+       *  graded === "fail" 时永远为 null（直接失败，不需要二次确认）。 */
+      confirmed: "pass" | "fail" | null;
     }
   | {
       kind: "compose";
@@ -139,7 +145,12 @@ export default function ReviewView() {
     // 阅读词（purpose === "passive")走轻量识记流程：看词形 → 自评
     // "认识 / 忘了" → 揭示释义 → 下一题。不轰 quiz、不拼写、不造句。
     if (item.purpose === "passive") {
-      setPhase({ kind: "recognize", target: item.lemma, graded: null });
+      setPhase({
+        kind: "recognize",
+        target: item.lemma,
+        graded: null,
+        confirmed: null,
+      });
       return;
     }
     const q = await buildSynonymQuestion(item.lemma);
@@ -252,10 +263,31 @@ export default function ReviewView() {
         <RecognizePanel
           target={phase.target}
           graded={phase.graded}
+          confirmed={phase.confirmed}
           onGrade={(g) =>
-            setPhase({ kind: "recognize", target: phase.target, graded: g })
+            setPhase({
+              kind: "recognize",
+              target: phase.target,
+              graded: g,
+              // 切换一级自评时清空二级自评，避免残留。
+              confirmed: null,
+            })
           }
-          onNext={() => advance(phase.graded === "pass" ? "pass" : "fail")}
+          onConfirm={(c) =>
+            setPhase({
+              kind: "recognize",
+              target: phase.target,
+              graded: phase.graded,
+              confirmed: c,
+            })
+          }
+          onNext={() => {
+            // 最终 pass 判定：一级 认识 + 二级 记对了。
+            // 其余（忘了 / 认识-记错了）都算 fail。
+            const finalPass =
+              phase.graded === "pass" && phase.confirmed === "pass";
+            advance(finalPass ? "pass" : "fail");
+          }}
         />
       )}
       {phase.kind === "compose" && (
@@ -536,59 +568,106 @@ function SpellPanel({
 }
 
 /**
- * <RecognizePanel /> — 阅读词（purpose === "passive")的轻量复记面板。
+ * <RecognizePanel /> — 阅读词（purpose === "passive"）的轻量复记面板。
  *
- * 流程：
- *   1. 显示词形 + 发音按钮（不先看中文释义）。
- *   2. 用户自评 “认识 ✓” 或 “忘了 ✗”。
- *   3. 显示释义（到这一步才知晓对不对），
- *      提供 “重新选择” 以防止滑手，确认后 “下一题” advance。
+ * 两步自评：
+ *   1. 一级：显示词形 + 发音（不先看释义），用户自评 “认识 ✓” 或 “忘了 ✗”。
+ *   2. 展开 1–2 个主词义 + 各自例句。
+ *      - 若 一级 = 忘了       → 直接算失败，仅供学习，按 “下一题” 结束。
+ *      - 若 一级 = 认识       → 显示二级自评 “记对了 / 记错了”，
+ *                              二次确认后按 “下一题” 结束。
  *
- * 不走 QuizPanel/SpellPanel/ComposePanel，也不调用 AI 批改 ——
- * “阅读词”的目标就是 “看到能想起意思”，不需要写作。
+ * 打卡判定（与需求原文一致）：
+ *   忘了                → fail
+ *   认识 + 记对了       → pass
+ *   认识 + 记错了       → fail
+ *
+ * 词形本身是可跳转链接（同标签），点击进入 /word/[slug]，
+ * WordDetailView 的返回按钮会走 router.back() 直接回到复习页，
+ * 复习进度不会丢失（React 状态在 back forward cache 中保留）。
  */
 function RecognizePanel({
   target,
   graded,
+  confirmed,
   onGrade,
+  onConfirm,
   onNext,
 }: {
   target: string;
   graded: "pass" | "fail" | null;
+  confirmed: "pass" | "fail" | null;
   onGrade: (g: "pass" | "fail") => void;
+  onConfirm: (c: "pass" | "fail") => void;
   onNext: () => void;
 }) {
-  const [gloss, setGloss] = useState<{
-    pos?: string;
-    def?: string;
-    chn?: string;
-  } | null>(null);
+  // 取字典里的前 2 个主词义（不同 POS 优先，覆盖多词性），
+  // 每个词义带自己的首个例句。null = 加载中；[] = 加载完毕但字典未收录。
+  const [senses, setSenses] = useState<
+    | Array<{
+        pos?: string;
+        def?: string;
+        chn?: string;
+        example?: { en: string; cn?: string };
+      }>
+    | null
+  >(null);
 
   useEffect(() => {
-    setGloss(null);
+    setSenses(null);
     let cancelled = false;
     void (async () => {
       const { lookup } = await import("@/lib/dict");
       const got = await lookup(target);
       if (cancelled) return;
-      const s = got?.entry.senses?.[0];
-      setGloss(s ? { pos: s.pos, def: s.def, chn: s.chn } : null);
+      const all = got?.entry.senses ?? [];
+      // 先按 POS 去重（同 POS 只保留第一条，尽量覆盖不同词性），
+      // 兜底再补回被跳过的次要词义，最多 2 条。
+      const seenPos = new Set<string>();
+      const primary: typeof all = [];
+      const rest: typeof all = [];
+      for (const s of all) {
+        const key = (s.pos ?? "").trim();
+        if (key && !seenPos.has(key)) {
+          seenPos.add(key);
+          primary.push(s);
+        } else {
+          rest.push(s);
+        }
+      }
+      const picked = [...primary, ...rest].slice(0, 2);
+      setSenses(
+        picked.map((s) => ({
+          pos: s.pos,
+          def: s.def,
+          chn: s.chn,
+          example: s.ex && s.ex.length > 0 ? s.ex[0] : undefined,
+        })),
+      );
     })();
     return () => {
       cancelled = true;
     };
   }, [target]);
 
+  // 最终打卡结果（仅用于渲染提示文案 & 决定 “下一题” 是否可点）。
+  //   graded === null              → 尚未一级自评，隐藏 “下一题”。
+  //   graded === "fail"            → 直接失败，可以点 “下一题”。
+  //   graded === "pass" & !confirmed→ 待二级自评，隐藏 “下一题”。
+  //   graded === "pass" & confirmed → 二级已选，可以点 “下一题”。
+  const canAdvance =
+    graded === "fail" || (graded === "pass" && confirmed !== null);
+  const finalPass = graded === "pass" && confirmed === "pass";
+
   return (
     <section className="space-y-4 rounded-xl border border-[var(--border)] p-4">
       <header className="space-y-1">
         <div className="flex flex-wrap items-baseline gap-2">
+          {/* 同标签跳转到详情页；详情页返回按钮走 router.back() 直接回来。 */}
           <Link
             href={`/word/${encodeURIComponent(target)}?from=review`}
-            target="_blank"
-            rel="noopener"
             className="text-2xl font-semibold tracking-tight underline decoration-transparent underline-offset-4 transition hover:decoration-[var(--accent)] hover:text-[var(--accent)]"
-            title="在新标签页查看详情"
+            title="点击查看单词详情（返回可回到本页）"
           >
             {target}
           </Link>
@@ -600,12 +679,14 @@ function RecognizePanel({
         <p className="pt-1 text-xs text-[var(--fg-soft)]">
           {graded === null
             ? "看这个单词，你能想起它的意思吗？先自评，再看释义。"
-            : "看释义看看自评对不对："}
+            : graded === "pass" && confirmed === null
+              ? "看下方释义和例句，对照一下你刚才想的意思——是否记对了？"
+              : "对照释义后确认结果，然后进入下一题。"}
         </p>
       </header>
 
-      {/* 自评按钮。graded === null 时两个都可点；
-          已自评后保留高亮，但仍然允许 “重新选择” 以防止滑手。 */}
+      {/* 一级自评：graded === null 时两个都可点；已选后保持高亮，
+          但仍然允许 “重新选择”（切回另一个会清空二级自评）。 */}
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
@@ -633,45 +714,125 @@ function RecognizePanel({
         </button>
       </div>
 
-      {/* 显示释义：仅在自评后显示，避免“先看释义再自评”。 */}
+      {/* 释义 + 例句：仅在一级自评后显示，避免 “先看释义再自评”。 */}
       {graded !== null && (
         <div
           className={[
-            "space-y-2 rounded-lg border p-3 text-sm",
-            graded === "pass"
+            "space-y-3 rounded-lg border p-3 text-sm",
+            finalPass
               ? "border-[var(--accent)]/40 bg-[var(--accent-soft)]/40"
-              : "border-red-200 bg-red-50/60 dark:border-red-900/40 dark:bg-red-950/20",
+              : graded === "fail" || confirmed === "fail"
+                ? "border-red-200 bg-red-50/60 dark:border-red-900/40 dark:bg-red-950/20"
+                : "border-[var(--border)] bg-[var(--bg-soft)]/40",
           ].join(" ")}
         >
-          <div className="space-y-0.5">
-            <div className="flex items-baseline gap-2">
-              <span className="text-base font-semibold">{target}</span>
-              {gloss?.pos && (
-                <span className="text-[10px] text-[var(--fg-soft)]">
-                  ({gloss.pos})
-                </span>
-              )}
+          {senses === null ? (
+            <p className="text-xs text-[var(--fg-soft)]">加载释义中…</p>
+          ) : senses.length === 0 ? (
+            <p className="text-xs text-[var(--fg-soft)]">
+              未找到详细释义，可
+              <Link
+                href={`/word/${encodeURIComponent(target)}?from=review`}
+                className="mx-1 text-[var(--accent)] hover:underline"
+              >
+                进入详情页
+              </Link>
+              查看。
+            </p>
+          ) : (
+            <ul className="space-y-2.5">
+              {senses.map((s, i) => (
+                <li
+                  key={i}
+                  className={
+                    i > 0
+                      ? "space-y-1 border-t border-[var(--border)]/60 pt-2"
+                      : "space-y-1"
+                  }
+                >
+                  <div className="flex items-baseline gap-2">
+                    {s.pos && (
+                      <span className="rounded bg-[var(--bg)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
+                        {s.pos}
+                      </span>
+                    )}
+                    {s.chn && (
+                      <span className="text-xs text-[var(--fg)]">{s.chn}</span>
+                    )}
+                  </div>
+                  {s.def && (
+                    <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
+                      {s.def}
+                    </p>
+                  )}
+                  {s.example && (
+                    <div className="space-y-0.5 rounded-md border border-[var(--border)]/60 bg-[var(--bg)] px-2 py-1.5">
+                      <p className="text-xs italic leading-relaxed text-[var(--fg)]">
+                        “{s.example.en}”
+                      </p>
+                      {s.example.cn && (
+                        <p className="text-[11px] leading-relaxed text-[var(--fg-soft)]">
+                          {s.example.cn}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+
+          {/* 二级自评：仅在一级 = 认识 时出现。 */}
+          {graded === "pass" && (
+            <div className="space-y-2 border-t border-[var(--border)]/60 pt-2">
+              <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+                对照释义后，你刚才想的意思——
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onConfirm("pass")}
+                  className={[
+                    "rounded-md border px-3 py-1.5 text-xs transition",
+                    confirmed === "pass"
+                      ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                      : "border-[var(--border)] hover:border-[var(--accent)]",
+                  ].join(" ")}
+                >
+                  ✓ 记对了
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onConfirm("fail")}
+                  className={[
+                    "rounded-md border px-3 py-1.5 text-xs transition",
+                    confirmed === "fail"
+                      ? "border-red-400 bg-red-500 text-white"
+                      : "border-[var(--border)] hover:border-red-400 hover:text-red-500",
+                  ].join(" ")}
+                >
+                  ✗ 记错了
+                </button>
+              </div>
             </div>
-            {gloss?.def && (
-              <p className="text-xs text-[var(--fg)]">{gloss.def}</p>
-            )}
-            {gloss?.chn && (
-              <p className="text-xs text-[var(--fg-soft)]">{gloss.chn}</p>
-            )}
-            {!gloss && (
-              <p className="text-xs text-[var(--fg-soft)]">未找到详细释义，可点词形查看详情页。</p>
-            )}
-          </div>
+          )}
+
+          {/* 底部结果提示 + 下一题按钮。canAdvance 才亮 “下一题”。 */}
           <div className="flex items-center justify-between pt-1">
             <p className="text-[11px] text-[var(--fg-soft)]">
-              {graded === "pass"
-                ? "自评认识 —— 本题记为通过，level +1。"
-                : "自评忘了 —— 本题记为失败，level -1。"}
+              {graded === "fail"
+                ? "自评忘了 —— 本题记为失败，level -1。"
+                : confirmed === null
+                  ? "请确认你是否真的记对了。"
+                  : finalPass
+                    ? "记对了 —— 本题记为通过，level +1。"
+                    : "记错了 —— 本题记为失败，level -1。"}
             </p>
             <button
               type="button"
               onClick={onNext}
-              className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-1.5 text-xs text-white transition hover:opacity-90"
+              disabled={!canAdvance}
+              className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-1.5 text-xs text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
               下一题 →
             </button>
