@@ -3,21 +3,29 @@
 /**
  * <SpeakButton /> — speaks an English word/phrase aloud.
  *
- * Strategy (tries in order, shows toast on failure — never falls back to
- * the robotic Web Speech API, per product decision):
+ * Strategy (tries in order, shows toast only when EVERY path failed —
+ * never falls back to the robotic Web Speech API, per product decision):
  *   1. **Word / short phrase** → YouDao MP3
  *      `https://dict.youdao.com/dictvoice?audio=<text>&type=<1|2>`
  *      Real human recordings, free, no API key. type=1 = UK, type=2 = US.
  *      Best quality for single words and common phrases.
- *   2. **Sentence** → local IndexedDB cache → `/api/tts` (Edge Neural TTS,
- *      voice=en-US-JennyNeural, server retries once internally). Cached
- *      MP3s replay instantly and offline.
- *   3. **On failure** → toast "朗读失败，请稍后重试". No mechanical fallback.
+ *   2a. **YouDao load failed** (no recording for this text, network error,
+ *       or unsupported MIME) → silently fall back to Edge Neural TTS.
+ *       This catches short *sentences* like "to run for election" that
+ *       look like phrases token-wise but have no YouDao recording.
+ *   2b. **Sentence** (long text, > 6 tokens or > 60 chars) → skip YouDao
+ *       entirely, go straight to Edge Neural.
+ *   3. **Edge Neural** → local IndexedDB cache → `/api/tts` (voice=Jenny
+ *      or Sonia, server retries once internally). Cached MP3s replay
+ *      instantly and offline.
+ *   4. **Everything failed** → toast "朗读失败，请稍后重试". No mechanical
+ *      fallback.
  *
  * Implementation notes:
  *   - We reuse a single <Audio> element to avoid GC churn.
- *   - YouDao only reliably has recordings for words/short phrases. Anything
- *     with >6 tokens or >60 chars is treated as a sentence and skips YouDao.
+ *   - YouDao is optimistic-first: we try it for any short text because
+ *     when it has a recording, the quality is much better than Neural TTS.
+ *     When it fails we fall through to Neural, so the user never notices.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -133,6 +141,51 @@ export default function SpeakButton({
     }
   }, []);
 
+  /**
+   * Play `trimmed` through the Edge Neural TTS pipeline.
+   * Returns true on success, false on failure. Caller decides whether to
+   * toast — we never toast in here so this function can be used as a
+   * silent fallback from the YouDao branch.
+   */
+  const playNeuralTTS = useCallback(
+    async (trimmed: string): Promise<boolean> => {
+      const neuralVoice =
+        variant === "uk" ? NEURAL_VOICE_UK : NEURAL_VOICE_US;
+      const preview = trimmed.slice(0, 40);
+
+      // 1. Try local cache first — instant, offline-capable.
+      const cached = await getCachedTTS(neuralVoice, trimmed);
+      if (cached) {
+        console.debug(`[tts] cache hit (${neuralVoice}): "${preview}..."`);
+        playBlob(cached);
+        return true;
+      }
+
+      // 2. Fetch from /api/tts. Show a busy indicator so the user knows
+      //    something is happening — cold requests can take 1–2s, and up to
+      //    ~16s in the retry-worst-case.
+      console.debug(`[tts] cache miss, fetching /api/tts: "${preview}..."`);
+      setBusy(true);
+      try {
+        const bytes = await fetchNeuralMP3(trimmed, neuralVoice);
+        if (bytes && bytes.byteLength > 0) {
+          console.debug(
+            `[tts] /api/tts ok (${bytes.byteLength}B), playing: "${preview}..."`,
+          );
+          // Persist for next time (best effort — ignore failures).
+          void putCachedTTS(neuralVoice, trimmed, bytes.slice(0));
+          playBlob(new Blob([bytes], { type: "audio/mpeg" }));
+          return true;
+        }
+        console.warn(`[tts] /api/tts failed after retries: "${preview}..."`);
+        return false;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [variant, playBlob],
+  );
+
   const speak = useCallback(async () => {
     if (typeof window === "undefined") return;
     const trimmed = text.trim();
@@ -142,7 +195,12 @@ export default function SpeakButton({
     // the app — cheap safety net, doesn't hurt if none is queued.
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
 
-    // ── Word / short phrase → YouDao real-human recording ───────────────
+    // ── Word / short phrase → try YouDao first, fall back to Neural ─────
+    // YouDao has real human recordings for words and common phrases, but
+    // NOT for short sentences that just happen to be under 6 tokens (e.g.
+    // "to run for election"). When YouDao 404s / returns unsupported MIME,
+    // we silently retry via Edge Neural TTS so the user never sees a toast
+    // for something we can actually pronounce.
     if (!shouldSkipYouDao(trimmed)) {
       if (!audioRef.current) {
         audioRef.current = new Audio();
@@ -157,66 +215,39 @@ export default function SpeakButton({
       audio.pause();
       audio.src = buildYouDaoUrl(trimmed, variant);
 
-      const onError = () => {
-        cleanup();
-        console.warn(`[tts] YouDao playback failed for: "${trimmed}"`);
-        notifyFailure();
-      };
-      const cleanup = () => {
+      // Guard so we only fall back once even if both `error` and the
+      // play() promise reject fire.
+      let fellBack = false;
+      const fallback = async (reason: string) => {
+        if (fellBack) return;
+        fellBack = true;
         audio.removeEventListener("error", onError);
+        console.warn(
+          `[tts] YouDao failed (${reason}) for "${trimmed}", falling back to Edge Neural`,
+        );
+        const ok = await playNeuralTTS(trimmed);
+        if (!ok) notifyFailure();
+      };
+      const onError = () => {
+        void fallback(
+          `mediaError=${audio.error?.code ?? "?"} (${audio.error?.message ?? "no source"})`,
+        );
       };
       audio.addEventListener("error", onError, { once: true });
 
       const playPromise = audio.play();
       if (playPromise && typeof playPromise.then === "function") {
         playPromise.catch((err) => {
-          cleanup();
-          console.warn(
-            `[tts] YouDao play() rejected: ${err?.message ?? err}`,
-          );
-          notifyFailure();
+          void fallback(`play() rejected: ${err?.message ?? err}`);
         });
       }
       return;
     }
 
-    // ── Sentence → IndexedDB cache → /api/tts → toast on failure ────────
-    const neuralVoice =
-      variant === "uk" ? NEURAL_VOICE_UK : NEURAL_VOICE_US;
-    const preview = trimmed.slice(0, 40);
-
-    // 1. Try local cache first — instant, offline-capable.
-    const cached = await getCachedTTS(neuralVoice, trimmed);
-    if (cached) {
-      console.debug(`[tts] cache hit (${neuralVoice}): "${preview}..."`);
-      playBlob(cached);
-      return;
-    }
-
-    // 2. Fetch from /api/tts (server retries once internally). Show a busy
-    //    indicator so the user knows something is happening — cold requests
-    //    can take 1-2s, and up to ~16s in the retry-worst-case.
-    console.debug(`[tts] cache miss, fetching /api/tts: "${preview}..."`);
-    setBusy(true);
-    try {
-      const bytes = await fetchNeuralMP3(trimmed, neuralVoice);
-      if (bytes && bytes.byteLength > 0) {
-        console.debug(
-          `[tts] /api/tts ok (${bytes.byteLength}B), playing: "${preview}..."`,
-        );
-        // Persist for next time (best effort — ignore failures).
-        void putCachedTTS(neuralVoice, trimmed, bytes.slice(0));
-        playBlob(new Blob([bytes], { type: "audio/mpeg" }));
-        return;
-      }
-      // 3. Neural TTS still unreachable after server-side retry → toast.
-      //    We deliberately do NOT fall back to Web Speech (mechanical voice).
-      console.warn(`[tts] /api/tts failed after retries: "${preview}..."`);
-      notifyFailure();
-    } finally {
-      setBusy(false);
-    }
-  }, [text, variant, playBlob]);
+    // ── Sentence → Edge Neural directly → toast only if that also fails ─
+    const ok = await playNeuralTTS(trimmed);
+    if (!ok) notifyFailure();
+  }, [text, variant, playNeuralTTS]);
 
   return (
     <button
