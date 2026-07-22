@@ -179,11 +179,13 @@ export function recordLookup(
     : {
         lemma: key,
         status: "new",
-        // 新查的词默认走 “阅读” 流程（看词识义、自评认识/记错）。
-        // 用户按需可在详情页切到 “听说写” 上更完整的复习流程。
-        // 注意：历史存量条目的 purpose 仍为 undefined，读取侧会以
-        // `?? "active"` 兜底为 active，保持第一轮 “老数据不迁移” 的承诺。
-        purpose: "passive",
+        // purpose 故意留空（undefined）——这是 “用户尚未在弹窗里做过选择”
+        // 的信号。详情页 <WordDetailView> 检测到本次调用是新建条目
+        // 时会强制弹出必选弹窗；用户选完之后由 setPurpose 写入具体值。
+        // 读取侧（scheduler / daily-snapshot / 详情页 pill）依旧用
+        // `?? "active"` 兜底，保证：
+        //   1) 弹窗关闭前的极短窗口内该词临时按 active 处理；
+        //   2) 历史存量条目（升级前留下的 undefined）继续按 active 使用。
         queryCount: 1,
         level: 0,
         firstSeenAt: now,

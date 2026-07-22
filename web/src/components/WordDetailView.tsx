@@ -59,6 +59,11 @@ export default function WordDetailView({ slug, from }: Props) {
   const router = useRouter();
   const [state, setState] = useState<State>({ kind: "loading" });
   const [bookEntry, setBookEntry] = useState<WordbookEntry | null>(null);
+  // “第一次查这个词、还没选过复习方式”的强制弹窗。true = 需要弹出，用户
+  // 必须在弹窗里选完 听说写 / 阅读 才能继续。触发条件严格限定为“本次
+  // recordLookup 刚新建了条目 且 purpose 仍为 undefined”，历史存量条目
+  // （几周前查过、purpose 为 undefined 但已按 active 兜底使用）不会被打扰。
+  const [purposePromptOpen, setPurposePromptOpen] = useState(false);
 
   // The route param has already been url-decoded by Next, but our store keys
   // are lowercase. Normalise once.
@@ -89,6 +94,10 @@ export default function WordDetailView({ slug, from }: Props) {
           // "typo / curiosity" visits from cluttering 新朋友本. We DO mirror
           // any pre-existing entry so the membership pill renders correctly
           // for words the user has already taken notes on.
+          //
+          // 注意：not-found 分支不在这里触发 purpose 弹窗——条目要到用户
+          // 保存第一条笔记时才会通过 handleFirstNoteSave 真正落盘，
+          // 那时再弹窗询问复习方式更符合用户预期。
           setBookEntry(getEntry(query));
           return;
         }
@@ -111,10 +120,19 @@ export default function WordDetailView({ slug, from }: Props) {
         const firstPos = result.redirected
           ? undefined
           : (result.entry.senses[0]?.pos ?? undefined);
+        // 判定 “本次是不是刚把这个词第一次收进单词本”：只有此时才需要
+        // 弹窗必选。存量条目（无论 purpose 有没有值）都不打扰。skipCount
+        // 场景（从 wordbook / review 进来）不会新建条目，所以 wasExisting
+        // 一定为 true，也不会误弹。
+        const wasExisting = getEntry(result.query) !== null;
         recordLookup(result.query, firstPos, {
           skipCount: !countAsLookupRef.current,
         });
-        setBookEntry(getEntry(result.query));
+        const created = getEntry(result.query);
+        setBookEntry(created);
+        if (!wasExisting && created && !created.purpose) {
+          setPurposePromptOpen(true);
+        }
       })
       .catch(() => {
         if (!cancelled) setState({ kind: "not-found" });
@@ -186,6 +204,26 @@ export default function WordDetailView({ slug, from }: Props) {
     [state, query],
   );
 
+  // 弹窗内点选后：写入 purpose、关闭弹窗、给一条 toast 确认。与常驻
+  // <PurposeToggle> 不同，这里 toast 用 “本次已设置为” 更贴合首次场景。
+  const handlePurposePromptChoose = useCallback(
+    (next: WordbookPurpose) => {
+      let lemma: string | null = null;
+      if (state.kind === "ok") lemma = state.result.query;
+      else if (state.kind === "not-found") lemma = query;
+      if (!lemma) return;
+      const updated = setPurpose(lemma, next);
+      if (updated) setBookEntry(updated);
+      setPurposePromptOpen(false);
+      toast(
+        next === "active"
+          ? "本次已设置为 听说写"
+          : "本次已设置为 阅读",
+      );
+    },
+    [state, query],
+  );
+
   // Snapshot of "already-looked-up" lemmas; used to highlight them in every
   // dictionary example sentence on the page. Lazy-initialized so first paint
   // already has the data (avoids the brief "black, then highlighted" flash
@@ -225,10 +263,15 @@ export default function WordDetailView({ slug, from }: Props) {
   // via ?from=wordbook (which would early-return and produce no entry).
   const handleFirstNoteSave = useCallback(
     ({ pos }: { pos: string }) => {
+      // 判定同上：只有真的新建了条目、且 purpose 仍未选，才弹窗。
+      const wasExisting = getEntry(query) !== null;
       const created = recordLookup(query, pos);
       if (created) {
         setBookEntry(created);
         toast(`已加入 新朋友 · ${pos}`);
+        if (!wasExisting && !created.purpose) {
+          setPurposePromptOpen(true);
+        }
       }
     },
     [query],
@@ -336,6 +379,14 @@ export default function WordDetailView({ slug, from }: Props) {
           onFirstSave={handleFirstNoteSave}
           onPosChange={handlePosChange}
         />
+
+        {/* 首次入库强制弹窗——不选不能关。fixed 定位不影响外层 flow。 */}
+        {purposePromptOpen && (
+          <PurposePromptModal
+            headword={query}
+            onChoose={handlePurposePromptChoose}
+          />
+        )}
       </div>
     );
   }
@@ -541,12 +592,20 @@ export default function WordDetailView({ slug, from }: Props) {
           这样 arousal 的例句不会跑到 arouse 的缓存键上去。 */}
       <AIExamplesPanel lemma={typed} senses={entry.senses} />
 
-      {/* 笔记区（Day 3a）—— 笔记跟着用户搜的词，与 wordbook 条目的 key 一致。 */}
+      {/* 笔记区（Day 3a）——笔记跟着用户搜的词，与 wordbook 条目的 key 一致。 */}
       <NotesPanel lemma={typed} />
+
+      {/* 首次入库强制弹窗：详情页刚把词收进单词本且未选过复习方式时弹出。
+          选完才能关——不提供关闭按钮 / ESC / 遨罩关闭，避免用户遗忘分类。 */}
+      {purposePromptOpen && (
+        <PurposePromptModal
+          headword={typed}
+          onChoose={handlePurposePromptChoose}
+        />
+      )}
     </div>
   );
 }
-
 // ---------------------------------------------------------------------------
 
 function BackButton({ onClick }: { onClick: () => void }) {
@@ -677,6 +736,83 @@ function PurposeToggle({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+/**
+ * <PurposePromptModal /> —— 首次把一个词收入单词本时的必选弹窗。
+ *
+ * 为什么要弹窗、而不是让用户之后自己去 pill 上切换？
+ * ---------------------------------------------------------------
+ * “听说写” 和 “阅读” 走两套完全不同的艾宾浩斯复习流程；如果用户查完就走，
+ * 系统只能默认一个（active 或 passive），结果每天的复习队列里会混进
+ * 大量 “我其实只想认识一下” 的词，反而拖累打卡进度。所以在词条真正落进
+ * 单词本的那一刻拦一下、要求用户主动定性，是唯一能保证 “打卡有效性”
+ * 的做法。
+ *
+ * 交互约束
+ * ---------------------------------------------------------------
+ *  · 强制必选：不提供关闭按钮、不响应 ESC、点击遮罩也不关闭。
+ *  · 视觉上把两种模式的差异写清楚，避免用户瞎选。
+ *  · 弹窗展示 headword 让用户明确 “当前这个词” 分类到哪里去。
+ *
+ * 未来若要引入 “记住我的选择” / “以后不再问”，请慎重——那实际上等价于
+ * 又回到默认值方案，只是把默认值挪到了用户身上。若非用户明确要求，
+ * 保持每次首查都问一遍最安全。
+ */
+function PurposePromptModal({
+  headword,
+  onChoose,
+}: {
+  headword: string;
+  onChoose: (next: WordbookPurpose) => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="purpose-prompt-title"
+      // 点遮罩不关闭：故意省略 onClick / onKeyDown。
+    >
+      <div className="w-full max-w-md rounded-xl border border-[var(--border)] bg-[var(--bg)] p-5 shadow-xl">
+        <h2
+          id="purpose-prompt-title"
+          className="text-base font-semibold tracking-tight"
+        >
+          <span className="text-[var(--fg-soft)]">给</span>
+          <span className="mx-1 font-semibold">{headword}</span>
+          <span className="text-[var(--fg-soft)]">选一个复习方式</span>
+        </h2>
+        <p className="mt-1.5 text-xs leading-relaxed text-[var(--fg-soft)]">
+          第一次把一个词收入单词本时需要指定用途，之后可以随时在词条页面
+          切换。你选完才能继续。
+        </p>
+
+        <div className="mt-4 grid gap-2.5 sm:grid-cols-2">
+          <button
+            type="button"
+            onClick={() => onChoose("active")}
+            className="group flex flex-col items-start gap-1 rounded-lg border border-[var(--border)] p-3 text-left transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
+          >
+            <span className="text-sm font-medium">听说写</span>
+            <span className="text-xs leading-relaxed text-[var(--fg-soft)] group-hover:text-[var(--fg)]">
+              听音辨词 / 拼写 / 造句 + AI 批改，走完整流程。
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onChoose("passive")}
+            className="group flex flex-col items-start gap-1 rounded-lg border border-[var(--border)] p-3 text-left transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
+          >
+            <span className="text-sm font-medium">阅读</span>
+            <span className="text-xs leading-relaxed text-[var(--fg-soft)] group-hover:text-[var(--fg)]">
+              只求看到认识 → 自评「认识 / 忘了」，节奏更快。
+            </span>
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
