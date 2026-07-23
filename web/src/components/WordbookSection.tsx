@@ -9,6 +9,7 @@ import {
   type WordbookEntry,
   type WordbookStatus,
 } from "@/lib/wordbook/local";
+import DefinitionModal from "@/components/DefinitionModal";
 
 type SortKey = "recent" | "count" | "alpha";
 
@@ -45,6 +46,8 @@ export default function WordbookSection() {
   const [sortKey, setSortKey] = useState<SortKey>("recent");
   const [undo, setUndo] = useState<UndoState | null>(null);
   const [page, setPage] = useState(1);
+  // Which lemma to display in the 释义 popup. null = closed.
+  const [defLemma, setDefLemma] = useState<string | null>(null);
 
   useEffect(() => {
     function refresh() {
@@ -247,6 +250,19 @@ export default function WordbookSection() {
                         </Link>
                         <button
                           type="button"
+                          title="查看释义"
+                          aria-label={`查看 ${e.lemma} 的释义`}
+                          onClick={(ev) => {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            setDefLemma(e.lemma);
+                          }}
+                          className="shrink-0 rounded-full border border-[var(--border)]/70 bg-white/70 px-2 py-0.5 text-[11px] text-[var(--fg-soft)] transition hover:border-[var(--accent)]/60 hover:text-[var(--accent)] active:scale-95"
+                        >
+                          释义
+                        </button>
+                        <button
+                          type="button"
                           title={moveTitle}
                           aria-label={moveTitle}
                           onClick={(ev) => {
@@ -346,6 +362,9 @@ export default function WordbookSection() {
         className="absolute bottom-2 right-2 w-[100px] h-auto opacity-60 pointer-events-none select-none"
         priority={false}
       />
+
+      {/* 释义弹窗 — shared across all rows, driven by defLemma. */}
+      <DefinitionModal lemma={defLemma} onClose={() => setDefLemma(null)} />
     </div>
   );
 }
