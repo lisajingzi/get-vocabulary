@@ -49,11 +49,19 @@ import {
 } from "@/lib/wordbook/daily-snapshot";
 
 // ---------------------------------------------------------------------------
-// Sync ID (persisted in localStorage)
+// Sync ID
 // ---------------------------------------------------------------------------
+// Single-user mode: the syncId is a fixed constant injected at build time
+// via NEXT_PUBLIC_SYNC_ID. This means every device (even after clearing
+// localStorage, WeChat cache purge, browser reinstall, etc.) always points
+// to the same COS key and therefore always sees the same data — no manual
+// "binding" needed. If the env var is missing (e.g. local dev without a
+// .env), we fall back to the legacy per-device UUID stored in localStorage.
 const SYNC_ID_KEY = "get:syncId:v1";
+const FIXED_SYNC_ID = process.env.NEXT_PUBLIC_SYNC_ID ?? "";
 
 export function getSyncId(): string {
+  if (FIXED_SYNC_ID) return FIXED_SYNC_ID;
   if (typeof window === "undefined") return "";
   const existing = window.localStorage.getItem(SYNC_ID_KEY);
   if (existing) return existing;
@@ -71,10 +79,20 @@ export function getSyncId(): string {
   return id;
 }
 
-/** Overwrite the local syncId — used when user enters a code from another device */
+/**
+ * Overwrite the local syncId. In single-user (FIXED_SYNC_ID) mode this is
+ * a no-op — there's nothing to change because the id is a build-time
+ * constant shared across all devices.
+ */
 export function setSyncId(id: string): void {
+  if (FIXED_SYNC_ID) return;
   if (typeof window === "undefined") return;
   window.localStorage.setItem(SYNC_ID_KEY, id);
+}
+
+/** True when the app is running in single-user (fixed syncId) mode. */
+export function isSyncIdLocked(): boolean {
+  return Boolean(FIXED_SYNC_ID);
 }
 
 // ---------------------------------------------------------------------------

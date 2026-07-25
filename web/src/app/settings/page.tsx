@@ -10,7 +10,7 @@
  */
 
 import { useState, useEffect } from "react";
-import { getSyncId, setSyncId, push, pull } from "@/lib/sync/cloud";
+import { getSyncId, setSyncId, push, pull, isSyncIdLocked } from "@/lib/sync/cloud";
 import {
   getDailyCapActive,
   getDailyCapPassive,
@@ -39,6 +39,7 @@ export default function SettingsPage() {
   const [pullStatus, setPullStatus] = useState<Status>("idle");
   const [importStatus, setImportStatus] = useState<Status>("idle");
   const [importMsg, setImportMsg] = useState("");
+  const locked = isSyncIdLocked();
   // `null` in state means "无上限"; we store it verbatim in preferences.
   // 两组 cap 分别控制 说写 / 阅读 的每日上限；两者互不影响。
   const [capActive, setCapActiveState] = useState<number | null>(null);
@@ -239,24 +240,36 @@ export default function SettingsPage() {
 
       {/* ── My Sync Code ─────────────────────────────────────── */}
       <section className="rounded-xl border border-[var(--border)] p-5 space-y-3">
-        <h2 className="font-medium text-base">我的 Sync Code</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="font-medium text-base">我的 Sync Code</h2>
+          {locked && (
+            <span className="rounded-md bg-[var(--surface)] px-2 py-0.5 text-[11px] text-[var(--fg-soft)] border border-[var(--border)]">
+              已锁定
+            </span>
+          )}
+        </div>
         <p className="text-sm text-[var(--fg-soft)]">
-          这是本设备的唯一同步标识。把它分享给你的另一台设备，就能让两台设备共用同一份数据。
+          {locked
+            ? "当前为单用户模式，Sync Code 已在部署时固定，三端始终指向同一份数据，无需手动绑定。"
+            : "这是本设备的唯一同步标识。把它分享给你的另一台设备，就能让两台设备共用同一份数据。"}
         </p>
         <div className="flex items-center gap-2">
           <code className="flex-1 rounded-lg bg-[var(--surface)] border border-[var(--border)] px-3 py-2 text-xs font-mono tracking-wide break-all select-all">
             {syncId || "生成中…"}
           </code>
-          <button
-            onClick={handleCopy}
-            className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 active:scale-95"
-          >
-            {copied ? "已复制 ✓" : "复制"}
-          </button>
+          {!locked && (
+            <button
+              onClick={handleCopy}
+              className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 active:scale-95"
+            >
+              {copied ? "已复制 ✓" : "复制"}
+            </button>
+          )}
         </div>
       </section>
 
       {/* ── Import Code from another device ──────────────────── */}
+      {!locked && (
       <section className="rounded-xl border border-[var(--border)] p-5 space-y-3">
         <h2 className="font-medium text-base">在新设备上绑定</h2>
         <p className="text-sm text-[var(--fg-soft)]">
@@ -280,6 +293,7 @@ export default function SettingsPage() {
         </div>
         <StatusBadge status={importStatus} msg={importMsg} />
       </section>
+      )}
 
       {/* ── Manual sync ──────────────────────────────────────── */}
       <section className="rounded-xl border border-[var(--border)] p-5 space-y-3">

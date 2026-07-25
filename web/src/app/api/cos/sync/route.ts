@@ -92,7 +92,7 @@ export async function GET(req: NextRequest) {
   }
 
   const syncId = req.nextUrl.searchParams.get("syncId");
-  if (!syncId || !/^[0-9a-f-]{36}$/.test(syncId)) {
+  if (!syncId || !/^[a-z0-9-]{8,64}$/i.test(syncId)) {
     return NextResponse.json({ error: "invalid syncId" }, { status: 400 });
   }
 
@@ -124,7 +124,7 @@ export async function PUT(req: NextRequest) {
   }
 
   const syncId = req.nextUrl.searchParams.get("syncId");
-  if (!syncId || !/^[0-9a-f-]{36}$/.test(syncId)) {
+  if (!syncId || !/^[a-z0-9-]{8,64}$/i.test(syncId)) {
     return NextResponse.json({ error: "invalid syncId" }, { status: 400 });
   }
 
