@@ -53,6 +53,9 @@ export interface PhraseAIResult {
   /** Free-form usage notes / register hints. */
   notes?: string;
   provider: "deepseek" | "mock";
+  /** When provider="mock": human-readable reason (e.g. "zhipu 429: rate limit").
+   *  Absent on successful upstream calls and on legacy cached entries. */
+  mockReason?: string;
   /** ISO timestamp of when the payload was generated. */
   generatedAt: string;
 }

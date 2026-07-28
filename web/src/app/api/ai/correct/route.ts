@@ -45,10 +45,18 @@
  *     }>,
  *     distinction?: string,            // 1-line confusable-word disambiguation (Chinese)
  *     ielts?: string,                  // 1 native-level IELTS-speaking sample sentence
- *     provider: "deepseek" | "mock"
+ *     provider: "deepseek" | "mock",   // NOTE: kept as string literal "deepseek" for
+ *                                      // backward compat with client types. The actual
+ *                                      // backend is Zhipu GLM-4.7-Flash (free tier);
+ *                                      // renaming this union would ripple through 10+
+ *                                      // files for no user-visible gain.
+ *     mockReason?: string,             // when provider="mock", explains why we fell
+ *                                      // back (e.g. "zhipu 429: rate limit").
  *   }
  *
- * Falls back to a deterministic mock when DEEPSEEK_API_KEY is unset.
+ * Falls back to a deterministic mock when ZHIPU_API_KEY is unset OR the
+ * upstream call fails. On failure the real error message is surfaced via
+ * `mockReason` so the UI can show it in a tooltip.
  */
 
 import { NextResponse } from "next/server";
@@ -88,18 +96,14 @@ interface ResponseBody {
   distinction?: string;
   ielts?: string;
   provider: "deepseek" | "mock";
+  mockReason?: string;
 }
 
-/** Resolve the OpenAI-compatible chat-completions URL from env, tolerating
- *  base URLs given with or without a trailing `/v1` and with or without the
- *  `/chat/completions` suffix. */
-function resolveChatUrl(): string {
-  const raw = (process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com").replace(/\/+$/, "");
-  if (/\/chat\/completions$/.test(raw)) return raw;
-  if (/\/v\d+$/.test(raw)) return `${raw}/chat/completions`;
-  return `${raw}/v1/chat/completions`;
-}
-const CHAT_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+// Zhipu GLM open platform (OpenAI-compatible). Endpoint + model are pinned
+// here because we're only using the free tier of one specific model —
+// no reason to make them env-configurable and risk misconfiguration.
+const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+const ZHIPU_MODEL = "glm-4.7-flash";
 
 function buildPrompt(lemma: string, sentence: string, sense?: SenseHint) {
   const senseLine = sense?.def
@@ -616,36 +620,53 @@ function normaliseResponse(parsed: unknown, sentence: string): Omit<ResponseBody
   };
 }
 
-async function callDeepseek(
+async function callZhipu(
   lemma: string,
   sentence: string,
   sense: SenseHint | undefined,
   apiKey: string,
 ): Promise<ResponseBody> {
   const prompt = buildPrompt(lemma, sentence, sense);
-  const res = await fetch(resolveChatUrl(), {
+  const res = await fetch(ZHIPU_CHAT_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: CHAT_MODEL,
+      model: ZHIPU_MODEL,
       messages: [{ role: "user", content: prompt }],
+      // GLM-4.7 is a "forced thinking" model by default: it always
+      // produces reasoning_content, which costs tokens and latency we
+      // don't need for a straightforward JSON extraction task. Disable it.
+      thinking: { type: "disabled" },
       temperature: 0.2,
       max_tokens: 600,
     }),
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`deepseek ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
   }
   const data = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    };
   };
+  const usage = data.usage;
+  if (usage) {
+    console.log(
+      `[ai/correct] usage: input=${usage.prompt_tokens ?? "?"}, ` +
+        `output=${usage.completion_tokens ?? "?"}, ` +
+        `total=${usage.total_tokens ?? "?"}  (word="${lemma}")`,
+    );
+  }
   const content = data.choices?.[0]?.message?.content ?? "";
   const jsonStr = extractJson(content);
-  if (!jsonStr) throw new Error(`deepseek returned non-JSON: ${content.slice(0, 200)}`);
+  if (!jsonStr) throw new Error(`zhipu returned non-JSON: ${content.slice(0, 200)}`);
   const parsed = JSON.parse(jsonStr) as unknown;
   return { ...normaliseResponse(parsed, sentence), provider: "deepseek" };
 }
@@ -666,19 +687,25 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json({ error: "empty sentence" }, { status: 400 });
   }
 
-  const apiKey = process.env.DEEPSEEK_API_KEY;
+  const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
-    return NextResponse.json(await mockCorrect(lemma, sentence, body.sense));
-  }
-  try {
-    return NextResponse.json(
-      await callDeepseek(lemma, sentence, body.sense, apiKey),
-    );
-  } catch (err) {
-    console.error("[ai/correct] deepseek call failed:", err);
     return NextResponse.json({
       ...(await mockCorrect(lemma, sentence, body.sense)),
       provider: "mock",
+      mockReason: "ZHIPU_API_KEY not configured",
+    });
+  }
+  try {
+    return NextResponse.json(
+      await callZhipu(lemma, sentence, body.sense, apiKey),
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[ai/correct] zhipu call failed:", msg);
+    return NextResponse.json({
+      ...(await mockCorrect(lemma, sentence, body.sense)),
+      provider: "mock",
+      mockReason: msg.slice(0, 200),
     });
   }
 }

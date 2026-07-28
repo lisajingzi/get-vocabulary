@@ -21,6 +21,10 @@ export interface AIExample {
   cn: string;
   highlights: string[];
   provider: "deepseek" | "mock";
+  /** When provider="mock": upstream error string, if any.
+   *  Missing on successful calls and on legacy entries stored before this
+   *  field was introduced — treat undefined as "no context". */
+  mockReason?: string;
   createdAt: string;
 }
 

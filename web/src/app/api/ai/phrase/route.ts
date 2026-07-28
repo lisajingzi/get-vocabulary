@@ -1,11 +1,11 @@
 /**
  * POST /api/ai/phrase
  *
- * Ask DeepSeek to generate a rich dictionary-like explanation for an
- * English phrase / idiom (e.g. "take advantage of", "by the way").
- * Called ONCE per phrase from /notebook/phrase/[slug]; the caller caches
- * the result on the notebook entry and never re-hits this endpoint for
- * the same phrase.
+ * Ask the Zhipu GLM-4.7-Flash free-tier model to generate a rich
+ * dictionary-like explanation for an English phrase / idiom (e.g.
+ * "take advantage of", "by the way"). Called ONCE per phrase from
+ * /notebook/phrase/[slug]; the caller caches the result on the notebook
+ * entry and never re-hits this endpoint for the same phrase.
  *
  * Request body:
  *   { phrase: "take advantage of" }
@@ -13,16 +13,18 @@
  * Response body (all keys except examples/def/chn are optional):
  *   {
  *     posHint?:      "verb phrase" | "prep phrase" | "idiom" | ...
- *     def:            string,          // English definition, one sentence
- *     chn:            string,          // Chinese gloss
- *     examples:       Array<{ en: string; cn: string }>,   // 3-5 items
- *     collocations?:  string[],        // common collocations
- *     synonyms?:      string[],        // near-synonymous phrases
- *     notes?:         string,          // usage / register hints
- *     provider:       "deepseek" | "mock"
+ *     def:            string,
+ *     chn:            string,
+ *     examples:       Array<{ en: string; cn: string }>,
+ *     collocations?:  string[],
+ *     synonyms?:      string[],
+ *     notes?:         string,
+ *     provider:       "deepseek" | "mock",   // literal kept for backward compat;
+ *                                            //   real backend is Zhipu GLM-4.7-Flash.
+ *     mockReason?:    string,                // populated when provider="mock".
  *   }
  *
- * Falls back to a deterministic mock when DEEPSEEK_API_KEY is missing so
+ * Falls back to a deterministic mock when ZHIPU_API_KEY is missing so
  * the notebook UI is fully exercisable during local dev.
  */
 
@@ -43,16 +45,12 @@ interface ResponseBody {
   synonyms?: string[];
   notes?: string;
   provider: "deepseek" | "mock";
+  mockReason?: string;
 }
 
-/** See /api/ai/correct for rationale. */
-function resolveChatUrl(): string {
-  const raw = (process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com").replace(/\/+$/, "");
-  if (/\/chat\/completions$/.test(raw)) return raw;
-  if (/\/v\d+$/.test(raw)) return `${raw}/chat/completions`;
-  return `${raw}/v1/chat/completions`;
-}
-const CHAT_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+// Zhipu GLM (OpenAI-compatible free tier). Pinned endpoint + model.
+const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+const ZHIPU_MODEL = "glm-4.7-flash";
 
 function buildPrompt(phrase: string): string {
   return [
@@ -143,35 +141,50 @@ function mockResult(phrase: string): ResponseBody {
   };
 }
 
-async function callDeepseek(
+async function callZhipu(
   phrase: string,
   apiKey: string,
 ): Promise<ResponseBody> {
   const prompt = buildPrompt(phrase);
-  const res = await fetch(resolveChatUrl(), {
+  const res = await fetch(ZHIPU_CHAT_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: CHAT_MODEL,
+      model: ZHIPU_MODEL,
       messages: [{ role: "user", content: prompt }],
+      // GLM-4.7 forced-thinking is default; disable it here to save tokens.
+      thinking: { type: "disabled" },
       temperature: 0.4,
       max_tokens: 900,
     }),
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`deepseek ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
   }
   const data = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    };
   };
+  const usage = data.usage;
+  if (usage) {
+    console.log(
+      `[ai/phrase] usage: input=${usage.prompt_tokens ?? "?"}, ` +
+        `output=${usage.completion_tokens ?? "?"}, ` +
+        `total=${usage.total_tokens ?? "?"}  (phrase="${phrase}")`,
+    );
+  }
   const content = data.choices?.[0]?.message?.content ?? "";
   const jsonStr = extractJson(content);
   if (!jsonStr)
-    throw new Error(`deepseek returned non-JSON: ${content.slice(0, 200)}`);
+    throw new Error(`zhipu returned non-JSON: ${content.slice(0, 200)}`);
   const parsed = JSON.parse(jsonStr) as Partial<ResponseBody> & {
     examples?: Array<{ en?: unknown; cn?: unknown }>;
     collocations?: unknown[];
@@ -179,7 +192,7 @@ async function callDeepseek(
   };
   const def = String(parsed.def ?? "").trim();
   const chn = String(parsed.chn ?? "").trim();
-  if (!def || !chn) throw new Error("deepseek returned incomplete payload");
+  if (!def || !chn) throw new Error("zhipu returned incomplete payload");
   const rawExamples = Array.isArray(parsed.examples) ? parsed.examples : [];
   const examples = rawExamples
     .map((ex) => ({
@@ -189,7 +202,7 @@ async function callDeepseek(
     .filter((ex) => ex.en.length > 0)
     .slice(0, 5);
   if (examples.length === 0) {
-    throw new Error("deepseek returned no examples");
+    throw new Error("zhipu returned no examples");
   }
   const asStringArray = (v: unknown): string[] | undefined => {
     if (!Array.isArray(v)) return undefined;
@@ -226,17 +239,25 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json({ error: "invalid phrase" }, { status: 400 });
   }
 
-  const apiKey = process.env.DEEPSEEK_API_KEY;
+  const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
-    return NextResponse.json(mockResult(phrase));
+    return NextResponse.json({
+      ...mockResult(phrase),
+      mockReason: "ZHIPU_API_KEY not configured",
+    });
   }
 
   try {
-    const result = await callDeepseek(phrase, apiKey);
+    const result = await callZhipu(phrase, apiKey);
     return NextResponse.json(result);
   } catch (err) {
-    console.error("[ai/phrase] deepseek call failed:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[ai/phrase] zhipu call failed:", msg);
     const fallback = mockResult(phrase);
-    return NextResponse.json({ ...fallback, provider: "mock" });
+    return NextResponse.json({
+      ...fallback,
+      provider: "mock",
+      mockReason: msg.slice(0, 200),
+    });
   }
 }

@@ -40,6 +40,8 @@ interface Props {
 interface ApiResponse {
   senses: DefinitionSense[];
   provider: "deepseek" | "mock";
+  /** Present iff provider="mock" — human-readable upstream error. */
+  mockReason?: string;
 }
 
 export default function DefinitionModal({ lemma, onClose }: Props) {
@@ -78,6 +80,7 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
           target,
           payload.senses,
           payload.provider,
+          payload.mockReason,
         );
         // Guard: if the user has since switched lemmas, discard this result.
         if (activeLemmaRef.current === target) {
@@ -154,7 +157,10 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
             </h3>
             <SpeakButton text={lemma} variant="us" />
             {data?.provider === "mock" && (
-              <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] text-[var(--fg-soft)]">
+              <span
+                className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] text-[var(--fg-soft)] cursor-help"
+                title={data.mockReason ? `AI 不可用：${data.mockReason}` : undefined}
+              >
                 mock
               </span>
             )}

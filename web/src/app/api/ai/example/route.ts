@@ -1,9 +1,10 @@
 /**
  * POST /api/ai/example
  *
- * Generates one English example sentence for a target lemma, using DeepSeek
- * if a key is configured and otherwise a deterministic mock so the rest of
- * the UI is testable end-to-end.
+ * Generates one English example sentence for a target lemma, using the
+ * Zhipu GLM-4.7-Flash free-tier model if a key is configured, and
+ * otherwise a deterministic mock so the rest of the UI is testable
+ * end-to-end.
  *
  * Request body:
  *   {
@@ -18,11 +19,12 @@
  *   }
  *
  * Response body:
- *   { en: string, cn: string, highlights: string[], provider: "deepseek" | "mock" }
- *
- * Day 7 will swap the runtime to read DEEPSEEK_API_KEY from a real Vercel env.
- * Until then the route works either way: the user gets a mock today, the same
- * shape ships when the real key lands, the UI doesn't change.
+ *   {
+ *     en: string, cn: string, highlights: string[],
+ *     provider: "deepseek" | "mock",   // literal kept for backward compat with
+ *                                      //   client types; actual backend is Zhipu GLM-4.7-Flash.
+ *     mockReason?: string,             // set when provider="mock".
+ *   }
  */
 
 import { NextResponse } from "next/server";
@@ -51,16 +53,12 @@ interface ResponseBody {
    *  contains `lemma` itself plus any of `known` we successfully wove in. */
   highlights: string[];
   provider: "deepseek" | "mock";
+  mockReason?: string;
 }
 
-/** See /api/ai/correct for rationale. */
-function resolveChatUrl(): string {
-  const raw = (process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com").replace(/\/+$/, "");
-  if (/\/chat\/completions$/.test(raw)) return raw;
-  if (/\/v\d+$/.test(raw)) return `${raw}/chat/completions`;
-  return `${raw}/v1/chat/completions`;
-}
-const CHAT_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+// Zhipu GLM (OpenAI-compatible free tier). Pinned endpoint + model.
+const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+const ZHIPU_MODEL = "glm-4.7-flash";
 
 function buildPrompt(
   lemma: string,
@@ -191,7 +189,7 @@ function mockResult(
   return { en, cn, highlights, provider: "mock" };
 }
 
-async function callDeepseek(
+async function callZhipu(
   lemma: string,
   sense: SenseHint | undefined,
   known: string[],
@@ -200,21 +198,21 @@ async function callDeepseek(
 ): Promise<ResponseBody> {
   const prompt = buildPrompt(lemma, sense, known, avoid);
   // Diversity knobs — "再生成" must produce a meaningfully different draft.
-  // We bumped temperature back up (0.6 was too tame, every retry came out
-  // as a near-duplicate of the first sentence) and added presence/frequency
-  // penalties so the model is actively pushed off whatever phrasing it just
-  // produced. The avoid-list in the prompt is the primary defense; these
-  // sampling knobs are belt-and-suspenders.
+  // The avoid-list in the prompt is the primary defense; these sampling
+  // knobs are belt-and-suspenders.
   const hasAvoid = avoid.length > 0;
-  const res = await fetch(resolveChatUrl(), {
+  const res = await fetch(ZHIPU_CHAT_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: CHAT_MODEL,
+      model: ZHIPU_MODEL,
       messages: [{ role: "user", content: prompt }],
+      // GLM-4.7 defaults to forced thinking — disable it to keep token
+      // usage predictable on this cheap "one JSON blob" task.
+      thinking: { type: "disabled" },
       temperature: hasAvoid ? 0.95 : 0.85,
       top_p: 0.95,
       presence_penalty: hasAvoid ? 0.6 : 0.2,
@@ -224,18 +222,31 @@ async function callDeepseek(
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`deepseek ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
   }
   const data = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    };
   };
+  const usage = data.usage;
+  if (usage) {
+    console.log(
+      `[ai/example] usage: input=${usage.prompt_tokens ?? "?"}, ` +
+        `output=${usage.completion_tokens ?? "?"}, ` +
+        `total=${usage.total_tokens ?? "?"}  (word="${lemma}")`,
+    );
+  }
   const content = data.choices?.[0]?.message?.content ?? "";
   const jsonStr = extractJson(content);
-  if (!jsonStr) throw new Error(`deepseek returned non-JSON: ${content.slice(0, 200)}`);
+  if (!jsonStr) throw new Error(`zhipu returned non-JSON: ${content.slice(0, 200)}`);
   const parsed = JSON.parse(jsonStr) as Partial<ResponseBody>;
   const en = String(parsed.en ?? "").trim();
   const cn = String(parsed.cn ?? "").trim();
-  if (!en) throw new Error("deepseek returned empty `en`");
+  if (!en) throw new Error("zhipu returned empty `en`");
   // Ensure target lemma always shows up in highlights, regardless of whether
   // the model echoed it back. The UI does case-insensitive whole-word match
   // so we don't need to track the exact inflected form here.
@@ -272,20 +283,28 @@ export async function POST(req: Request): Promise<Response> {
         .slice(0, 5)
     : [];
 
-  const apiKey = process.env.DEEPSEEK_API_KEY;
+  const apiKey = process.env.ZHIPU_API_KEY;
   // No key configured → return a mock so devs/users can still iterate UI.
   if (!apiKey) {
-    return NextResponse.json(mockResult(lemma, sense, known));
+    return NextResponse.json({
+      ...mockResult(lemma, sense, known),
+      mockReason: "ZHIPU_API_KEY not configured",
+    });
   }
 
   try {
-    const result = await callDeepseek(lemma, sense, known, avoid, apiKey);
+    const result = await callZhipu(lemma, sense, known, avoid, apiKey);
     return NextResponse.json(result);
   } catch (err) {
     // Don't 500 — degrade gracefully so the UI keeps working. Surface the
-    // provider downgrade so the client can show a small notice.
-    console.error("[ai/example] deepseek call failed:", err);
+    // provider downgrade + real error so the client can show a tooltip.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[ai/example] zhipu call failed:", msg);
     const fallback = mockResult(lemma, sense, known);
-    return NextResponse.json({ ...fallback, provider: "mock" });
+    return NextResponse.json({
+      ...fallback,
+      provider: "mock",
+      mockReason: msg.slice(0, 200),
+    });
   }
 }

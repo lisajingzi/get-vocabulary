@@ -23,6 +23,9 @@ export interface AIDefinition {
   lemma: string;
   senses: DefinitionSense[];
   provider: "deepseek" | "mock";
+  /** When provider="mock": human-readable reason from the API. Optional
+   *  so legacy cached rows (before this field was introduced) still parse. */
+  mockReason?: string;
   cachedAt: string;
 }
 
@@ -45,11 +48,13 @@ export async function saveDefinition(
   lemma: string,
   senses: DefinitionSense[],
   provider: "deepseek" | "mock",
+  mockReason?: string,
 ): Promise<AIDefinition> {
   const payload: AIDefinition = {
     lemma,
     senses,
     provider,
+    ...(mockReason ? { mockReason } : {}),
     cachedAt: new Date().toISOString(),
   };
   try {

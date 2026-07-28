@@ -258,7 +258,10 @@ function PhraseAICard({ ai }: { ai: PhraseAIResult }) {
           </span>
         )}
         {ai.provider === "mock" && (
-          <span className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--fg-soft)]">
+          <span
+            className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--fg-soft)] cursor-help"
+            title={ai.mockReason ? `AI 不可用：${ai.mockReason}` : undefined}
+          >
             模拟数据
           </span>
         )}

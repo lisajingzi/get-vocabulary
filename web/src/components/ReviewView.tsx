@@ -88,6 +88,10 @@ interface CorrectionResult {
   distinction?: string;
   ielts?: string;
   provider: "deepseek" | "mock";
+  /** Present iff provider="mock" — human-readable upstream error.
+   *  Kept optional so this type stays a superset of the API response
+   *  even though the review flow doesn't currently surface it in the UI. */
+  mockReason?: string;
 }
 
 export default function ReviewView() {

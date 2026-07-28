@@ -44,6 +44,8 @@ interface DerivedInfo {
   chn: string;
   examples: DerivedExample[];
   provider: "deepseek" | "mock";
+  /** Present iff provider="mock" — human-readable upstream error. */
+  mockReason?: string;
 }
 
 interface Props {
@@ -187,7 +189,10 @@ export default function DerivedFormPanel({ derived, base, baseSense, onResolved 
         </h2>
         <div className="flex items-center gap-2">
           {info?.provider === "mock" && (
-            <span className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--fg-soft)]">
+            <span
+              className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--fg-soft)] cursor-help"
+              title={info.mockReason ? `AI 不可用：${info.mockReason}` : undefined}
+            >
               模拟数据
             </span>
           )}

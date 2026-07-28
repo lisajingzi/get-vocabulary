@@ -115,6 +115,7 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
         cn: string;
         highlights: string[];
         provider: "deepseek" | "mock";
+        mockReason?: string;
       };
       const saved = await addExample({
         lemma,
@@ -123,6 +124,7 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
         cn: data.cn,
         highlights: data.highlights ?? [lemma],
         provider: data.provider,
+        ...(data.mockReason ? { mockReason: data.mockReason } : {}),
       });
       setHistory((prev) => [saved, ...prev]);
     } catch (e) {
@@ -241,7 +243,10 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
                 <span>
                   {new Date(ex.createdAt).toLocaleString("zh-CN")}
                   {ex.provider === "mock" && i === 0 && (
-                    <span className="ml-2 rounded bg-[var(--bg-soft)] px-1.5 py-0.5">
+                    <span
+                      className="ml-2 rounded bg-[var(--bg-soft)] px-1.5 py-0.5 cursor-help"
+                      title={ex.mockReason ? `AI 不可用：${ex.mockReason}` : undefined}
+                    >
                       mock
                     </span>
                   )}

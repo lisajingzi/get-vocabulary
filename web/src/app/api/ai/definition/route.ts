@@ -17,10 +17,13 @@
  * Response body:
  *   {
  *     senses: Array<{ def: string; example: { en: string; cn: string } }>,
- *     provider: "deepseek" | "mock",
+ *     provider: "deepseek" | "mock",   // string literal "deepseek" kept for
+ *                                      //   backward compat; actual backend is Zhipu GLM-4.7-Flash.
+ *     mockReason?: string,             // set when provider="mock": human-readable
+ *                                      //   reason (missing key / upstream error).
  *   }
  *
- * Fallback: if DEEPSEEK_API_KEY is missing OR the call fails, we return a
+ * Fallback: if ZHIPU_API_KEY is missing OR the call fails, we return a
  * deterministic mock so the UI stays exercisable. Same pattern as the
  * other /api/ai/* routes in this project.
  */
@@ -41,16 +44,13 @@ interface DefinitionSense {
 interface ResponseBody {
   senses: DefinitionSense[];
   provider: "deepseek" | "mock";
+  mockReason?: string;
 }
 
-/** Match /api/ai/correct's URL resolution logic. */
-function resolveChatUrl(): string {
-  const raw = (process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com").replace(/\/+$/, "");
-  if (/\/chat\/completions$/.test(raw)) return raw;
-  if (/\/v\d+$/.test(raw)) return `${raw}/chat/completions`;
-  return `${raw}/v1/chat/completions`;
-}
-const CHAT_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+// Zhipu GLM open platform (OpenAI-compatible). Endpoint + model pinned
+// because we're only using the free tier of one specific model.
+const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
+const ZHIPU_MODEL = "glm-4.7-flash";
 
 function buildPrompt(lemma: string): string {
   return [
@@ -128,20 +128,23 @@ function mockResult(lemma: string): ResponseBody {
   };
 }
 
-async function callDeepseek(
+async function callZhipu(
   lemma: string,
   apiKey: string,
 ): Promise<ResponseBody> {
   const prompt = buildPrompt(lemma);
-  const res = await fetch(resolveChatUrl(), {
+  const res = await fetch(ZHIPU_CHAT_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
-      model: CHAT_MODEL,
+      model: ZHIPU_MODEL,
       messages: [{ role: "user", content: prompt }],
+      // GLM-4.7 is a "forced thinking" model by default — disable
+      // reasoning to save tokens/latency on this JSON extraction task.
+      thinking: { type: "disabled" },
       // Definitions should be stable — low temperature, no penalties.
       temperature: 0.3,
       max_tokens: 480,
@@ -149,14 +152,27 @@ async function callDeepseek(
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`deepseek ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
   }
   const data = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    };
   };
+  const usage = data.usage;
+  if (usage) {
+    console.log(
+      `[ai/definition] usage: input=${usage.prompt_tokens ?? "?"}, ` +
+        `output=${usage.completion_tokens ?? "?"}, ` +
+        `total=${usage.total_tokens ?? "?"}  (word="${lemma}")`,
+    );
+  }
   const content = data.choices?.[0]?.message?.content ?? "";
   const jsonStr = extractJson(content);
-  if (!jsonStr) throw new Error(`deepseek returned non-JSON: ${content.slice(0, 200)}`);
+  if (!jsonStr) throw new Error(`zhipu returned non-JSON: ${content.slice(0, 200)}`);
   const parsed = JSON.parse(jsonStr) as {
     senses?: Array<{ def?: unknown; example?: { en?: unknown; cn?: unknown } }>;
   };
@@ -170,7 +186,7 @@ async function callDeepseek(
     })
     .filter((s) => s.def.length > 0 && s.example.en.length > 0)
     .slice(0, 2);
-  if (senses.length === 0) throw new Error("deepseek returned no usable senses");
+  if (senses.length === 0) throw new Error("zhipu returned no usable senses");
   return { senses, provider: "deepseek" };
 }
 
@@ -186,17 +202,25 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json({ error: "invalid lemma" }, { status: 400 });
   }
 
-  const apiKey = process.env.DEEPSEEK_API_KEY;
+  const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
-    return NextResponse.json(mockResult(lemma));
+    return NextResponse.json({
+      ...mockResult(lemma),
+      mockReason: "ZHIPU_API_KEY not configured",
+    });
   }
 
   try {
-    const result = await callDeepseek(lemma, apiKey);
+    const result = await callZhipu(lemma, apiKey);
     return NextResponse.json(result);
   } catch (err) {
-    console.error("[ai/definition] deepseek call failed:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[ai/definition] zhipu call failed:", msg);
     const fallback = mockResult(lemma);
-    return NextResponse.json({ ...fallback, provider: "mock" });
+    return NextResponse.json({
+      ...fallback,
+      provider: "mock",
+      mockReason: msg.slice(0, 200),
+    });
   }
 }
