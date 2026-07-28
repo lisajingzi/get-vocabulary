@@ -627,7 +627,7 @@ async function callZhipu(
   apiKey: string,
 ): Promise<ResponseBody> {
   const prompt = buildPrompt(lemma, sentence, sense);
-  const res = await fetch(ZHIPU_CHAT_URL, {
+  const requestInit: RequestInit = {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -643,10 +643,24 @@ async function callZhipu(
       temperature: 0.2,
       max_tokens: 600,
     }),
-  });
-  if (!res.ok) {
+  };
+  // Retry only on 429 (rate limit / model overloaded). Free-tier GLM-4.7-Flash
+  // regularly returns 1302 (per-account concurrency) or 1305 (global model
+  // overload); a short exponential backoff is enough to skate around both.
+  const backoffs = [1000, 2000, 4000];
+  let res!: Response;
+  for (let attempt = 0; attempt <= backoffs.length; attempt++) {
+    res = await fetch(ZHIPU_CHAT_URL, requestInit);
+    if (res.ok) break;
     const text = await res.text();
-    throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
+    if (res.status !== 429 || attempt === backoffs.length) {
+      throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
+    }
+    console.warn(
+      `[ai/correct] zhipu 429, retrying in ${backoffs[attempt]}ms ` +
+        `(attempt ${attempt + 1}/${backoffs.length})`,
+    );
+    await new Promise((r) => setTimeout(r, backoffs[attempt]));
   }
   const data = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;

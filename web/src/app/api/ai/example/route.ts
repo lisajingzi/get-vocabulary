@@ -201,7 +201,7 @@ async function callZhipu(
   // The avoid-list in the prompt is the primary defense; these sampling
   // knobs are belt-and-suspenders.
   const hasAvoid = avoid.length > 0;
-  const res = await fetch(ZHIPU_CHAT_URL, {
+  const requestInit: RequestInit = {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -219,10 +219,23 @@ async function callZhipu(
       frequency_penalty: hasAvoid ? 0.5 : 0.1,
       max_tokens: 240,
     }),
-  });
-  if (!res.ok) {
+  };
+  // Retry on 429 (per-account rate limit or global model overload) with
+  // short exponential backoff before failing to the caller.
+  const backoffs = [1000, 2000, 4000];
+  let res!: Response;
+  for (let attempt = 0; attempt <= backoffs.length; attempt++) {
+    res = await fetch(ZHIPU_CHAT_URL, requestInit);
+    if (res.ok) break;
     const text = await res.text();
-    throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
+    if (res.status !== 429 || attempt === backoffs.length) {
+      throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
+    }
+    console.warn(
+      `[ai/example] zhipu 429, retrying in ${backoffs[attempt]}ms ` +
+        `(attempt ${attempt + 1}/${backoffs.length})`,
+    );
+    await new Promise((r) => setTimeout(r, backoffs[attempt]));
   }
   const data = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;

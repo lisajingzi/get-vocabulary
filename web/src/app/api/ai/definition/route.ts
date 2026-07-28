@@ -133,7 +133,7 @@ async function callZhipu(
   apiKey: string,
 ): Promise<ResponseBody> {
   const prompt = buildPrompt(lemma);
-  const res = await fetch(ZHIPU_CHAT_URL, {
+  const requestInit: RequestInit = {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -149,10 +149,23 @@ async function callZhipu(
       temperature: 0.3,
       max_tokens: 480,
     }),
-  });
-  if (!res.ok) {
+  };
+  // Retry on 429 (rate limit / model overloaded) with short exponential
+  // backoff before failing to the caller.
+  const backoffs = [1000, 2000, 4000];
+  let res!: Response;
+  for (let attempt = 0; attempt <= backoffs.length; attempt++) {
+    res = await fetch(ZHIPU_CHAT_URL, requestInit);
+    if (res.ok) break;
     const text = await res.text();
-    throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
+    if (res.status !== 429 || attempt === backoffs.length) {
+      throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
+    }
+    console.warn(
+      `[ai/definition] zhipu 429, retrying in ${backoffs[attempt]}ms ` +
+        `(attempt ${attempt + 1}/${backoffs.length})`,
+    );
+    await new Promise((r) => setTimeout(r, backoffs[attempt]));
   }
   const data = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;
