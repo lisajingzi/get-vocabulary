@@ -12,11 +12,22 @@
  *   - Highlights show the target lemma (strong) + any of the user's wordbook
  *     lemmas the model wove in (soft); both are clickable.
  *   - Each cached entry is individually deletable.
+ *   - After every fresh generation we show a single "🔢 N tokens · model"
+ *     footnote under the newest entry. It disappears next mount (not cached).
+ *   - When the API returns 502 (all Zhipu tiers failed) we render a red
+ *     <AIErrorNotice> with the per-tier reasons and leave existing cached
+ *     entries intact.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import HighlightedSentence from "@/components/HighlightedSentence";
 import SpeakButton from "@/components/SpeakButton";
+import {
+  AIErrorNotice,
+  AIUsageNote,
+  parseAIErrorAttempts,
+  type AIAttempt,
+} from "@/components/AIStatus";
 import {
   addExample,
   deleteExample,
@@ -31,21 +42,18 @@ interface Props {
   senses: DictSense[];
 }
 
+interface FreshUsage {
+  model: string;
+  usage: { input: number; output: number; total: number };
+}
+
 export default function AIExamplesPanel({ lemma, senses }: Props) {
   const [senseIndex, setSenseIndex] = useState(-1); // -1 = primary
   const [history, setHistory] = useState<AIExample[]>([]);
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [attempts, setAttempts] = useState<AIAttempt[]>([]);
+  const [fresh, setFresh] = useState<FreshUsage | null>(null);
 
-  // Snapshot of every wordbook lemma; passed into HighlightedSentence so the
-  // soft-highlight covers ALL the user's known words, not just the ones the
-  // model happened to flag in `highlights`. Keeps the visual signal consistent
-  // across cached and freshly generated examples.
-  //
-  // Lazy initializer reads localStorage on the FIRST render so cached examples
-  // get their highlights painted on the very first paint instead of flashing
-  // "black, then highlighted" when the useEffect lands a tick later. Falls
-  // back to an empty array during SSR (no window).
   const [knownLemmas, setKnownLemmas] = useState<string[]>(() =>
     typeof window === "undefined" ? [] : Array.from(getKnownLemmaSet()),
   );
@@ -53,8 +61,6 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
     function refresh() {
       setKnownLemmas(Array.from(getKnownLemmaSet()));
     }
-    // Re-read once on mount in case SSR hydration produced a stale empty
-    // array (it shouldn't, but defensive).
     refresh();
     if (typeof window !== "undefined") {
       window.addEventListener("get:wordbook-change", refresh);
@@ -63,7 +69,6 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
     }
   }, []);
 
-  // Human-friendly label for a given senseIndex. -1 collapses to "主要释义".
   const senseLabel = useMemo(() => {
     return (idx: number): string => {
       if (idx < 0) return "主要释义";
@@ -74,15 +79,14 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
     };
   }, [senses]);
 
-  // Reset whenever the lemma or selected sense changes — we treat each
-  // (lemma, senseIndex) pair as its own thread of history.
   const refresh = useCallback(async () => {
     setHistory(await listExamples(lemma, senseIndex));
   }, [lemma, senseIndex]);
 
   const generate = useCallback(async () => {
     setBusy(true);
-    setErr(null);
+    setAttempts([]);
+    setFresh(null);
     try {
       const sense =
         senseIndex >= 0 && senses[senseIndex]
@@ -99,23 +103,22 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
               }
             : undefined;
       const known = Array.from(getKnownLemmaSet()).filter((w) => w !== lemma);
-      // Pass the most recent generations back to the API so the prompt can
-      // explicitly tell the model "don't echo these". Without this the
-      // model happily produces near-duplicates on every "再生成" click —
-      // same scenario, same verbs, just one word swapped.
       const avoid = history.slice(0, 5).map((h) => h.en);
       const res = await fetch("/api/ai/example", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lemma, sense, known: known.slice(0, 50), avoid }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        setAttempts(await parseAIErrorAttempts(res));
+        return;
+      }
       const data = (await res.json()) as {
         en: string;
         cn: string;
         highlights: string[];
-        provider: "deepseek" | "mock";
-        mockReason?: string;
+        model: string;
+        usage: { input: number; output: number; total: number };
       };
       const saved = await addExample({
         lemma,
@@ -123,43 +126,38 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
         en: data.en,
         cn: data.cn,
         highlights: data.highlights ?? [lemma],
-        provider: data.provider,
-        ...(data.mockReason ? { mockReason: data.mockReason } : {}),
       });
       setHistory((prev) => [saved, ...prev]);
+      if (data.model && data.usage) {
+        setFresh({ model: data.model, usage: data.usage });
+      }
     } catch (e) {
-      setErr((e as Error).message);
+      setAttempts([
+        { model: "network", reason: (e as Error).message || "网络请求失败" },
+      ]);
     } finally {
       setBusy(false);
     }
-    // history is in the dep list because we read it above to build the avoid
-    // payload; if we left it out the closure would always see the initial
-    // empty array and the avoid-list would never actually reach the model.
-    // The auto-generate effect below pins itself to (lemma, senseIndex) only
-    // and explicitly disables exhaustive-deps, so the new generate identity
-    // here doesn't retrigger it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lemma, senseIndex, senses, history]);
 
   // Mount + (lemma, senseIndex) change: load cache, then auto-generate iff empty.
-  // We CLEAR `history` first so the previous sense's examples don't linger
-  // on screen for the split second between switching the dropdown and the
-  // async load coming back.
   useEffect(() => {
     let cancelled = false;
     setHistory([]);
+    setAttempts([]);
+    setFresh(null);
     (async () => {
       const list = await listExamples(lemma, senseIndex);
       if (cancelled) return;
       setHistory(list);
       if (list.length === 0 && !busy) {
-        // Fire-and-forget; the function flips its own busy state.
         void generate();
       }
     })();
     return () => {
       cancelled = true;
     };
-    // intentional: we don't want re-runs on `generate` identity changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lemma, senseIndex]);
 
@@ -201,11 +199,9 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
         </div>
       </div>
 
-      {err && (
-        <p className="text-xs text-red-500">生成失败：{err}</p>
-      )}
+      {attempts.length > 0 && !busy && <AIErrorNotice attempts={attempts} />}
 
-      {history.length === 0 && !busy && (
+      {history.length === 0 && !busy && attempts.length === 0 && (
         <p className="text-xs text-[var(--fg-soft)]">
           点击「生成例句」让 AI 给你造一句，会尽量串上你已经查过的旧词。
         </p>
@@ -213,14 +209,11 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
 
       {history.length > 0 && (
         <ul className="space-y-2">
-          {history.map((ex, i) => (
+          {history.map((ex) => (
             <li
               key={ex.id}
               className="space-y-1 rounded-lg border border-[var(--border)] p-3"
             >
-              {/* Per-example sense badge so it's obvious which meaning this
-                  sentence belongs to — prevents the "why is the old example
-                  still here?" confusion when flipping the dropdown. */}
               <div className="flex items-center gap-2">
                 <span className="inline-flex items-center rounded-full bg-[var(--bg-soft)] px-2 py-0.5 text-[11px] text-[var(--fg-soft)]">
                   {senseLabel(ex.senseIndex)}
@@ -240,17 +233,7 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
                 <p className="text-xs text-[var(--fg-soft)]">{ex.cn}</p>
               )}
               <div className="flex items-center justify-between text-[11px] text-[var(--fg-soft)]">
-                <span>
-                  {new Date(ex.createdAt).toLocaleString("zh-CN")}
-                  {ex.provider === "mock" && i === 0 && (
-                    <span
-                      className="ml-2 rounded bg-[var(--bg-soft)] px-1.5 py-0.5 cursor-help"
-                      title={ex.mockReason ? `AI 不可用：${ex.mockReason}` : undefined}
-                    >
-                      mock
-                    </span>
-                  )}
-                </span>
+                <span>{new Date(ex.createdAt).toLocaleString("zh-CN")}</span>
                 <button
                   type="button"
                   onClick={() => handleDelete(ex.id)}
@@ -263,6 +246,8 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
           ))}
         </ul>
       )}
+
+      {fresh && <AIUsageNote model={fresh.model} usage={fresh.usage} />}
     </section>
   );
 }

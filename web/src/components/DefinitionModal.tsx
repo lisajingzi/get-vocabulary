@@ -4,26 +4,26 @@
  * <DefinitionModal /> — the popup behind the "释义" button on each wordbook row.
  *
  * Behaviour:
- *   - On open, tries the IndexedDB cache first. Cache hit → paint immediately.
- *   - Cache miss → POST /api/ai/definition, then persist the response so the
- *     next open is instant. Same fallback contract as the other /api/ai/*
- *     routes: if DeepSeek is unavailable the API returns a mock payload
- *     which we still render (with a small "mock" pill).
- *   - Renders 1–2 English definitions; each definition has an example
- *     sentence (with Chinese translation) that can be tapped to hear it via
- *     the shared <SpeakButton />.
+ *   - On open, tries the IndexedDB cache first. Cache hit → paint immediately,
+ *     no usage footnote (no tokens were spent).
+ *   - Cache miss → POST /api/ai/definition. On success we persist the payload
+ *     and show a one-line "本次消耗 N tokens" footnote until the user closes
+ *     the modal.
+ *   - On complete failure (all three fallback tiers down), we DON'T mock —
+ *     we display a red <AIErrorNotice> listing each tier that failed and why,
+ *     translated into Chinese by the server.
  *   - Close options: click the ✕, click the backdrop, or press Esc.
- *   - "再生成" refetches and overwrites the cache — useful when the first
- *     response was a mock (no key) or the user simply wants another take.
- *
- * The component is fully self-contained; the parent only needs to toggle
- * the `lemma` prop (null = closed, string = show that word). Keeping the
- * open/close state driven by prop instead of a ref makes it trivial to
- * wire from any list row without prop-drilling a modal store.
+ *   - "再生成" refetches and overwrites the cache.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import SpeakButton from "@/components/SpeakButton";
+import {
+  AIErrorNotice,
+  AIUsageNote,
+  parseAIErrorAttempts,
+  type AIAttempt,
+} from "@/components/AIStatus";
 import {
   getCachedDefinition,
   saveDefinition,
@@ -39,15 +39,21 @@ interface Props {
 
 interface ApiResponse {
   senses: DefinitionSense[];
-  provider: "deepseek" | "mock";
-  /** Present iff provider="mock" — human-readable upstream error. */
-  mockReason?: string;
+  model: string;
+  usage: { input: number; output: number; total: number };
+}
+
+/** Ephemeral, per-fetch usage snapshot. Never persisted. */
+interface FreshUsage {
+  model: string;
+  usage: { input: number; output: number; total: number };
 }
 
 export default function DefinitionModal({ lemma, onClose }: Props) {
   const [data, setData] = useState<AIDefinition | null>(null);
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [attempts, setAttempts] = useState<AIAttempt[]>([]);
+  const [fresh, setFresh] = useState<FreshUsage | null>(null);
   // Track the lemma we're currently loading so a late response from a
   // previous open doesn't overwrite a newer one (e.g. rapid switch A→B).
   const activeLemmaRef = useRef<string | null>(null);
@@ -56,7 +62,8 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
     async (target: string, forceRefresh: boolean) => {
       activeLemmaRef.current = target;
       setBusy(true);
-      setErr(null);
+      setAttempts([]);
+      setFresh(null);
       try {
         if (!forceRefresh) {
           const cached = await getCachedDefinition(target);
@@ -71,24 +78,36 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ lemma: target }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        if (!res.ok) {
+          const parsed = await parseAIErrorAttempts(res);
+          if (activeLemmaRef.current === target) {
+            setAttempts(parsed);
+          }
+          return;
+        }
         const payload = (await res.json()) as ApiResponse;
         if (!Array.isArray(payload.senses) || payload.senses.length === 0) {
-          throw new Error("empty response");
+          if (activeLemmaRef.current === target) {
+            setAttempts([
+              { model: "parse", reason: "模型返回内容无法解析" },
+            ]);
+          }
+          return;
         }
-        const saved = await saveDefinition(
-          target,
-          payload.senses,
-          payload.provider,
-          payload.mockReason,
-        );
+        const saved = await saveDefinition(target, payload.senses);
         // Guard: if the user has since switched lemmas, discard this result.
         if (activeLemmaRef.current === target) {
           setData(saved);
+          setFresh({ model: payload.model, usage: payload.usage });
         }
       } catch (e) {
         if (activeLemmaRef.current === target) {
-          setErr((e as Error).message || "load failed");
+          setAttempts([
+            {
+              model: "network",
+              reason: (e as Error).message || "网络请求失败",
+            },
+          ]);
         }
       } finally {
         if (activeLemmaRef.current === target) {
@@ -104,11 +123,14 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
     if (!lemma) {
       activeLemmaRef.current = null;
       setData(null);
-      setErr(null);
+      setAttempts([]);
+      setFresh(null);
       setBusy(false);
       return;
     }
     setData(null);
+    setAttempts([]);
+    setFresh(null);
     void fetchAndCache(lemma, false);
   }, [lemma, fetchAndCache]);
 
@@ -156,14 +178,6 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
               {lemma}
             </h3>
             <SpeakButton text={lemma} variant="us" />
-            {data?.provider === "mock" && (
-              <span
-                className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] text-[var(--fg-soft)] cursor-help"
-                title={data.mockReason ? `AI 不可用：${data.mockReason}` : undefined}
-              >
-                mock
-              </span>
-            )}
           </div>
           <button
             type="button"
@@ -175,12 +189,12 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
           </button>
         </header>
 
-        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4">
+        <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3">
           {busy && !data && (
             <p className="text-sm text-[var(--fg-soft)]">加载中…</p>
           )}
-          {err && !busy && (
-            <p className="text-sm text-red-500">加载失败：{err}</p>
+          {attempts.length > 0 && !busy && (
+            <AIErrorNotice attempts={attempts} />
           )}
           {data && (
             <ol className="space-y-4 list-none">
@@ -210,6 +224,12 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
                 </li>
               ))}
             </ol>
+          )}
+          {/* Ephemeral usage footnote — only visible right after a fresh fetch,
+              never for a cache hit (that would misleadingly imply we spent
+              tokens on the reopen). */}
+          {fresh && (
+            <AIUsageNote model={fresh.model} usage={fresh.usage} />
           )}
         </div>
 

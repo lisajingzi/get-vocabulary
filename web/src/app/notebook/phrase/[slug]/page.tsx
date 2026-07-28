@@ -11,17 +11,13 @@
  *      fire /api/ai/phrase ONCE, cache the result on the entry, and never
  *      re-fire for the same slug.
  *
- * Layout:
- *   - Header: phrase text + speak button, subtle back-link to /notebook
- *   - Right rail (top-right): tabs 「记笔记 / 不收藏」
- *       * 记笔记 (default) → keep entry in the notebook, show notes composer
- *       * 不收藏           → drop the entry (deleteEntry) and navigate back
- *                            to /notebook. This mirrors the wordbook's
- *                            archive semantics simply and unambiguously.
- *   - Body:
- *       * AI card (chn / def / posHint / examples / collocations / synonyms / notes)
- *         — only rendered when entry.source === "ai" and entry.ai is set.
- *       * NotebookNotesPanel — always visible in "记笔记" mode.
+ * Failure mode: when every Zhipu tier fails we render a red <AIErrorNotice>
+ * that lists each tier's translated reason (see /api/ai/phrase and
+ * src/lib/ai/zhipu.ts). We do NOT persist a mock payload — the user can
+ * still take manual notes below.
+ *
+ * On success we show a small "🔢 N tokens · model" footnote once, only for
+ * this session (not persisted with the AI payload).
  */
 
 import Link from "next/link";
@@ -29,6 +25,12 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import NotebookNotesPanel from "@/components/NotebookNotesPanel";
 import SpeakButton from "@/components/SpeakButton";
+import {
+  AIErrorNotice,
+  AIUsageNote,
+  parseAIErrorAttempts,
+  type AIAttempt,
+} from "@/components/AIStatus";
 import { toast } from "@/components/Toast";
 import {
   deleteEntry,
@@ -37,6 +39,11 @@ import {
   type PhraseAIResult,
   upsertPhrase,
 } from "@/lib/notebook/local";
+
+interface FreshUsage {
+  model: string;
+  usage: { input: number; output: number; total: number };
+}
 
 function PhraseDetailInner() {
   const params = useParams<{ slug: string }>();
@@ -47,13 +54,9 @@ function PhraseDetailInner() {
   const [entry, setEntry] = useState<NotebookEntry | null>(null);
   const [loading, setLoading] = useState(true);
   const [aiBusy, setAiBusy] = useState(false);
-  const [aiErr, setAiErr] = useState<string | null>(null);
-  // "记笔记" is the default tab as speced. "不收藏" is a one-shot destructive
-  // action that returns the user to the notebook list — no need for the tab
-  // to be a persisted piece of state.
+  const [aiAttempts, setAiAttempts] = useState<AIAttempt[]>([]);
+  const [aiFresh, setAiFresh] = useState<FreshUsage | null>(null);
   const [tab, setTab] = useState<"note" | "archive">("note");
-  // Guard so an accidental double-render (Strict Mode, HMR) doesn't fire the
-  // AI generation twice.
   const generationStartedRef = useRef(false);
 
   const wantAi = search.get("ai") === "1";
@@ -80,11 +83,6 @@ function PhraseDetailInner() {
   useEffect(() => {
     if (loading) return;
     if (generationStartedRef.current) return;
-    // We fire the AI call exactly when:
-    //   - the URL says ?ai=1 (came from the search bar), AND
-    //   - either the entry doesn't exist yet, or exists but has no cached AI.
-    // Manual entries (source === "manual") are NEVER auto-populated with AI —
-    // the user picked the manual path deliberately.
     if (!wantAi) return;
     if (entry && entry.source === "manual") return;
     if (entry && entry.ai) return;
@@ -95,7 +93,8 @@ function PhraseDetailInner() {
 
     generationStartedRef.current = true;
     setAiBusy(true);
-    setAiErr(null);
+    setAiAttempts([]);
+    setAiFresh(null);
     (async () => {
       try {
         const res = await fetch("/api/ai/phrase", {
@@ -103,17 +102,39 @@ function PhraseDetailInner() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ phrase }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as Omit<PhraseAIResult, "generatedAt">;
+        if (!res.ok) {
+          const parsed = await parseAIErrorAttempts(res);
+          setAiAttempts(parsed);
+          generationStartedRef.current = false;
+          toast("AI 生成失败，可稍后重试");
+          return;
+        }
+        const data = (await res.json()) as PhraseAIResult & {
+          model: string;
+          usage: { input: number; output: number; total: number };
+        };
         const ai: PhraseAIResult = {
-          ...data,
+          posHint: data.posHint,
+          chn: data.chn,
+          def: data.def,
+          examples: data.examples,
+          collocations: data.collocations,
+          synonyms: data.synonyms,
+          notes: data.notes,
           generatedAt: new Date().toISOString(),
         };
         upsertPhrase({ text: phrase, source: "ai", ai });
+        if (data.model && data.usage) {
+          setAiFresh({ model: data.model, usage: data.usage });
+        }
       } catch (err) {
         console.warn("[notebook/phrase] AI generation failed:", err);
-        setAiErr((err as Error).message);
-        // Roll the guard back so a manual retry (future button) can re-fire.
+        setAiAttempts([
+          {
+            model: "network",
+            reason: (err as Error).message || "网络请求失败",
+          },
+        ]);
         generationStartedRef.current = false;
         toast("AI 生成失败，可稍后重试");
       } finally {
@@ -126,7 +147,6 @@ function PhraseDetailInner() {
 
   function handleArchive() {
     if (!entry) {
-      // Nothing saved yet (search-bar arrival mid-generation), just go back.
       router.push("/notebook");
       return;
     }
@@ -134,8 +154,6 @@ function PhraseDetailInner() {
       typeof window !== "undefined" &&
       !window.confirm("确定不收藏这个短语？将从笔记本移除，笔记也会一并删除。")
     ) {
-      // Snap the tab back to "记笔记" so the user isn't stuck on a
-      // destructive-looking view they cancelled.
       setTab("note");
       return;
     }
@@ -217,13 +235,18 @@ function PhraseDetailInner() {
         </div>
       )}
 
-      {aiErr && !aiBusy && !entry?.ai && (
-        <p className="text-xs text-red-500">
-          AI 生成失败：{aiErr}。可以先手动记录，或稍后再来。
-        </p>
+      {aiAttempts.length > 0 && !aiBusy && !entry?.ai && (
+        <AIErrorNotice
+          attempts={aiAttempts}
+          hint="可先手动记录，或稍后再来重试"
+        />
       )}
 
       {entry?.ai && <PhraseAICard ai={entry.ai} />}
+
+      {aiFresh && (
+        <AIUsageNote model={aiFresh.model} usage={aiFresh.usage} />
+      )}
 
       {!entry && !aiBusy && !wantAi && (
         <p className="text-sm text-[var(--fg-soft)]">
@@ -255,14 +278,6 @@ function PhraseAICard({ ai }: { ai: PhraseAIResult }) {
         {ai.posHint && (
           <span className="rounded bg-[var(--bg)] px-1.5 py-0.5 text-[11px] uppercase tracking-wide text-[var(--fg-soft)]">
             {ai.posHint}
-          </span>
-        )}
-        {ai.provider === "mock" && (
-          <span
-            className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--fg-soft)] cursor-help"
-            title={ai.mockReason ? `AI 不可用：${ai.mockReason}` : undefined}
-          >
-            模拟数据
           </span>
         )}
       </div>

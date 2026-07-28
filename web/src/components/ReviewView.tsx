@@ -45,6 +45,12 @@ import {
   type SynonymQuestion,
 } from "@/lib/wordbook/synonyms";
 import SpeakButton from "@/components/SpeakButton";
+import {
+  AIErrorNotice,
+  AIUsageNote,
+  parseAIErrorAttempts,
+  type AIAttempt,
+} from "@/components/AIStatus";
 
 type Phase =
   | { kind: "loading" }
@@ -87,11 +93,11 @@ interface CorrectionResult {
   suggestions?: Array<{ text: string; reason: string }>;
   distinction?: string;
   ielts?: string;
-  provider: "deepseek" | "mock";
-  /** Present iff provider="mock" — human-readable upstream error.
-   *  Kept optional so this type stays a superset of the API response
-   *  even though the review flow doesn't currently surface it in the UI. */
-  mockReason?: string;
+  /** Which model in the fallback chain actually produced this result. */
+  model?: string;
+  /** Token usage reported by the model for this call. Ephemeral — surfaced
+   *  in a small footnote and never persisted. */
+  usage?: { input: number; output: number; total: number };
 }
 
 export default function ReviewView() {
@@ -1065,13 +1071,13 @@ function ComposePanel({
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<CorrectionResult | null>(null);
-  const [err, setErr] = useState<string | null>(null);
+  const [attempts, setAttempts] = useState<AIAttempt[]>([]);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
     setDraft("");
     setResult(null);
-    setErr(null);
+    setAttempts([]);
     taRef.current?.focus();
   }, [target]);
 
@@ -1079,7 +1085,7 @@ function ComposePanel({
     const sentence = draft.trim();
     if (!sentence) return;
     setBusy(true);
-    setErr(null);
+    setAttempts([]);
     try {
       const res = await fetch("/api/ai/correct", {
         method: "POST",
@@ -1090,11 +1096,16 @@ function ComposePanel({
           sense: { def: prompt.def, chn: prompt.chn, pos: prompt.pos },
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        setAttempts(await parseAIErrorAttempts(res));
+        return;
+      }
       const data = (await res.json()) as CorrectionResult;
       setResult(data);
     } catch (e) {
-      setErr((e as Error).message);
+      setAttempts([
+        { model: "network", reason: (e as Error).message || "网络请求失败" },
+      ]);
     } finally {
       setBusy(false);
     }
@@ -1143,7 +1154,16 @@ function ComposePanel({
 
       {result && <CoachFeedback result={result} original={draft.trim()} />}
 
-      {err && <p className="text-xs text-red-500">批改失败：{err}</p>}
+      {result?.model && result.usage && (
+        <AIUsageNote model={result.model} usage={result.usage} />
+      )}
+
+      {attempts.length > 0 && !busy && (
+        <AIErrorNotice
+          attempts={attempts}
+          hint="可稍后重试；也可以直接跳过批改，进入下一题"
+        />
+      )}
 
       <div className="flex items-center justify-between gap-2">
         <p className="text-[11px] text-[var(--fg-soft)]">

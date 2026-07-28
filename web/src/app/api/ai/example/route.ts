@@ -1,10 +1,8 @@
 /**
  * POST /api/ai/example
  *
- * Generates one English example sentence for a target lemma, using the
- * Zhipu GLM-4.7-Flash free-tier model if a key is configured, and
- * otherwise a deterministic mock so the rest of the UI is testable
- * end-to-end.
+ * Generates one English example sentence for a target lemma using the
+ * Zhipu chain client (glm-4.5-air → glm-4.7-flash → glm-4-flash-250414).
  *
  * Request body:
  *   {
@@ -18,16 +16,23 @@
  *                          // doesn't echo them back nearly verbatim.
  *   }
  *
- * Response body:
+ * Response body (success):
  *   {
  *     en: string, cn: string, highlights: string[],
- *     provider: "deepseek" | "mock",   // literal kept for backward compat with
- *                                      //   client types; actual backend is Zhipu GLM-4.7-Flash.
- *     mockReason?: string,             // set when provider="mock".
+ *     model: string, usage: { input, output, total },
  *   }
+ *
+ * Response body (all tiers failed) — HTTP 502:
+ *   { error: "AI 调用失败", attempts: Array<{model, reason}> }
  */
 
 import { NextResponse } from "next/server";
+import {
+  ZhipuFallbackError,
+  callZhipuChain,
+  extractJsonObject,
+  type ZhipuUsage,
+} from "@/lib/ai/zhipu";
 
 export const runtime = "nodejs";
 
@@ -52,13 +57,9 @@ interface ResponseBody {
   /** Lowercase lemmas that should be visually highlighted in `en`. Always
    *  contains `lemma` itself plus any of `known` we successfully wove in. */
   highlights: string[];
-  provider: "deepseek" | "mock";
-  mockReason?: string;
+  model: string;
+  usage: ZhipuUsage;
 }
-
-// Zhipu GLM (OpenAI-compatible free tier). Pinned endpoint + model.
-const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-const ZHIPU_MODEL = "glm-4.7-flash";
 
 function buildPrompt(
   lemma: string,
@@ -69,9 +70,6 @@ function buildPrompt(
   const senseLine = sense?.def
     ? `Use it in this sense: "${sense.def}"${sense.chn ? ` (中文: ${sense.chn})` : ""}.`
     : "Use the most common sense.";
-  // Cap the pool the model sees. Too many candidates pushes the model to
-  // jam several in just to "use the list", which is exactly what produces
-  // the "high entropy and sudden emotional arousal" type of garbage.
   const woven = known.slice(0, 20);
   const knownLine =
     woven.length > 0
@@ -133,144 +131,6 @@ function buildPrompt(
     .join("\n");
 }
 
-/** Pull the first balanced JSON object out of arbitrary model output. We
- *  ask for raw JSON, but models sometimes wrap it in fences anyway. */
-function extractJson(s: string): string | null {
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) {
-        esc = false;
-      } else if (c === "\\") {
-        esc = true;
-      } else if (c === '"') {
-        inStr = false;
-      }
-      continue;
-    }
-    if (c === '"') inStr = true;
-    else if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) return s.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-function mockResult(
-  lemma: string,
-  sense?: SenseHint,
-  known: string[] = [],
-): ResponseBody {
-  // Pick up to 2 known words to splice into a templated sentence so the
-  // mock visually exercises the highlight code path.
-  const woven = known
-    .filter((w) => w !== lemma && /^[a-z]+$/.test(w))
-    .slice(0, 2);
-  let en: string;
-  let cn: string;
-  if (woven.length === 2) {
-    en = `She decided to ${lemma} the ${woven[0]} after a long ${woven[1]}.`;
-    cn = `经过漫长的"${woven[1]}"之后，她决定 ${lemma} 那个"${woven[0]}"。`;
-  } else if (woven.length === 1) {
-    en = `He had to ${lemma} his ${woven[0]} when the storm arrived.`;
-    cn = `暴风雨来临时，他不得不 ${lemma} 他的"${woven[0]}"。`;
-  } else {
-    en = `They were forced to ${lemma} the project after only three weeks.`;
-    cn = `仅仅三周后，他们就被迫 ${lemma} 这个项目。`;
-  }
-  const highlights = Array.from(new Set([lemma, ...woven]));
-  return { en, cn, highlights, provider: "mock" };
-}
-
-async function callZhipu(
-  lemma: string,
-  sense: SenseHint | undefined,
-  known: string[],
-  avoid: string[],
-  apiKey: string,
-): Promise<ResponseBody> {
-  const prompt = buildPrompt(lemma, sense, known, avoid);
-  // Diversity knobs — "再生成" must produce a meaningfully different draft.
-  // The avoid-list in the prompt is the primary defense; these sampling
-  // knobs are belt-and-suspenders.
-  const hasAvoid = avoid.length > 0;
-  const requestInit: RequestInit = {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: ZHIPU_MODEL,
-      messages: [{ role: "user", content: prompt }],
-      // GLM-4.7 defaults to forced thinking — disable it to keep token
-      // usage predictable on this cheap "one JSON blob" task.
-      thinking: { type: "disabled" },
-      temperature: hasAvoid ? 0.95 : 0.85,
-      top_p: 0.95,
-      presence_penalty: hasAvoid ? 0.6 : 0.2,
-      frequency_penalty: hasAvoid ? 0.5 : 0.1,
-      max_tokens: 240,
-    }),
-  };
-  // Retry on 429 (per-account rate limit or global model overload) with
-  // short exponential backoff before failing to the caller.
-  const backoffs = [1000, 2000, 4000];
-  let res!: Response;
-  for (let attempt = 0; attempt <= backoffs.length; attempt++) {
-    res = await fetch(ZHIPU_CHAT_URL, requestInit);
-    if (res.ok) break;
-    const text = await res.text();
-    if (res.status !== 429 || attempt === backoffs.length) {
-      throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
-    }
-    console.warn(
-      `[ai/example] zhipu 429, retrying in ${backoffs[attempt]}ms ` +
-        `(attempt ${attempt + 1}/${backoffs.length})`,
-    );
-    await new Promise((r) => setTimeout(r, backoffs[attempt]));
-  }
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: {
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      total_tokens?: number;
-    };
-  };
-  const usage = data.usage;
-  if (usage) {
-    console.log(
-      `[ai/example] usage: input=${usage.prompt_tokens ?? "?"}, ` +
-        `output=${usage.completion_tokens ?? "?"}, ` +
-        `total=${usage.total_tokens ?? "?"}  (word="${lemma}")`,
-    );
-  }
-  const content = data.choices?.[0]?.message?.content ?? "";
-  const jsonStr = extractJson(content);
-  if (!jsonStr) throw new Error(`zhipu returned non-JSON: ${content.slice(0, 200)}`);
-  const parsed = JSON.parse(jsonStr) as Partial<ResponseBody>;
-  const en = String(parsed.en ?? "").trim();
-  const cn = String(parsed.cn ?? "").trim();
-  if (!en) throw new Error("zhipu returned empty `en`");
-  // Ensure target lemma always shows up in highlights, regardless of whether
-  // the model echoed it back. The UI does case-insensitive whole-word match
-  // so we don't need to track the exact inflected form here.
-  const hl = Array.isArray(parsed.highlights) ? parsed.highlights : [];
-  const lemmasOnly = hl
-    .map((s) => String(s).toLowerCase())
-    .filter((s) => /^[a-z][a-z\-']*$/.test(s));
-  const highlights = Array.from(new Set([lemma, ...lemmasOnly]));
-  return { en, cn, highlights, provider: "deepseek" };
-}
-
 export async function POST(req: Request): Promise<Response> {
   let body: RequestBody;
   try {
@@ -297,27 +157,78 @@ export async function POST(req: Request): Promise<Response> {
     : [];
 
   const apiKey = process.env.ZHIPU_API_KEY;
-  // No key configured → return a mock so devs/users can still iterate UI.
   if (!apiKey) {
-    return NextResponse.json({
-      ...mockResult(lemma, sense, known),
-      mockReason: "ZHIPU_API_KEY not configured",
-    });
+    return NextResponse.json(
+      {
+        error: "AI 调用失败",
+        attempts: [{ model: "config", reason: "ZHIPU_API_KEY 未配置" }],
+      },
+      { status: 502 },
+    );
   }
 
+  // Diversity knobs: "再生成" needs a meaningfully different draft. The
+  // avoid-list in the prompt is the primary defense; these sampling knobs
+  // are belt-and-suspenders.
+  const hasAvoid = avoid.length > 0;
+
   try {
-    const result = await callZhipu(lemma, sense, known, avoid, apiKey);
-    return NextResponse.json(result);
+    const call = await callZhipuChain(
+      {
+        prompt: buildPrompt(lemma, sense, known, avoid),
+        temperature: hasAvoid ? 0.95 : 0.85,
+        maxTokens: 240,
+        extra: {
+          top_p: 0.95,
+          presence_penalty: hasAvoid ? 0.6 : 0.2,
+          frequency_penalty: hasAvoid ? 0.5 : 0.1,
+        },
+      },
+      apiKey,
+      "ai/example",
+      `word="${lemma}"`,
+    );
+    const jsonStr = extractJsonObject(call.content);
+    if (!jsonStr) {
+      throw new Error(
+        `zhipu returned non-JSON: ${call.content.slice(0, 200)}`,
+      );
+    }
+    const parsed = JSON.parse(jsonStr) as Partial<
+      Pick<ResponseBody, "en" | "cn" | "highlights">
+    >;
+    const en = String(parsed.en ?? "").trim();
+    const cn = String(parsed.cn ?? "").trim();
+    if (!en) throw new Error("zhipu returned empty `en`");
+    const hl = Array.isArray(parsed.highlights) ? parsed.highlights : [];
+    const lemmasOnly = hl
+      .map((s) => String(s).toLowerCase())
+      .filter((s) => /^[a-z][a-z\-']*$/.test(s));
+    const highlights = Array.from(new Set([lemma, ...lemmasOnly]));
+    const resp: ResponseBody = {
+      en,
+      cn,
+      highlights,
+      model: call.model,
+      usage: call.usage,
+    };
+    return NextResponse.json(resp);
   } catch (err) {
-    // Don't 500 — degrade gracefully so the UI keeps working. Surface the
-    // provider downgrade + real error so the client can show a tooltip.
+    if (err instanceof ZhipuFallbackError) {
+      return NextResponse.json(
+        { error: "AI 调用失败", attempts: err.attempts },
+        { status: 502 },
+      );
+    }
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[ai/example] zhipu call failed:", msg);
-    const fallback = mockResult(lemma, sense, known);
-    return NextResponse.json({
-      ...fallback,
-      provider: "mock",
-      mockReason: msg.slice(0, 200),
-    });
+    // eslint-disable-next-line no-console
+    console.error("[ai/example] post-call error:", msg);
+    return NextResponse.json(
+      {
+        error: "AI 调用失败",
+        attempts: [{ model: "parse", reason: "模型返回内容无法解析" }],
+      },
+      { status: 502 },
+    );
   }
 }

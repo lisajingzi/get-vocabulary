@@ -52,9 +52,10 @@ export interface PhraseAIResult {
   synonyms?: string[];
   /** Free-form usage notes / register hints. */
   notes?: string;
-  provider: "deepseek" | "mock";
-  /** When provider="mock": human-readable reason (e.g. "zhipu 429: rate limit").
-   *  Absent on successful upstream calls and on legacy cached entries. */
+  /** Legacy fields — older cached rows carry these. New code never writes
+   *  them (all-tier failures surface as a red error state instead of a
+   *  persisted mock payload). Kept optional for backward compatibility. */
+  provider?: "deepseek" | "mock";
   mockReason?: string;
   /** ISO timestamp of when the payload was generated. */
   generatedAt: string;

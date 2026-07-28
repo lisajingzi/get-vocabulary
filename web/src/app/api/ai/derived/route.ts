@@ -16,25 +16,33 @@
  *     baseSense?: { def?: string; chn?: string; pos?: string }
  *   }
  *
- * Response body:
+ * Response body (success):
  *   {
- *     pos:      string,   // e.g. "noun"
- *     phonUk?:  string,   // IPA without the surrounding slashes
+ *     pos:      string,
+ *     phonUk?:  string,
  *     phonUs?:  string,
- *     def:      string,   // English definition of the derived form
- *     chn:      string,   // Chinese gloss
- *     examples: Array<{ en: string; cn: string }>,   // 1..2 sentences
- *     provider: "deepseek" | "mock",   // literal kept for backward compat;
- *                                      //   real backend is Zhipu GLM-4.7-Flash.
- *     mockReason?: string,             // populated when provider="mock".
+ *     def:      string,
+ *     chn:      string,
+ *     examples: Array<{ en: string; cn: string }>,
+ *     model:    string,
+ *     usage:    { input: number; output: number; total: number },
  *   }
  *
- * Mirrors `/api/ai/example` in shape and fallback behaviour: if there is no
- * ZHIPU_API_KEY configured we return a deterministic mock so the UI is
- * still exercisable end-to-end.
+ * Response body (all tiers failed) — HTTP 502:
+ *   { error: "AI 调用失败", attempts: Array<{model, reason}> }
+ *
+ * No mock fallback: on total failure we surface the per-tier reasons so
+ * the UI can display them directly. See `src/lib/ai/zhipu.ts` for the
+ * fallback chain + error translation.
  */
 
 import { NextResponse } from "next/server";
+import {
+  ZhipuFallbackError,
+  callZhipuChain,
+  extractJsonObject,
+  type ZhipuUsage,
+} from "@/lib/ai/zhipu";
 
 export const runtime = "nodejs";
 
@@ -57,13 +65,9 @@ interface ResponseBody {
   def: string;
   chn: string;
   examples: Array<{ en: string; cn: string }>;
-  provider: "deepseek" | "mock";
-  mockReason?: string;
+  model: string;
+  usage: ZhipuUsage;
 }
-
-// Zhipu GLM (OpenAI-compatible free tier). Pinned endpoint + model.
-const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-const ZHIPU_MODEL = "glm-4.7-flash";
 
 function buildPrompt(
   derived: string,
@@ -91,156 +95,6 @@ function buildPrompt(
   ].join("\n");
 }
 
-/** Pull the first balanced JSON object out of arbitrary model output. */
-function extractJson(s: string): string | null {
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) {
-        esc = false;
-      } else if (c === "\\") {
-        esc = true;
-      } else if (c === '"') {
-        inStr = false;
-      }
-      continue;
-    }
-    if (c === '"') inStr = true;
-    else if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) return s.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-function mockResult(
-  derived: string,
-  base: string,
-  baseSense?: BaseSenseHint,
-): ResponseBody {
-  // Make the mock visibly different from the base so devs can tell at a
-  // glance that the panel is wired to *this* endpoint and not to the
-  // canonical entry's content.
-  const basePos = baseSense?.pos ?? "verb";
-  const guessedPos =
-    basePos.startsWith("verb")
-      ? "noun"
-      : basePos.startsWith("noun")
-        ? "adjective"
-        : "noun";
-  return {
-    pos: guessedPos,
-    def: `(mock) the ${guessedPos} form related to "${base}".`,
-    chn: `(模拟) 与"${base}"相关的${guessedPos === "noun" ? "名词" : guessedPos === "adjective" ? "形容词" : "派生形式"}。`,
-    examples: [
-      {
-        en: `Her ${derived} grew steadily as the story unfolded.`,
-        cn: `随着故事展开，她的"${derived}"逐渐增强。`,
-      },
-    ],
-    provider: "mock",
-  };
-}
-
-async function callZhipu(
-  derived: string,
-  base: string,
-  baseSense: BaseSenseHint | undefined,
-  apiKey: string,
-): Promise<ResponseBody> {
-  const prompt = buildPrompt(derived, base, baseSense);
-  const requestInit: RequestInit = {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: ZHIPU_MODEL,
-      messages: [{ role: "user", content: prompt }],
-      // GLM-4.7 defaults to forced thinking mode; disable it for this
-      // deterministic JSON extraction task.
-      thinking: { type: "disabled" },
-      temperature: 0.4,
-      max_tokens: 480,
-    }),
-  };
-  // Retry on 429 (per-account rate limit or global model overload) with
-  // short exponential backoff before falling through to the caller.
-  const backoffs = [1000, 2000, 4000];
-  let res!: Response;
-  for (let attempt = 0; attempt <= backoffs.length; attempt++) {
-    res = await fetch(ZHIPU_CHAT_URL, requestInit);
-    if (res.ok) break;
-    const text = await res.text();
-    if (res.status !== 429 || attempt === backoffs.length) {
-      throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
-    }
-    console.warn(
-      `[ai/derived] zhipu 429, retrying in ${backoffs[attempt]}ms ` +
-        `(attempt ${attempt + 1}/${backoffs.length})`,
-    );
-    await new Promise((r) => setTimeout(r, backoffs[attempt]));
-  }
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: {
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      total_tokens?: number;
-    };
-  };
-  const usage = data.usage;
-  if (usage) {
-    console.log(
-      `[ai/derived] usage: input=${usage.prompt_tokens ?? "?"}, ` +
-        `output=${usage.completion_tokens ?? "?"}, ` +
-        `total=${usage.total_tokens ?? "?"}  (derived="${derived}", base="${base}")`,
-    );
-  }
-  const content = data.choices?.[0]?.message?.content ?? "";
-  const jsonStr = extractJson(content);
-  if (!jsonStr)
-    throw new Error(`zhipu returned non-JSON: ${content.slice(0, 200)}`);
-  const parsed = JSON.parse(jsonStr) as Partial<ResponseBody> & {
-    examples?: Array<{ en?: unknown; cn?: unknown }>;
-  };
-  const pos = String(parsed.pos ?? "").trim();
-  const def = String(parsed.def ?? "").trim();
-  const chn = String(parsed.chn ?? "").trim();
-  if (!pos || !def) throw new Error("zhipu returned incomplete payload");
-  const phonUk = parsed.phonUk
-    ? String(parsed.phonUk).replace(/^\/|\/$/g, "").trim() || undefined
-    : undefined;
-  const phonUs = parsed.phonUs
-    ? String(parsed.phonUs).replace(/^\/|\/$/g, "").trim() || undefined
-    : undefined;
-  const rawExamples = Array.isArray(parsed.examples) ? parsed.examples : [];
-  const examples = rawExamples
-    .map((ex) => ({
-      en: String(ex?.en ?? "").trim(),
-      cn: String(ex?.cn ?? "").trim(),
-    }))
-    .filter((ex) => ex.en.length > 0)
-    .slice(0, 2);
-  return {
-    pos,
-    phonUk,
-    phonUs,
-    def,
-    chn,
-    examples,
-    provider: "deepseek",
-  };
-}
-
 export async function POST(req: Request): Promise<Response> {
   let body: RequestBody;
   try {
@@ -248,12 +102,8 @@ export async function POST(req: Request): Promise<Response> {
   } catch {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
-  const derived = String(body.derived ?? "")
-    .trim()
-    .toLowerCase();
-  const base = String(body.base ?? "")
-    .trim()
-    .toLowerCase();
+  const derived = String(body.derived ?? "").trim().toLowerCase();
+  const base = String(body.base ?? "").trim().toLowerCase();
   const re = /^[a-z][a-z\-'\s]{0,40}$/;
   if (!re.test(derived) || !re.test(base)) {
     return NextResponse.json(
@@ -267,27 +117,85 @@ export async function POST(req: Request): Promise<Response> {
       { status: 400 },
     );
   }
-  const baseSense = body.baseSense;
 
   const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
-    return NextResponse.json({
-      ...mockResult(derived, base, baseSense),
-      mockReason: "ZHIPU_API_KEY not configured",
-    });
+    return NextResponse.json(
+      {
+        error: "AI 调用失败",
+        attempts: [
+          { model: "config", reason: "ZHIPU_API_KEY 未配置" },
+        ],
+      },
+      { status: 502 },
+    );
   }
 
   try {
-    const result = await callZhipu(derived, base, baseSense, apiKey);
-    return NextResponse.json(result);
+    const call = await callZhipuChain(
+      {
+        prompt: buildPrompt(derived, base, body.baseSense),
+        temperature: 0.4,
+        maxTokens: 480,
+      },
+      apiKey,
+      "ai/derived",
+      `derived="${derived}", base="${base}"`,
+    );
+    const jsonStr = extractJsonObject(call.content);
+    if (!jsonStr) {
+      throw new Error(
+        `zhipu returned non-JSON: ${call.content.slice(0, 200)}`,
+      );
+    }
+    const parsed = JSON.parse(jsonStr) as Partial<ResponseBody> & {
+      examples?: Array<{ en?: unknown; cn?: unknown }>;
+    };
+    const pos = String(parsed.pos ?? "").trim();
+    const def = String(parsed.def ?? "").trim();
+    const chn = String(parsed.chn ?? "").trim();
+    if (!pos || !def) throw new Error("zhipu returned incomplete payload");
+    const phonUk = parsed.phonUk
+      ? String(parsed.phonUk).replace(/^\/|\/$/g, "").trim() || undefined
+      : undefined;
+    const phonUs = parsed.phonUs
+      ? String(parsed.phonUs).replace(/^\/|\/$/g, "").trim() || undefined
+      : undefined;
+    const rawExamples = Array.isArray(parsed.examples) ? parsed.examples : [];
+    const examples = rawExamples
+      .map((ex) => ({
+        en: String(ex?.en ?? "").trim(),
+        cn: String(ex?.cn ?? "").trim(),
+      }))
+      .filter((ex) => ex.en.length > 0)
+      .slice(0, 2);
+    const resp: ResponseBody = {
+      pos,
+      phonUk,
+      phonUs,
+      def,
+      chn,
+      examples,
+      model: call.model,
+      usage: call.usage,
+    };
+    return NextResponse.json(resp);
   } catch (err) {
+    if (err instanceof ZhipuFallbackError) {
+      return NextResponse.json(
+        { error: "AI 调用失败", attempts: err.attempts },
+        { status: 502 },
+      );
+    }
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[ai/derived] zhipu call failed:", msg);
-    const fallback = mockResult(derived, base, baseSense);
-    return NextResponse.json({
-      ...fallback,
-      provider: "mock",
-      mockReason: msg.slice(0, 200),
-    });
+    // eslint-disable-next-line no-console
+    console.error("[ai/derived] post-call error:", msg);
+    return NextResponse.json(
+      {
+        error: "AI 调用失败",
+        attempts: [{ model: "parse", reason: "模型返回内容无法解析" }],
+      },
+      { status: 502 },
+    );
   }
 }

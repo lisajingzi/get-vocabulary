@@ -10,8 +10,7 @@
  * `youthful`, `kindness`, …) as `{ lemma, alias_of: "<base>" }` — they
  * resolve to the base entry without their own pos / phonetics / definition
  * / examples. The previous UI would silently show the BASE's content under
- * the user's typed word, which is misleading: `arousal` is a noun and
- * pronounced /əˈraʊzl/, not a verb /əˈraʊz/.
+ * the user's typed word, which is misleading.
  *
  * This component asks `/api/ai/derived` for the derived form's *own*
  * dictionary information (pos / IPA / def / chn / 1–2 examples), grounded
@@ -21,14 +20,22 @@
  *
  * Failure modes
  * -------------
- * - No DEEPSEEK key → server returns a clearly-marked mock; we still render
- *   it so the UI flows, with a "(模拟数据)" provider tag.
- * - Network/parse error → we surface a friendly message + a 重试 button;
- *   the page still has the base entry below as a usable fallback.
+ * - All three fallback tiers of the Zhipu chain failed → we render a red
+ *   <AIErrorNotice> listing each tier's translated reason. The user still
+ *   sees the base entry below as a usable fallback.
+ * - Successful call → we show a small "🔢 N tokens · model" footnote once,
+ *   for as long as the panel is mounted. The footnote is NOT persisted;
+ *   reopening the page later just shows the cached content silently.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import SpeakButton from "@/components/SpeakButton";
+import {
+  AIErrorNotice,
+  AIUsageNote,
+  parseAIErrorAttempts,
+  type AIAttempt,
+} from "@/components/AIStatus";
 import type { DictSense } from "@/lib/types";
 
 interface DerivedExample {
@@ -43,9 +50,11 @@ interface DerivedInfo {
   def: string;
   chn: string;
   examples: DerivedExample[];
-  provider: "deepseek" | "mock";
-  /** Present iff provider="mock" — human-readable upstream error. */
-  mockReason?: string;
+}
+
+interface FreshUsage {
+  model: string;
+  usage: { input: number; output: number; total: number };
 }
 
 interface Props {
@@ -103,7 +112,8 @@ export default function DerivedFormPanel({ derived, base, baseSense, onResolved 
     readCache(derived, base),
   );
   const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [attempts, setAttempts] = useState<AIAttempt[]>([]);
+  const [fresh, setFresh] = useState<FreshUsage | null>(null);
 
   // Keep the latest onResolved without retriggering effects when the parent
   // hands us a fresh function reference each render.
@@ -115,7 +125,8 @@ export default function DerivedFormPanel({ derived, base, baseSense, onResolved 
   const fetchInfo = useCallback(
     async (skipCache = false) => {
       setBusy(true);
-      setErr(null);
+      setAttempts([]);
+      setFresh(null);
       try {
         if (!skipCache) {
           const cached = readCache(derived, base);
@@ -141,16 +152,33 @@ export default function DerivedFormPanel({ derived, base, baseSense, onResolved 
               : undefined,
           }),
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as DerivedInfo;
-        if (!data.pos || !data.def) {
-          throw new Error("incomplete payload");
+        if (!res.ok) {
+          setAttempts(await parseAIErrorAttempts(res));
+          return;
         }
-        setInfo(data);
-        onResolvedRef.current?.(data);
-        writeCache(derived, base, data);
+        const data = (await res.json()) as DerivedInfo & FreshUsage;
+        if (!data.pos || !data.def) {
+          setAttempts([{ model: "parse", reason: "模型返回内容无法解析" }]);
+          return;
+        }
+        const clean: DerivedInfo = {
+          pos: data.pos,
+          phonUk: data.phonUk,
+          phonUs: data.phonUs,
+          def: data.def,
+          chn: data.chn,
+          examples: data.examples,
+        };
+        setInfo(clean);
+        onResolvedRef.current?.(clean);
+        writeCache(derived, base, clean);
+        if (data.model && data.usage) {
+          setFresh({ model: data.model, usage: data.usage });
+        }
       } catch (e) {
-        setErr((e as Error).message);
+        setAttempts([
+          { model: "network", reason: (e as Error).message || "网络请求失败" },
+        ]);
       } finally {
         setBusy(false);
       }
@@ -188,14 +216,6 @@ export default function DerivedFormPanel({ derived, base, baseSense, onResolved 
           {derived} · 释义（AI 补全）
         </h2>
         <div className="flex items-center gap-2">
-          {info?.provider === "mock" && (
-            <span
-              className="rounded border border-[var(--border)] px-1.5 py-0.5 text-[10px] text-[var(--fg-soft)] cursor-help"
-              title={info.mockReason ? `AI 不可用：${info.mockReason}` : undefined}
-            >
-              模拟数据
-            </span>
-          )}
           <button
             type="button"
             onClick={onRegenerate}
@@ -208,10 +228,11 @@ export default function DerivedFormPanel({ derived, base, baseSense, onResolved 
         </div>
       </div>
 
-      {err && (
-        <p className="text-xs text-red-500">
-          生成失败：{err}（可点击「重新生成」重试，下方仍是「{base}」的完整词条）
-        </p>
+      {attempts.length > 0 && !busy && (
+        <AIErrorNotice
+          attempts={attempts}
+          hint={`下方仍是「${base}」的完整词条，可先参考`}
+        />
       )}
 
       {!info && busy && (
@@ -275,6 +296,10 @@ export default function DerivedFormPanel({ derived, base, baseSense, onResolved 
             以上内容由 AI 基于其原形「{base}」生成，仅供参考；
             完整原形释义见下方「派生关系参考」。
           </p>
+
+          {fresh && (
+            <AIUsageNote model={fresh.model} usage={fresh.usage} />
+          )}
         </div>
       )}
     </section>

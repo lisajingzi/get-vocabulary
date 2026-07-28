@@ -20,10 +20,10 @@ export interface AIExample {
   en: string;
   cn: string;
   highlights: string[];
-  provider: "deepseek" | "mock";
-  /** When provider="mock": upstream error string, if any.
-   *  Missing on successful calls and on legacy entries stored before this
-   *  field was introduced — treat undefined as "no context". */
+  /** Legacy — older rows carry provider/mockReason. New rows omit them
+   *  (all-tier failures are surfaced as an error state, never cached as
+   *  a mock payload). Kept optional so historical entries still parse. */
+  provider?: "deepseek" | "mock";
   mockReason?: string;
   createdAt: string;
 }

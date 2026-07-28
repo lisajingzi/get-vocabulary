@@ -1,16 +1,16 @@
 /**
  * POST /api/ai/phrase
  *
- * Ask the Zhipu GLM-4.7-Flash free-tier model to generate a rich
- * dictionary-like explanation for an English phrase / idiom (e.g.
- * "take advantage of", "by the way"). Called ONCE per phrase from
- * /notebook/phrase/[slug]; the caller caches the result on the notebook
- * entry and never re-hits this endpoint for the same phrase.
+ * Ask the Zhipu chain (glm-4.5-air → glm-4.7-flash → glm-4-flash-250414)
+ * to generate a rich dictionary-like explanation for an English phrase /
+ * idiom (e.g. "take advantage of", "by the way"). Called ONCE per phrase
+ * from /notebook/phrase/[slug]; the caller caches the result on the
+ * notebook entry and never re-hits this endpoint for the same phrase.
  *
  * Request body:
  *   { phrase: "take advantage of" }
  *
- * Response body (all keys except examples/def/chn are optional):
+ * Response body (success):
  *   {
  *     posHint?:      "verb phrase" | "prep phrase" | "idiom" | ...
  *     def:            string,
@@ -19,16 +19,21 @@
  *     collocations?:  string[],
  *     synonyms?:      string[],
  *     notes?:         string,
- *     provider:       "deepseek" | "mock",   // literal kept for backward compat;
- *                                            //   real backend is Zhipu GLM-4.7-Flash.
- *     mockReason?:    string,                // populated when provider="mock".
+ *     model:          string,
+ *     usage:          { input: number; output: number; total: number },
  *   }
  *
- * Falls back to a deterministic mock when ZHIPU_API_KEY is missing so
- * the notebook UI is fully exercisable during local dev.
+ * Response body (all tiers failed) — HTTP 502:
+ *   { error: "AI 调用失败", attempts: Array<{model, reason}> }
  */
 
 import { NextResponse } from "next/server";
+import {
+  ZhipuFallbackError,
+  callZhipuChain,
+  extractJsonObject,
+  type ZhipuUsage,
+} from "@/lib/ai/zhipu";
 
 export const runtime = "nodejs";
 
@@ -44,13 +49,9 @@ interface ResponseBody {
   collocations?: string[];
   synonyms?: string[];
   notes?: string;
-  provider: "deepseek" | "mock";
-  mockReason?: string;
+  model: string;
+  usage: ZhipuUsage;
 }
-
-// Zhipu GLM (OpenAI-compatible free tier). Pinned endpoint + model.
-const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-const ZHIPU_MODEL = "glm-4.7-flash";
 
 function buildPrompt(phrase: string): string {
   return [
@@ -84,161 +85,6 @@ function buildPrompt(phrase: string): string {
   ].join("\n");
 }
 
-/** Pull the first balanced JSON object out of arbitrary model output. */
-function extractJson(s: string): string | null {
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) {
-        esc = false;
-      } else if (c === "\\") {
-        esc = true;
-      } else if (c === '"') {
-        inStr = false;
-      }
-      continue;
-    }
-    if (c === '"') inStr = true;
-    else if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) return s.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-function mockResult(phrase: string): ResponseBody {
-  // Deterministic offline mock. Marked provider:"mock" so the client can
-  // (optionally) show a "模拟数据" tag until the real key lands.
-  return {
-    posHint: "phrase",
-    def: `(mock) A common English phrase equivalent to "${phrase}".`,
-    chn: `(模拟) 与"${phrase}"含义相近的常用英语短语。`,
-    examples: [
-      {
-        en: `In everyday conversation, people often use "${phrase}" to describe a common situation.`,
-        cn: `在日常对话中，人们常用"${phrase}"来描述一种常见情境。`,
-      },
-      {
-        en: `Writers may also employ "${phrase}" in fiction to make the dialogue sound natural.`,
-        cn: `作者也可能在小说中使用"${phrase}"，让对话更加自然。`,
-      },
-      {
-        en: `News articles use "${phrase}" when explaining trends to a general audience.`,
-        cn: `新闻文章在向大众解释趋势时会使用"${phrase}"。`,
-      },
-    ],
-    collocations: [`really ${phrase}`, `often ${phrase}`],
-    synonyms: ["(mock synonym 1)", "(mock synonym 2)"],
-    notes: "（模拟）常见于口语与非正式书面语。",
-    provider: "mock",
-  };
-}
-
-async function callZhipu(
-  phrase: string,
-  apiKey: string,
-): Promise<ResponseBody> {
-  const prompt = buildPrompt(phrase);
-  const requestInit: RequestInit = {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: ZHIPU_MODEL,
-      messages: [{ role: "user", content: prompt }],
-      // GLM-4.7 forced-thinking is default; disable it here to save tokens.
-      thinking: { type: "disabled" },
-      temperature: 0.4,
-      max_tokens: 900,
-    }),
-  };
-  // Retry on 429 (rate limit / model overloaded) with short exponential
-  // backoff before failing to the caller.
-  const backoffs = [1000, 2000, 4000];
-  let res!: Response;
-  for (let attempt = 0; attempt <= backoffs.length; attempt++) {
-    res = await fetch(ZHIPU_CHAT_URL, requestInit);
-    if (res.ok) break;
-    const text = await res.text();
-    if (res.status !== 429 || attempt === backoffs.length) {
-      throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
-    }
-    console.warn(
-      `[ai/phrase] zhipu 429, retrying in ${backoffs[attempt]}ms ` +
-        `(attempt ${attempt + 1}/${backoffs.length})`,
-    );
-    await new Promise((r) => setTimeout(r, backoffs[attempt]));
-  }
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: {
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      total_tokens?: number;
-    };
-  };
-  const usage = data.usage;
-  if (usage) {
-    console.log(
-      `[ai/phrase] usage: input=${usage.prompt_tokens ?? "?"}, ` +
-        `output=${usage.completion_tokens ?? "?"}, ` +
-        `total=${usage.total_tokens ?? "?"}  (phrase="${phrase}")`,
-    );
-  }
-  const content = data.choices?.[0]?.message?.content ?? "";
-  const jsonStr = extractJson(content);
-  if (!jsonStr)
-    throw new Error(`zhipu returned non-JSON: ${content.slice(0, 200)}`);
-  const parsed = JSON.parse(jsonStr) as Partial<ResponseBody> & {
-    examples?: Array<{ en?: unknown; cn?: unknown }>;
-    collocations?: unknown[];
-    synonyms?: unknown[];
-  };
-  const def = String(parsed.def ?? "").trim();
-  const chn = String(parsed.chn ?? "").trim();
-  if (!def || !chn) throw new Error("zhipu returned incomplete payload");
-  const rawExamples = Array.isArray(parsed.examples) ? parsed.examples : [];
-  const examples = rawExamples
-    .map((ex) => ({
-      en: String(ex?.en ?? "").trim(),
-      cn: String(ex?.cn ?? "").trim(),
-    }))
-    .filter((ex) => ex.en.length > 0)
-    .slice(0, 5);
-  if (examples.length === 0) {
-    throw new Error("zhipu returned no examples");
-  }
-  const asStringArray = (v: unknown): string[] | undefined => {
-    if (!Array.isArray(v)) return undefined;
-    const cleaned = v
-      .map((x) => String(x ?? "").trim())
-      .filter((x) => x.length > 0)
-      .slice(0, 8);
-    return cleaned.length > 0 ? cleaned : undefined;
-  };
-  return {
-    posHint: parsed.posHint
-      ? String(parsed.posHint).trim() || undefined
-      : undefined,
-    def,
-    chn,
-    examples,
-    collocations: asStringArray(parsed.collocations),
-    synonyms: asStringArray(parsed.synonyms),
-    notes: parsed.notes ? String(parsed.notes).trim() || undefined : undefined,
-    provider: "deepseek",
-  };
-}
-
 export async function POST(req: Request): Promise<Response> {
   let body: RequestBody;
   try {
@@ -247,30 +93,97 @@ export async function POST(req: Request): Promise<Response> {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
   const phrase = String(body.phrase ?? "").trim();
-  // Basic sanity: 2..80 chars, must contain at least one letter.
   if (phrase.length < 2 || phrase.length > 80 || !/[a-zA-Z]/.test(phrase)) {
     return NextResponse.json({ error: "invalid phrase" }, { status: 400 });
   }
 
   const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
-    return NextResponse.json({
-      ...mockResult(phrase),
-      mockReason: "ZHIPU_API_KEY not configured",
-    });
+    return NextResponse.json(
+      {
+        error: "AI 调用失败",
+        attempts: [{ model: "config", reason: "ZHIPU_API_KEY 未配置" }],
+      },
+      { status: 502 },
+    );
   }
 
   try {
-    const result = await callZhipu(phrase, apiKey);
-    return NextResponse.json(result);
+    const call = await callZhipuChain(
+      {
+        prompt: buildPrompt(phrase),
+        temperature: 0.4,
+        maxTokens: 900,
+      },
+      apiKey,
+      "ai/phrase",
+      `phrase="${phrase}"`,
+    );
+    const jsonStr = extractJsonObject(call.content);
+    if (!jsonStr) {
+      throw new Error(
+        `zhipu returned non-JSON: ${call.content.slice(0, 200)}`,
+      );
+    }
+    const parsed = JSON.parse(jsonStr) as Partial<ResponseBody> & {
+      examples?: Array<{ en?: unknown; cn?: unknown }>;
+      collocations?: unknown[];
+      synonyms?: unknown[];
+    };
+    const def = String(parsed.def ?? "").trim();
+    const chn = String(parsed.chn ?? "").trim();
+    if (!def || !chn) throw new Error("zhipu returned incomplete payload");
+    const rawExamples = Array.isArray(parsed.examples) ? parsed.examples : [];
+    const examples = rawExamples
+      .map((ex) => ({
+        en: String(ex?.en ?? "").trim(),
+        cn: String(ex?.cn ?? "").trim(),
+      }))
+      .filter((ex) => ex.en.length > 0)
+      .slice(0, 5);
+    if (examples.length === 0) {
+      throw new Error("zhipu returned no examples");
+    }
+    const asStringArray = (v: unknown): string[] | undefined => {
+      if (!Array.isArray(v)) return undefined;
+      const cleaned = v
+        .map((x) => String(x ?? "").trim())
+        .filter((x) => x.length > 0)
+        .slice(0, 8);
+      return cleaned.length > 0 ? cleaned : undefined;
+    };
+    const resp: ResponseBody = {
+      posHint: parsed.posHint
+        ? String(parsed.posHint).trim() || undefined
+        : undefined,
+      def,
+      chn,
+      examples,
+      collocations: asStringArray(parsed.collocations),
+      synonyms: asStringArray(parsed.synonyms),
+      notes: parsed.notes
+        ? String(parsed.notes).trim() || undefined
+        : undefined,
+      model: call.model,
+      usage: call.usage,
+    };
+    return NextResponse.json(resp);
   } catch (err) {
+    if (err instanceof ZhipuFallbackError) {
+      return NextResponse.json(
+        { error: "AI 调用失败", attempts: err.attempts },
+        { status: 502 },
+      );
+    }
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[ai/phrase] zhipu call failed:", msg);
-    const fallback = mockResult(phrase);
-    return NextResponse.json({
-      ...fallback,
-      provider: "mock",
-      mockReason: msg.slice(0, 200),
-    });
+    // eslint-disable-next-line no-console
+    console.error("[ai/phrase] post-call error:", msg);
+    return NextResponse.json(
+      {
+        error: "AI 调用失败",
+        attempts: [{ model: "parse", reason: "模型返回内容无法解析" }],
+      },
+      { status: 502 },
+    );
   }
 }

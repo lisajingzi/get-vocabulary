@@ -2,64 +2,38 @@
  * POST /api/ai/correct
  *
  * IELTS/PTE-examiner-style English sentence feedback for a Chinese B2
- * learner. The API deliberately runs on a **two-track model** so the
- * learner never confuses "wrong" with "could be more idiomatic":
+ * learner. See the "two-track" design in the previous version of this
+ * file — the prompt and normalisation logic are unchanged; only the
+ * transport layer has moved to the shared Zhipu chain client.
  *
- *   Track A — ERRORS (`ok`, `segments`, `diagnosis`)
- *     Only things that an IELTS / PTE examiner would actually deduct
- *     marks for: a violation of a NAMEABLE, WRITTEN rule of English
- *     grammar / lexis / spelling, or a breakdown in communication.
- *     If the learner's phrasing can be defended by any real rule, it
- *     is NOT an error, no matter how "un-idiomatic" it sounds.
- *
- *   Track B — STYLE SUGGESTIONS (`suggestions`)
- *     Alternative wordings that are more idiomatic or higher-register.
- *     These are LEARNING OPPORTUNITIES, NOT errors — they never flip
- *     `ok` to false and they never appear in `segments`.
- *
- * Verdicts:
- *   - ok=true   → No examiner-flagged error. `suggestions` may still
- *                 offer idiomatic upgrades; they don't cost the
- *                 learner marks.
- *   - ok=false  → At least one examiner-flagged error, each one
- *                 accompanied by a citable `rule` in `diagnosis`.
- *
- * Response body:
+ * Response body (success):
  *   {
  *     ok: boolean,
- *     recommended: string,             // native-quality rewrite (or upgrade)
- *     recommendedAlt?: string,         // optional second option (different register)
- *     segments: Array<{                // diff over the ORIGINAL sentence; concatenating
- *       text: string,                  // .text reproduces the original verbatim.
- *       wrong?: boolean,               // only set when ok=false — indicates a
- *       fix?: string,                  // REAL examiner-grade error, not a style call.
- *     }>,
- *     diagnosis: string[],             // one short Chinese line per flagged error;
- *                                      // each MUST cite the named rule that was
- *                                      // violated ("subject-verb agreement",
- *                                      // "countable noun requires a determiner",
- *                                      // etc.).
- *     suggestions?: Array<{            // Track-B style advice; never errors.
- *       text: string,                  // The more idiomatic wording.
- *       reason: string,                // 1-line Chinese rationale.
- *     }>,
- *     distinction?: string,            // 1-line confusable-word disambiguation (Chinese)
- *     ielts?: string,                  // 1 native-level IELTS-speaking sample sentence
- *     provider: "deepseek" | "mock",   // NOTE: kept as string literal "deepseek" for
- *                                      // backward compat with client types. The actual
- *                                      // backend is Zhipu GLM-4.7-Flash (free tier);
- *                                      // renaming this union would ripple through 10+
- *                                      // files for no user-visible gain.
- *     mockReason?: string,             // when provider="mock", explains why we fell
- *                                      // back (e.g. "zhipu 429: rate limit").
+ *     recommended: string,
+ *     recommendedAlt?: string,
+ *     segments: Array<{ text; wrong?; fix? }>,
+ *     diagnosis: string[],
+ *     suggestions?: Array<{ text; reason }>,
+ *     distinction?: string,
+ *     ielts?: string,
+ *     model: string,
+ *     usage: { input; output; total },
  *   }
  *
- * Falls back to a deterministic mock when ZHIPU_API_KEY is unset OR the
- * upstream call fails. On failure the real error message is surfaced via
- * `mockReason` so the UI can show it in a tooltip.
+ * Response body (all tiers failed) — HTTP 502:
+ *   { error: "AI 调用失败", attempts: Array<{model, reason}> }
+ *
+ * No mock fallback: on total failure we surface the per-tier reasons so
+ * the UI can display them directly.
  */
 
 import { NextResponse } from "next/server";
+import {
+  ZhipuFallbackError,
+  callZhipuChain,
+  extractJsonObject,
+  type ZhipuUsage,
+} from "@/lib/ai/zhipu";
 
 export const runtime = "nodejs";
 
@@ -95,15 +69,9 @@ interface ResponseBody {
   suggestions?: Suggestion[];
   distinction?: string;
   ielts?: string;
-  provider: "deepseek" | "mock";
-  mockReason?: string;
+  model: string;
+  usage: ZhipuUsage;
 }
-
-// Zhipu GLM open platform (OpenAI-compatible). Endpoint + model are pinned
-// here because we're only using the free tier of one specific model —
-// no reason to make them env-configurable and risk misconfiguration.
-const ZHIPU_CHAT_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions";
-const ZHIPU_MODEL = "glm-4.7-flash";
 
 function buildPrompt(lemma: string, sentence: string, sense?: SenseHint) {
   const senseLine = sense?.def
@@ -417,122 +385,11 @@ function buildPrompt(lemma: string, sentence: string, sense?: SenseHint) {
   ].join("\n");
 }
 
-function extractJson(s: string): string | null {
-  const start = s.indexOf("{");
-  if (start < 0) return null;
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < s.length; i++) {
-    const c = s[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (c === "\\") esc = true;
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') inStr = true;
-    else if (c === "{") depth++;
-    else if (c === "}") {
-      depth--;
-      if (depth === 0) return s.slice(start, i + 1);
-    }
-  }
-  return null;
-}
-
-/**
- * Mock heuristic correction (no API key path):
- *   - If the lemma appears in any inflected form, treat as "good" with a
- *     templated upgrade.
- *   - Otherwise mark the whole sentence wrong.
- *
- * This isn't smart — it only exercises every UI code path so we can verify
- * the new coach-style layout end-to-end.
- */
-interface Lemmatizer {
-  noun: (s: string) => string;
-  verb: (s: string) => string;
-  adjective: (s: string) => string;
-}
-
-let lemmatizerCache: Lemmatizer | null | undefined;
-async function loadLemmatizer(): Promise<Lemmatizer | null> {
-  if (lemmatizerCache !== undefined) return lemmatizerCache;
-  try {
-    const mod = (await import("wink-lemmatizer")) as unknown as {
-      default?: Lemmatizer;
-    } & Lemmatizer;
-    lemmatizerCache = (mod.default ?? mod) as Lemmatizer;
-  } catch {
-    lemmatizerCache = null;
-  }
-  return lemmatizerCache;
-}
-
-function sentenceMentionsLemma(
-  lemma: string,
+/** Sanitise the model's JSON into a strict ResponseBody core. */
+function normaliseResponse(
+  parsed: unknown,
   sentence: string,
-  lem: Lemmatizer | null,
-): boolean {
-  const target = lemma.toLowerCase();
-  const re = new RegExp(
-    `\\b${target.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&")}(s|es|ed|ing|d)?\\b`,
-    "i",
-  );
-  if (re.test(sentence)) return true;
-  if (!lem) return false;
-  const words = sentence.toLowerCase().match(/[a-z][a-z'-]*/g) ?? [];
-  for (const w of words) {
-    try {
-      if (lem.verb(w) === target) return true;
-    } catch {
-      /* ignore */
-    }
-    try {
-      if (lem.noun(w) === target) return true;
-    } catch {
-      /* ignore */
-    }
-    try {
-      if (lem.adjective(w) === target) return true;
-    } catch {
-      /* ignore */
-    }
-  }
-  return false;
-}
-
-async function mockCorrect(
-  lemma: string,
-  sentence: string,
-  sense?: SenseHint,
-): Promise<ResponseBody> {
-  const lem = await loadLemmatizer();
-  if (sentenceMentionsLemma(lemma, sentence, lem) && sentence.trim().length > 5) {
-    return {
-      ok: true,
-      recommended: sentence,
-      segments: [{ text: sentence }],
-      diagnosis: [
-        `用法看起来没问题，符合「${sense?.chn ?? lemma}」的释义。（mock 模式未提供升级版本）`,
-      ],
-      provider: "mock",
-    };
-  }
-  return {
-    ok: false,
-    recommended: `She decided to ${lemma} the project.`,
-    segments: [
-      { text: sentence, wrong: true, fix: `She decided to ${lemma} the project.` },
-    ],
-    diagnosis: [`句子里没有出现 \`${lemma}\`（或任何词形变化），建议改写。`],
-    provider: "mock",
-  };
-}
-
-/** Sanitise the model's JSON into a strict ResponseBody. */
-function normaliseResponse(parsed: unknown, sentence: string): Omit<ResponseBody, "provider"> {
+): Omit<ResponseBody, "model" | "usage"> {
   const p = (parsed ?? {}) as Record<string, unknown>;
   let ok = Boolean(p.ok);
   const recommended =
@@ -562,27 +419,18 @@ function normaliseResponse(parsed: unknown, sentence: string): Omit<ResponseBody
         .filter((x) => x.length > 0)
     : [];
 
-  // ── Rule-citation guardrail ────────────────────────────────────────────
-  // The prompt requires every `diagnosis` line to contain a rule name in
-  // backticks (see R2 / R5 in buildPrompt). If the model returns ok=false
-  // but no diagnosis line actually cites a rule, that is a failed S1 —
-  // we do NOT trust the verdict and downgrade to ok=true. This is the
-  // structural fence that stops the model from inventing rules or
-  // flip-flopping on grey-area calls.
+  // Rule-citation guardrail: if ok=false but no diagnosis line actually
+  // cites a rule in backticks, treat as failed S1 → downgrade to ok=true.
   const hasCitedRule = diagnosisRaw.some((d) => /`[^`]+`/.test(d));
   if (!ok && !hasCitedRule) {
     ok = true;
   }
-
-  // If the model said ok=true (or we just forced it), scrub any wrong flags.
   if (ok) {
     for (const s of segments) {
       s.wrong = false;
       s.fix = undefined;
     }
   }
-
-  // When ok=true, diagnosis MUST be empty per contract.
   const diagnosis: string[] = ok ? [] : diagnosisRaw.slice(0, 4);
 
   const suggestions: Suggestion[] | undefined = Array.isArray(p.suggestions)
@@ -620,71 +468,6 @@ function normaliseResponse(parsed: unknown, sentence: string): Omit<ResponseBody
   };
 }
 
-async function callZhipu(
-  lemma: string,
-  sentence: string,
-  sense: SenseHint | undefined,
-  apiKey: string,
-): Promise<ResponseBody> {
-  const prompt = buildPrompt(lemma, sentence, sense);
-  const requestInit: RequestInit = {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: ZHIPU_MODEL,
-      messages: [{ role: "user", content: prompt }],
-      // GLM-4.7 is a "forced thinking" model by default: it always
-      // produces reasoning_content, which costs tokens and latency we
-      // don't need for a straightforward JSON extraction task. Disable it.
-      thinking: { type: "disabled" },
-      temperature: 0.2,
-      max_tokens: 600,
-    }),
-  };
-  // Retry only on 429 (rate limit / model overloaded). Free-tier GLM-4.7-Flash
-  // regularly returns 1302 (per-account concurrency) or 1305 (global model
-  // overload); a short exponential backoff is enough to skate around both.
-  const backoffs = [1000, 2000, 4000];
-  let res!: Response;
-  for (let attempt = 0; attempt <= backoffs.length; attempt++) {
-    res = await fetch(ZHIPU_CHAT_URL, requestInit);
-    if (res.ok) break;
-    const text = await res.text();
-    if (res.status !== 429 || attempt === backoffs.length) {
-      throw new Error(`zhipu ${res.status}: ${text.slice(0, 200)}`);
-    }
-    console.warn(
-      `[ai/correct] zhipu 429, retrying in ${backoffs[attempt]}ms ` +
-        `(attempt ${attempt + 1}/${backoffs.length})`,
-    );
-    await new Promise((r) => setTimeout(r, backoffs[attempt]));
-  }
-  const data = (await res.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
-    usage?: {
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      total_tokens?: number;
-    };
-  };
-  const usage = data.usage;
-  if (usage) {
-    console.log(
-      `[ai/correct] usage: input=${usage.prompt_tokens ?? "?"}, ` +
-        `output=${usage.completion_tokens ?? "?"}, ` +
-        `total=${usage.total_tokens ?? "?"}  (word="${lemma}")`,
-    );
-  }
-  const content = data.choices?.[0]?.message?.content ?? "";
-  const jsonStr = extractJson(content);
-  if (!jsonStr) throw new Error(`zhipu returned non-JSON: ${content.slice(0, 200)}`);
-  const parsed = JSON.parse(jsonStr) as unknown;
-  return { ...normaliseResponse(parsed, sentence), provider: "deepseek" };
-}
-
 export async function POST(req: Request): Promise<Response> {
   let body: RequestBody;
   try {
@@ -703,23 +486,56 @@ export async function POST(req: Request): Promise<Response> {
 
   const apiKey = process.env.ZHIPU_API_KEY;
   if (!apiKey) {
-    return NextResponse.json({
-      ...(await mockCorrect(lemma, sentence, body.sense)),
-      provider: "mock",
-      mockReason: "ZHIPU_API_KEY not configured",
-    });
-  }
-  try {
     return NextResponse.json(
-      await callZhipu(lemma, sentence, body.sense, apiKey),
+      {
+        error: "AI 调用失败",
+        attempts: [{ model: "config", reason: "ZHIPU_API_KEY 未配置" }],
+      },
+      { status: 502 },
     );
+  }
+
+  try {
+    const call = await callZhipuChain(
+      {
+        prompt: buildPrompt(lemma, sentence, body.sense),
+        temperature: 0.2,
+        maxTokens: 600,
+      },
+      apiKey,
+      "ai/correct",
+      `word="${lemma}"`,
+    );
+    const jsonStr = extractJsonObject(call.content);
+    if (!jsonStr) {
+      throw new Error(
+        `zhipu returned non-JSON: ${call.content.slice(0, 200)}`,
+      );
+    }
+    const parsed = JSON.parse(jsonStr) as unknown;
+    const core = normaliseResponse(parsed, sentence);
+    const resp: ResponseBody = {
+      ...core,
+      model: call.model,
+      usage: call.usage,
+    };
+    return NextResponse.json(resp);
   } catch (err) {
+    if (err instanceof ZhipuFallbackError) {
+      return NextResponse.json(
+        { error: "AI 调用失败", attempts: err.attempts },
+        { status: 502 },
+      );
+    }
     const msg = err instanceof Error ? err.message : String(err);
-    console.error("[ai/correct] zhipu call failed:", msg);
-    return NextResponse.json({
-      ...(await mockCorrect(lemma, sentence, body.sense)),
-      provider: "mock",
-      mockReason: msg.slice(0, 200),
-    });
+    // eslint-disable-next-line no-console
+    console.error("[ai/correct] post-call error:", msg);
+    return NextResponse.json(
+      {
+        error: "AI 调用失败",
+        attempts: [{ model: "parse", reason: "模型返回内容无法解析" }],
+      },
+      { status: 502 },
+    );
   }
 }
