@@ -57,6 +57,9 @@ const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
   { value: "alpha", label: "字母顺序" },
 ];
 
+/** 单词本每页展示多少条 —— 太长会让整页滚动很累。 */
+const PAGE_SIZE = 10;
+
 interface UndoState {
   lemma: string;
   from: WordbookStatus;
@@ -74,6 +77,8 @@ export default function WordbookPage() {
   const [month, setMonth] = useState<string>("all"); // "all" | "YYYY-MM"
   const [sortKey, setSortKey] = useState<SortKey>("recent");
   const [undo, setUndo] = useState<UndoState | null>(null);
+  // 当前页码（1-based）。筛选/tab 变化时会被重置回 1。
+  const [page, setPage] = useState(1);
   // "听力训练"模式：把 lemma 遮成 •••••，只留朗读按钮可用。
   // A 方案 — 单词区域点击时临时揭示（onPointerDown 揭开、松手/离开恢复），
   // 手滑不会跳转到详情页。
@@ -146,6 +151,24 @@ export default function WordbookPage() {
       .filter((e) => matchMonth(e.lastQueriedAt ?? e.lastSeenAt, month));
     return [...filtered].sort(buildComparator(sortKey));
   }, [entries, tab, pos, purpose, month, sortKey]);
+
+  // 任何筛选/tab 切换都把页码拽回第 1 页，避免出现
+  //   “老朋友 25 条，切到只剩 3 条的 tab 后 page=3 → 空列表” 这种尴尬。
+  useEffect(() => {
+    setPage(1);
+  }, [tab, pos, purpose, month, sortKey]);
+
+  const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  // 若 visible 变短导致 page 超出（例如把某个词移到别的 tab 后当前页空了），
+  // 静默夹回合法区间。effect 里再修一次是为了让 UI 立刻看到新页码。
+  const safePage = Math.min(page, totalPages);
+  useEffect(() => {
+    if (page !== safePage) setPage(safePage);
+  }, [page, safePage]);
+  const paginated = useMemo(
+    () => visible.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
+    [visible, safePage],
+  );
 
   function handleMove(entry: WordbookEntry) {
     const to: WordbookStatus = entry.status === "new" ? "old" : "new";
@@ -337,7 +360,7 @@ export default function WordbookPage() {
         </p>
       ) : (
         <ul className="divide-y divide-[var(--border)] rounded-lg border border-[var(--border)]">
-          {visible.map((e) => {
+          {paginated.map((e) => {
             const isNew = e.status === "new";
             const moveTitle =
               isNew ? "已掌握，移到老朋友" : "还想再看，移回新朋友";
@@ -465,6 +488,33 @@ export default function WordbookPage() {
             );
           })}
         </ul>
+      )}
+
+      {/* 分页控件 —— 只有单页时不显示，免得视觉噪音。 */}
+      {visible.length > 0 && totalPages > 1 && (
+        <div className="flex items-center justify-center gap-3 pt-1">
+          <button
+            type="button"
+            disabled={safePage === 1}
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            aria-label="上一页"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border)] bg-transparent text-sm text-[var(--fg-soft)] transition hover:text-[var(--fg)] hover:border-[var(--fg-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            ‹
+          </button>
+          <span className="text-xs text-[var(--fg-soft)] tabular-nums">
+            {safePage} / {totalPages}
+          </span>
+          <button
+            type="button"
+            disabled={safePage === totalPages}
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            aria-label="下一页"
+            className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border)] bg-transparent text-sm text-[var(--fg-soft)] transition hover:text-[var(--fg)] hover:border-[var(--fg-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            ›
+          </button>
+        </div>
       )}
 
       {/* Undo toast */}
