@@ -26,8 +26,8 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import {
   listEntries,
   setStatus,
@@ -69,7 +69,18 @@ interface UndoState {
 }
 
 export default function WordbookPage() {
+  // useSearchParams 在 App Router 下必须被 Suspense 包裹，否则
+  // `next build` 预渲染阶段会报 "should be wrapped in a suspense boundary"。
+  return (
+    <Suspense fallback={null}>
+      <WordbookPageInner />
+    </Suspense>
+  );
+}
+
+function WordbookPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [entries, setEntries] = useState<WordbookEntry[]>([]);
   const [tab, setTab] = useState<WordbookStatus>("new");
   const [pos, setPos] = useState<PosOption>("all");
@@ -77,8 +88,15 @@ export default function WordbookPage() {
   const [month, setMonth] = useState<string>("all"); // "all" | "YYYY-MM"
   const [sortKey, setSortKey] = useState<SortKey>("recent");
   const [undo, setUndo] = useState<UndoState | null>(null);
-  // 当前页码（1-based）。筛选/tab 变化时会被重置回 1。
-  const [page, setPage] = useState(1);
+  // 当前页码（1-based）。同步到 URL 的 ?page=N，这样从详情页 back 回来时
+  // 能回到之前那一页；同时筛选/tab 切换时用 router.replace 把页码夹回 1，
+  // 不产生额外的 history 条目。
+  const [page, setPage] = useState<number>(() => {
+    // 初始化时尽量从 URL 读；SSR 下 searchParams 可能为空。
+    const raw = searchParams?.get("page");
+    const n = raw ? parseInt(raw, 10) : 1;
+    return Number.isFinite(n) && n >= 1 ? n : 1;
+  });
   // "听力训练"模式：把 lemma 遮成 •••••，只留朗读按钮可用。
   // A 方案 — 单词区域点击时临时揭示（onPointerDown 揭开、松手/离开恢复），
   // 手滑不会跳转到详情页。
@@ -165,6 +183,24 @@ export default function WordbookPage() {
   useEffect(() => {
     if (page !== safePage) setPage(safePage);
   }, [page, safePage]);
+
+  // 把 safePage 同步到 URL 的 ?page=N。这样点单词进详情页 → back 回来
+  // 时，URL 仍带着正确的页码，重新初始化的 state 会从 URL 读回去，
+  // 用户看到的就是之前那一页而不是首页。用 replace 而非 push，
+  // 避免在同一页内反复翻页时往 history 里塞一堆条目。
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const current = searchParams?.get("page");
+    const desired = safePage === 1 ? null : String(safePage);
+    // 相同就不动，避免无用的 replace（并且防止 effect 无限循环）。
+    if (current === desired) return;
+    const params = new URLSearchParams(searchParams?.toString() ?? "");
+    if (desired === null) params.delete("page");
+    else params.set("page", desired);
+    const qs = params.toString();
+    router.replace(qs ? `/wordbook?${qs}` : "/wordbook", { scroll: false });
+  }, [safePage, router, searchParams]);
+
   const paginated = useMemo(
     () => visible.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
     [visible, safePage],
