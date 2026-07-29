@@ -9,10 +9,10 @@
  *   failure  → HTTP 502 with { error: "AI 调用失败", attempts: [{model, reason}] }
  *
  * The components exported from this file render each shape in a consistent
- * way across DefinitionModal, DerivedFormPanel, AIExamplesPanel,
- * phrase/[slug]/page and ReviewView. Keeping the presentation in one place
- * means we can tune it once (labels, colours, tooltip copy) without hunting
- * through 5 different call sites.
+ * way across DerivedFormPanel, AIExamplesPanel, phrase/[slug]/page and
+ * ReviewView. Keeping the presentation in one place means we can tune it
+ * once (labels, colours, tooltip copy) without hunting through 4 different
+ * call sites.
  */
 
 import React from "react";

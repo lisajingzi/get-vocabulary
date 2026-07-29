@@ -20,10 +20,6 @@
  *                 (key = lemma, value = { pos → string[] }). Fetched at most
  *                 once per lemma; the mock provider result is also cached
  *                 (harmless; we just retry next session if it was empty).
- *   ai-definitions AI-generated "top 1–2 senses + one example each" for a
- *                 lemma, powering the wordbook "释义" popup. Key = lemma,
- *                 value = { senses, provider, cachedAt }. Fetched at most
- *                 once per lemma; user can click 再生成 to overwrite.
  *
  * Bump DB_VERSION whenever you add or rename a store; remember the upgrade
  * callback runs once per version step, so it must stay idempotent.
@@ -39,7 +35,10 @@ export const DB_NAME = "get-dict";
 // force-clear syn-shards + syn-ai on upgrade to make the fresh /dict/*.json
 // visible without asking users to nuke site data manually.
 // v6 (2026-07): add ai-definitions store for the wordbook "释义" popup.
-export const DB_VERSION = 6;
+// v7 (2026-07): the "释义" popup was reworked to read from the local Oxford
+// dictionary instead of AI. The ai-definitions store is dead weight now —
+// drop it on upgrade so browsers don't carry orphan schema forever.
+export const DB_VERSION = 7;
 
 export const STORE_META = "meta";
 export const STORE_SHARD = "shards";
@@ -47,7 +46,6 @@ export const STORE_AI_EXAMPLES = "ai-examples";
 export const STORE_TTS_CACHE = "tts-cache";
 export const STORE_SYN_SHARD = "syn-shards";
 export const STORE_SYN_AI = "syn-ai";
-export const STORE_AI_DEFINITIONS = "ai-definitions";
 
 let dbPromise: Promise<IDBPDatabase> | null = null;
 
@@ -79,16 +77,18 @@ export function getAppDb(): Promise<IDBPDatabase> {
           // Value = { pos → string[] }. Key = target lemma.
           db.createObjectStore(STORE_SYN_AI);
         }
-        if (!db.objectStoreNames.contains(STORE_AI_DEFINITIONS)) {
-          // Value = { senses, provider, cachedAt }. Key = lemma.
-          db.createObjectStore(STORE_AI_DEFINITIONS);
-        }
         // v4 → v5: force a one-time refresh of the synonyms tables so users
         // pick up the regenerated /dict/synonyms-*.json (WordNet noise
         // pruned). Both stores are pure caches — safe to clear.
         if (oldVersion > 0 && oldVersion < 5) {
           tx.objectStore(STORE_SYN_SHARD).clear();
           tx.objectStore(STORE_SYN_AI).clear();
+        }
+        // v6 → v7: the AI-backed "释义" popup was replaced by a local
+        // dictionary lookup, so the ai-definitions store is obsolete.
+        // Delete it (idempotent — safe if a fresh install never created it).
+        if (db.objectStoreNames.contains("ai-definitions")) {
+          db.deleteObjectStore("ai-definitions");
         }
       },
     });

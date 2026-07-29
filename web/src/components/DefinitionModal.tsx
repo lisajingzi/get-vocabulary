@@ -3,33 +3,29 @@
 /**
  * <DefinitionModal /> — the popup behind the "释义" button on each wordbook row.
  *
- * Behaviour:
- *   - On open, tries the IndexedDB cache first. Cache hit → paint immediately,
- *     no usage footnote (no tokens were spent).
- *   - Cache miss → POST /api/ai/definition. On success we persist the payload
- *     and show a one-line "本次消耗 N tokens" footnote until the user closes
- *     the modal.
- *   - On complete failure (all three fallback tiers down), we DON'T mock —
- *     we display a red <AIErrorNotice> listing each tier that failed and why,
- *     translated into Chinese by the server.
- *   - Close options: click the ✕, click the backdrop, or press Esc.
- *   - "再生成" refetches and overwrites the cache.
+ * Data source: 100% local Oxford 9 dictionary (via `lookup()`). No AI, no
+ * network, no IndexedDB cache — the entry ships in the /dict shard the user
+ * already downloaded, so opening the popup is instant and works offline.
+ *
+ * What we show:
+ *   - Up to 2 senses, taken as the first two `DictSense` from the entry
+ *     (the mdx parser already orders them by Oxford's own frequency).
+ *   - For each sense: the English `def`, then ONE example (`ex[0]`) if the
+ *     sense carries any. Both the headword and each example sentence have
+ *     a SpeakButton so the user can tap-to-hear.
+ *   - Per product spec: English definitions only in the sense line; Chinese
+ *     lives under the example as a semantic anchor for the sentence.
+ *   - If the dictionary has no entry for this lemma (redirects also fail),
+ *     we show a small "词典中未收录该词" notice instead of any fallback.
+ *
+ * Close options: click the ✕, click the backdrop, press Esc, or the 关闭
+ * button in the footer.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import SpeakButton from "@/components/SpeakButton";
-import {
-  AIErrorNotice,
-  AIUsageNote,
-  parseAIErrorAttempts,
-  type AIAttempt,
-} from "@/components/AIStatus";
-import {
-  getCachedDefinition,
-  saveDefinition,
-  type AIDefinition,
-  type DefinitionSense,
-} from "@/lib/ai/definition-cache";
+import { lookup } from "@/lib/dict";
+import type { DictSense } from "@/lib/types";
 
 interface Props {
   /** Which lemma to show. `null` → modal is closed. */
@@ -37,102 +33,53 @@ interface Props {
   onClose: () => void;
 }
 
-interface ApiResponse {
-  senses: DefinitionSense[];
-  model: string;
-  usage: { input: number; output: number; total: number };
-}
-
-/** Ephemeral, per-fetch usage snapshot. Never persisted. */
-interface FreshUsage {
-  model: string;
-  usage: { input: number; output: number; total: number };
+interface DisplayState {
+  /** The canonical lemma we ended up displaying (aliases followed). */
+  headword: string;
+  senses: DictSense[];
 }
 
 export default function DefinitionModal({ lemma, onClose }: Props) {
-  const [data, setData] = useState<AIDefinition | null>(null);
+  const [state, setState] = useState<DisplayState | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [attempts, setAttempts] = useState<AIAttempt[]>([]);
-  const [fresh, setFresh] = useState<FreshUsage | null>(null);
-  // Track the lemma we're currently loading so a late response from a
-  // previous open doesn't overwrite a newer one (e.g. rapid switch A→B).
-  const activeLemmaRef = useRef<string | null>(null);
 
-  const fetchAndCache = useCallback(
-    async (target: string, forceRefresh: boolean) => {
-      activeLemmaRef.current = target;
-      setBusy(true);
-      setAttempts([]);
-      setFresh(null);
-      try {
-        if (!forceRefresh) {
-          const cached = await getCachedDefinition(target);
-          if (cached && activeLemmaRef.current === target) {
-            setData(cached);
-            setBusy(false);
-            return;
-          }
-        }
-        const res = await fetch("/api/ai/definition", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ lemma: target }),
-        });
-        if (!res.ok) {
-          const parsed = await parseAIErrorAttempts(res);
-          if (activeLemmaRef.current === target) {
-            setAttempts(parsed);
-          }
-          return;
-        }
-        const payload = (await res.json()) as ApiResponse;
-        if (!Array.isArray(payload.senses) || payload.senses.length === 0) {
-          if (activeLemmaRef.current === target) {
-            setAttempts([
-              { model: "parse", reason: "模型返回内容无法解析" },
-            ]);
-          }
-          return;
-        }
-        const saved = await saveDefinition(target, payload.senses);
-        // Guard: if the user has since switched lemmas, discard this result.
-        if (activeLemmaRef.current === target) {
-          setData(saved);
-          setFresh({ model: payload.model, usage: payload.usage });
-        }
-      } catch (e) {
-        if (activeLemmaRef.current === target) {
-          setAttempts([
-            {
-              model: "network",
-              reason: (e as Error).message || "网络请求失败",
-            },
-          ]);
-        }
-      } finally {
-        if (activeLemmaRef.current === target) {
-          setBusy(false);
-        }
-      }
-    },
-    [],
-  );
-
-  // Reset + load whenever the target lemma changes.
+  // Load whenever the target lemma changes. `lookup()` is async (it may need
+  // to fetch a shard from /dict on first hit) but subsequent opens for the
+  // same shard resolve synchronously from IndexedDB → in-memory cache.
   useEffect(() => {
     if (!lemma) {
-      activeLemmaRef.current = null;
-      setData(null);
-      setAttempts([]);
-      setFresh(null);
+      setState(null);
+      setNotFound(false);
       setBusy(false);
       return;
     }
-    setData(null);
-    setAttempts([]);
-    setFresh(null);
-    void fetchAndCache(lemma, false);
-  }, [lemma, fetchAndCache]);
+    let cancelled = false;
+    setState(null);
+    setNotFound(false);
+    setBusy(true);
+    (async () => {
+      try {
+        const result = await lookup(lemma);
+        if (cancelled) return;
+        if (!result) {
+          setNotFound(true);
+        } else {
+          setState({
+            headword: result.lemma,
+            senses: result.entry.senses.slice(0, 2),
+          });
+        }
+      } catch {
+        if (!cancelled) setNotFound(true);
+      } finally {
+        if (!cancelled) setBusy(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [lemma]);
 
   // Close on Esc while open. Also lock body scroll to avoid the wordbook
   // list scrolling behind the modal on mobile.
@@ -175,9 +122,9 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
         <header className="flex items-center justify-between gap-3 border-b border-[var(--border)]/60 px-5 py-3 shrink-0">
           <div className="flex items-baseline gap-2 min-w-0">
             <h3 className="truncate text-[17px] font-semibold tracking-tight">
-              {lemma}
+              {state?.headword ?? lemma}
             </h3>
-            <SpeakButton text={lemma} variant="us" />
+            <SpeakButton text={state?.headword ?? lemma} variant="us" />
           </div>
           <button
             type="button"
@@ -190,92 +137,70 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
         </header>
 
         <div className="flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3">
-          {busy && !data && (
+          {busy && !state && (
             <p className="text-sm text-[var(--fg-soft)]">加载中…</p>
           )}
-          {attempts.length > 0 && !busy && (
-            <AIErrorNotice attempts={attempts} />
+          {notFound && !busy && (
+            <p className="text-sm text-[var(--fg-soft)]">词典中未收录该词。</p>
           )}
-          {data && (
+          {state && state.senses.length === 0 && (
+            <p className="text-sm text-[var(--fg-soft)]">
+              该词条暂无可展示的释义。
+            </p>
+          )}
+          {state && state.senses.length > 0 && (
             <ol className="space-y-4 list-none">
-              {data.senses.map((s, i) => (
-                <li key={i} className="space-y-2">
-                  <div className="flex gap-2">
-                    <span className="mt-0.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-[var(--accent)]/12 px-1.5 text-[11px] font-medium text-[var(--accent)] tabular-nums">
-                      {i + 1}
-                    </span>
-                    <p className="flex-1 text-[14px] leading-relaxed text-[var(--fg)]">
-                      {s.def}
-                    </p>
-                  </div>
-                  <div className="ml-7 rounded-[var(--radius-md)] border border-[var(--border)]/60 bg-[var(--bg-soft)]/40 p-3">
-                    <div className="flex items-start gap-2">
-                      <p className="flex-1 text-[13px] leading-relaxed text-[var(--fg)]">
-                        {s.example.en}
-                      </p>
-                      <SpeakButton text={s.example.en} variant="us" />
+              {state.senses.map((s, i) => {
+                const ex = s.ex && s.ex.length > 0 ? s.ex[0] : null;
+                return (
+                  <li key={i} className="space-y-2">
+                    <div className="flex gap-2">
+                      <span className="mt-0.5 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-[var(--accent)]/12 px-1.5 text-[11px] font-medium text-[var(--accent)] tabular-nums">
+                        {i + 1}
+                      </span>
+                      <div className="flex-1 space-y-1">
+                        {s.pos && (
+                          <p className="text-[11px] uppercase tracking-wide text-[var(--fg-soft)]">
+                            {s.pos}
+                          </p>
+                        )}
+                        <p className="text-[14px] leading-relaxed text-[var(--fg)]">
+                          {s.def || "（该义项暂无英文释义）"}
+                        </p>
+                      </div>
                     </div>
-                    {s.example.cn && (
-                      <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--fg-soft)]">
-                        {s.example.cn}
-                      </p>
+                    {ex && (
+                      <div className="ml-7 rounded-[var(--radius-md)] border border-[var(--border)]/60 bg-[var(--bg-soft)]/40 p-3">
+                        <div className="flex items-start gap-2">
+                          <p className="flex-1 text-[13px] leading-relaxed text-[var(--fg)]">
+                            {ex.en}
+                          </p>
+                          <SpeakButton text={ex.en} variant="us" />
+                        </div>
+                        {ex.cn && (
+                          <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--fg-soft)]">
+                            {ex.cn}
+                          </p>
+                        )}
+                      </div>
                     )}
-                  </div>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ol>
-          )}
-          {/* Ephemeral usage footnote — only visible right after a fresh fetch,
-              never for a cache hit (that would misleadingly imply we spent
-              tokens on the reopen). */}
-          {fresh && (
-            <AIUsageNote model={fresh.model} usage={fresh.usage} />
           )}
         </div>
 
-        <footer className="flex items-center justify-between gap-2 border-t border-[var(--border)]/60 px-5 py-2.5 shrink-0">
-          <span className="text-[11px] text-[var(--fg-soft)]">
-            {data
-              ? `更新于 ${formatCachedAt(data.cachedAt)}`
-              : busy
-                ? "正在生成…"
-                : ""}
-          </span>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => lemma && fetchAndCache(lemma, true)}
-              disabled={busy}
-              className="rounded-md border border-[var(--border)] px-2.5 py-1 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {busy ? "生成中…" : "再生成"}
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded-md bg-[var(--accent)] px-3 py-1 text-xs font-medium text-white transition hover:opacity-90"
-            >
-              关闭
-            </button>
-          </div>
+        <footer className="flex items-center justify-end gap-2 border-t border-[var(--border)]/60 px-5 py-2.5 shrink-0">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md bg-[var(--accent)] px-3 py-1 text-xs font-medium text-white transition hover:opacity-90"
+          >
+            关闭
+          </button>
         </footer>
       </div>
     </div>
   );
-}
-
-function formatCachedAt(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  const sameDay =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  if (sameDay) return `今天 ${hh}:${mm}`;
-  const M = String(d.getMonth() + 1).padStart(2, "0");
-  const D = String(d.getDate()).padStart(2, "0");
-  return `${M}/${D} ${hh}:${mm}`;
 }
