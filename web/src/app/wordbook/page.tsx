@@ -36,6 +36,7 @@ import {
   type WordbookStatus,
 } from "@/lib/wordbook/local";
 import SpeakButton from "@/components/SpeakButton";
+import DefinitionModal from "@/components/DefinitionModal";
 
 type SortKey = "recent" | "count" | "alpha";
 /** “all” = 不筛选。后两项对应 WordbookPurpose。 */
@@ -102,6 +103,8 @@ function WordbookPageInner() {
   // 手滑不会跳转到详情页。
   const [masked, setMasked] = useState(false);
   const [revealedLemma, setRevealedLemma] = useState<string | null>(null);
+  // “释义”弹窗当前展示的 lemma；null 表示弹窗关闭。所有行共享同一个 Modal。
+  const [defLemma, setDefLemma] = useState<string | null>(null);
 
   // Seed from localStorage and live-refresh on changes from any source
   // (detail page, sibling tab, etc).
@@ -492,6 +495,19 @@ function WordbookPageInner() {
                   )}
                   <button
                     type="button"
+                    title="查看释义"
+                    aria-label={`查看 ${e.lemma} 的释义`}
+                    onClick={(ev) => {
+                      ev.preventDefault();
+                      ev.stopPropagation();
+                      setDefLemma(e.lemma);
+                    }}
+                    className="shrink-0 rounded-full border border-[var(--border)] bg-transparent px-2 py-0.5 text-[11px] text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--accent)] active:scale-95"
+                  >
+                    释义
+                  </button>
+                  <button
+                    type="button"
                     title={moveTitle}
                     aria-label={moveTitle}
                     onClick={(ev) => {
@@ -574,6 +590,9 @@ function WordbookPageInner() {
           </div>
         </div>
       )}
+
+      {/* 释义弹窗 — 所有行共用，由 defLemma 驱动开合。 */}
+      <DefinitionModal lemma={defLemma} onClose={() => setDefLemma(null)} />
     </div>
   );
 }
