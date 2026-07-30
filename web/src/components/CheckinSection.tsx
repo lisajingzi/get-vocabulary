@@ -233,28 +233,28 @@ export default function CheckinSection() {
         </div>
       </div>
 
-      <div className="relative border-t border-white/50 bg-white/45 backdrop-blur-md px-5 py-3.5 shrink-0">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-5 min-w-0 flex-1">
-            <div className="text-[15px] font-semibold tracking-tight whitespace-nowrap">今日打卡</div>
+      <div className="relative border-t border-white/50 bg-white/45 backdrop-blur-md px-4 py-3.5 shrink-0">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-x-3 min-w-0 flex-1 overflow-hidden">
+            <div className="text-[14px] font-semibold tracking-tight whitespace-nowrap">今日打卡</div>
             <div className="flex items-baseline gap-1 text-[11px] text-[var(--fg-soft)] whitespace-nowrap">
               连续
-              <span className="text-[15px] font-semibold text-[var(--accent)] tabular-nums">{streak}</span>
+              <span className="text-[14px] font-semibold text-[var(--accent)] tabular-nums">{streak}</span>
               天
             </div>
             <div className="flex items-baseline gap-1 text-[11px] text-[var(--fg-soft)] whitespace-nowrap">
               进度
-              <span className="text-[15px] font-semibold text-[var(--fg)] tabular-nums">
+              <span className="text-[14px] font-semibold text-[var(--fg)] tabular-nums">
                 {finishedToday}/{totalToday}
               </span>
             </div>
             {(activeRemaining > 0 || passiveRemaining > 0) && (
-              <div className="flex items-center gap-1.5 text-[11px] text-[var(--fg-soft)] whitespace-nowrap">
+              <div className="flex items-center gap-1 text-[11px] text-[var(--fg-soft)] whitespace-nowrap">
                 {activeRemaining > 0 ? (
                   <Link
                     href="/review?group=active"
                     title="仅复习听说写词"
-                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/70 bg-white/60 px-2 py-0.5 text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--fg)] active:translate-y-[1px]"
+                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/70 bg-white/60 px-1.5 py-0.5 text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--fg)] active:translate-y-[1px]"
                   >
                     听说写
                     <span className="font-semibold text-[var(--fg)] tabular-nums">
@@ -264,7 +264,7 @@ export default function CheckinSection() {
                 ) : (
                   <span
                     title="听说写词今日剩余待复习"
-                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/50 bg-white/40 px-2 py-0.5 opacity-55"
+                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/50 bg-white/40 px-1.5 py-0.5 opacity-55"
                   >
                     听说写
                     <span className="font-semibold text-[var(--fg)] tabular-nums">0</span>
@@ -274,7 +274,7 @@ export default function CheckinSection() {
                   <Link
                     href="/review?group=passive"
                     title="仅复习阅读词"
-                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/70 bg-white/60 px-2 py-0.5 text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--fg)] active:translate-y-[1px]"
+                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/70 bg-white/60 px-1.5 py-0.5 text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--fg)] active:translate-y-[1px]"
                   >
                     阅读
                     <span className="font-semibold text-[var(--fg)] tabular-nums">
@@ -284,7 +284,7 @@ export default function CheckinSection() {
                 ) : (
                   <span
                     title="阅读词今日剩余待复习"
-                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/50 bg-white/40 px-2 py-0.5 opacity-55"
+                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/50 bg-white/40 px-1.5 py-0.5 opacity-55"
                   >
                     阅读
                     <span className="font-semibold text-[var(--fg)] tabular-nums">0</span>
@@ -298,7 +298,7 @@ export default function CheckinSection() {
             <button
               type="button"
               disabled
-              className="shrink-0 rounded-full border border-white/70 bg-white/70 px-4 py-1.5 text-xs font-medium opacity-55"
+              className="shrink-0 rounded-full border border-white/70 bg-white/70 px-3 py-1.5 text-xs font-medium opacity-55"
             >
               开始复习
             </button>
@@ -306,7 +306,7 @@ export default function CheckinSection() {
             <Link
               href="/review"
               className={[
-                "shrink-0 rounded-full px-4 py-1.5 text-center text-xs font-semibold transition whitespace-nowrap",
+                "shrink-0 rounded-full px-3 py-1.5 text-center text-xs font-semibold transition whitespace-nowrap",
                 "active:translate-y-[1px]",
                 isFinished
                   ? "border border-[var(--border)] bg-white/80 text-[var(--fg-soft)] hover:border-[var(--accent)]"
