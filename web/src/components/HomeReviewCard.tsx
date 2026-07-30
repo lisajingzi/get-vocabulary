@@ -72,16 +72,37 @@ export default function HomeReviewCard() {
             ✅ 今日 {finishedToday} 个单词已完成
           </p>
         ) : (
-          <div className="space-y-1">
+          <div className="space-y-2">
             <p className="text-sm text-[var(--fg-soft)]">
               进度 {finishedToday} / {totalToday}
             </p>
             {(activeRemaining > 0 || passiveRemaining > 0) && (
-              <p className="text-xs text-[var(--fg-soft)]">
-                听说写剩 <span className="font-medium text-[var(--fg)]">{activeRemaining}</span>
-                <span className="mx-1 opacity-50">·</span>
-                阅读剩 <span className="font-medium text-[var(--fg)]">{passiveRemaining}</span>
-              </p>
+              <div className="flex flex-wrap gap-2">
+                {activeRemaining > 0 && (
+                  <Link
+                    href="/review?group=active"
+                    className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-0.5 text-xs text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--fg)]"
+                    title="只复习听说写组"
+                  >
+                    听说写剩
+                    <span className="font-medium text-[var(--fg)] tabular-nums">
+                      {activeRemaining}
+                    </span>
+                  </Link>
+                )}
+                {passiveRemaining > 0 && (
+                  <Link
+                    href="/review?group=passive"
+                    className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-0.5 text-xs text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--fg)]"
+                    title="只复习阅读组"
+                  >
+                    阅读剩
+                    <span className="font-medium text-[var(--fg)] tabular-nums">
+                      {passiveRemaining}
+                    </span>
+                  </Link>
+                )}
+              </div>
             )}
           </div>
         )}

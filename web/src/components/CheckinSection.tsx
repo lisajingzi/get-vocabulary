@@ -249,20 +249,47 @@ export default function CheckinSection() {
               </span>
             </div>
             {(activeRemaining > 0 || passiveRemaining > 0) && (
-              <div className="flex items-baseline gap-2 text-[11px] text-[var(--fg-soft)] whitespace-nowrap">
-                <span title="听说写词今日剩余待复习">
-                  听说写
-                  <span className="ml-0.5 font-semibold text-[var(--fg)] tabular-nums">
-                    {activeRemaining}
+              <div className="flex items-center gap-1.5 text-[11px] text-[var(--fg-soft)] whitespace-nowrap">
+                {activeRemaining > 0 ? (
+                  <Link
+                    href="/review?group=active"
+                    title="仅复习听说写词"
+                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/70 bg-white/60 px-2 py-0.5 text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--fg)] active:translate-y-[1px]"
+                  >
+                    听说写
+                    <span className="font-semibold text-[var(--fg)] tabular-nums">
+                      {activeRemaining}
+                    </span>
+                  </Link>
+                ) : (
+                  <span
+                    title="听说写词今日剩余待复习"
+                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/50 bg-white/40 px-2 py-0.5 opacity-55"
+                  >
+                    听说写
+                    <span className="font-semibold text-[var(--fg)] tabular-nums">0</span>
                   </span>
-                </span>
-                <span className="opacity-50">·</span>
-                <span title="阅读词今日剩余待复习">
-                  阅读
-                  <span className="ml-0.5 font-semibold text-[var(--fg)] tabular-nums">
-                    {passiveRemaining}
+                )}
+                {passiveRemaining > 0 ? (
+                  <Link
+                    href="/review?group=passive"
+                    title="仅复习阅读词"
+                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/70 bg-white/60 px-2 py-0.5 text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--fg)] active:translate-y-[1px]"
+                  >
+                    阅读
+                    <span className="font-semibold text-[var(--fg)] tabular-nums">
+                      {passiveRemaining}
+                    </span>
+                  </Link>
+                ) : (
+                  <span
+                    title="阅读词今日剩余待复习"
+                    className="inline-flex items-baseline gap-0.5 rounded-full border border-white/50 bg-white/40 px-2 py-0.5 opacity-55"
+                  >
+                    阅读
+                    <span className="font-semibold text-[var(--fg)] tabular-nums">0</span>
                   </span>
-                </span>
+                )}
               </div>
             )}
           </div>

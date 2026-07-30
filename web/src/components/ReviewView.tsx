@@ -31,7 +31,8 @@
  */
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   listEntries,
   recordReview,
@@ -52,8 +53,27 @@ import {
   type AIAttempt,
 } from "@/components/AIStatus";
 
+/**
+ * 复习分组。
+ *   - "active"  → 听说写组（entry.purpose === "active" 或未设置的老数据）
+ *   - "passive" → 阅读组（entry.purpose === "passive"）
+ *   - "all"    → 两组混合
+ * 通过 URL ?group=active|passive|all 传入；不传或值非法时进入组选择界面。
+ */
+export type ReviewGroup = "all" | "active" | "passive";
+
+function parseGroup(v: string | null | undefined): ReviewGroup | null {
+  if (v === "active" || v === "passive" || v === "all") return v;
+  return null;
+}
+
+function groupLabel(g: ReviewGroup): string {
+  return g === "active" ? "听说写" : g === "passive" ? "阅读" : "全部";
+}
+
 type Phase =
   | { kind: "loading" }
+  | { kind: "picker"; activeCount: number; passiveCount: number }
   | { kind: "empty" }
   | { kind: "quiz"; q: SynonymQuestion; failedOnce: boolean }
   | { kind: "spell"; target: string; failedOnce: boolean }
@@ -101,11 +121,25 @@ interface CorrectionResult {
 }
 
 export default function ReviewView() {
+  const searchParams = useSearchParams();
+  const initialGroup = useMemo(
+    () => parseGroup(searchParams?.get("group") ?? null),
+    [searchParams],
+  );
+  // null 表示尚未选择分组（走组选择界面）；一旦用户在选择器里点选或
+  // URL 已经带了 ?group=xxx，就固定住这一次复习会话的分组。
+  const [group, setGroup] = useState<ReviewGroup | null>(initialGroup);
   const [queue, setQueue] = useState<WordbookEntry[]>([]);
   const [cursor, setCursor] = useState(0);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
 
-  // ----- bootstrap: build today's queue once on mount ----------------------
+  // ----- bootstrap: build today's queue whenever the chosen group changes --
+  //
+  // Runs on mount and every time the user picks / switches a group. If no
+  // group is chosen yet we compute per-group counts from today's snapshot
+  // and show the picker (short-circuited to auto-pick when only one side
+  // has anything to review — no point asking "which group?" when there's
+  // just one).
   useEffect(() => {
     // The home page froze a "today's queue" snapshot the first time it
     // rendered (or here, whichever happened first). We rebuild the queue
@@ -124,7 +158,10 @@ export default function ReviewView() {
     const snapshot = getTodaySnapshot(now);
     const byLemma = new Map<string, WordbookEntry>();
     for (const e of listEntries()) byLemma.set(e.lemma, e);
-    const due: WordbookEntry[] = [];
+    // Collect all still-due entries first, then partition by purpose so we
+    // can (a) count each side for the picker and (b) slice the visible
+    // queue by whichever group the user chose.
+    const allDue: WordbookEntry[] = [];
     snapshot.forEach((lemma) => {
       const e = byLemma.get(lemma);
       if (!e) return;
@@ -136,7 +173,37 @@ export default function ReviewView() {
       ) {
         return;
       }
-      due.push(e);
+      allDue.push(e);
+    });
+    const isPassive = (e: WordbookEntry) => e.purpose === "passive";
+    const activeCount = allDue.filter((e) => !isPassive(e)).length;
+    const passiveCount = allDue.filter(isPassive).length;
+
+    // No group chosen yet → decide whether to auto-pick or show picker.
+    if (group === null) {
+      if (activeCount === 0 && passiveCount === 0) {
+        setQueue([]);
+        setPhase({ kind: "empty" });
+        return;
+      }
+      // Only one side has words → skip the picker, jump straight in.
+      if (activeCount > 0 && passiveCount === 0) {
+        setGroup("active");
+        return;
+      }
+      if (passiveCount > 0 && activeCount === 0) {
+        setGroup("passive");
+        return;
+      }
+      // Both sides have words → let the user choose.
+      setPhase({ kind: "picker", activeCount, passiveCount });
+      return;
+    }
+
+    const due = allDue.filter((e) => {
+      if (group === "active") return !isPassive(e);
+      if (group === "passive") return isPassive(e);
+      return true;
     });
     // Stable order: oldest lastSeenAt first, mirrors pickDailyQueue's order
     // so the user gets the same sequence whether they entered from snapshot
@@ -147,7 +214,7 @@ export default function ReviewView() {
     if (due.length === 0) {
       setPhase({ kind: "empty" });
     }
-  }, []);
+  }, [group]);
 
   // ----- whenever cursor moves to a new in-bounds item, build its quiz ----
   const buildQuestion = useCallback(async (item: WordbookEntry, failedOnce: boolean) => {
@@ -207,11 +274,23 @@ export default function ReviewView() {
       </div>
     );
   }
+  if (phase.kind === "picker") {
+    return (
+      <div className="space-y-4">
+        <ReviewTopBar />
+        <GroupPicker
+          activeCount={phase.activeCount}
+          passiveCount={phase.passiveCount}
+          onPick={(g) => setGroup(g)}
+        />
+      </div>
+    );
+  }
   if (phase.kind === "empty") {
     return (
       <div className="space-y-4">
         <ReviewTopBar />
-        <EmptyState />
+        <EmptyState group={group} onReset={() => setGroup(null)} />
       </div>
     );
   }
@@ -219,7 +298,12 @@ export default function ReviewView() {
     return (
       <div className="space-y-4">
         <ReviewTopBar />
-        <DoneState finished={phase.finished} total={phase.total} />
+        <DoneState
+          finished={phase.finished}
+          total={phase.total}
+          group={group}
+          onReset={() => setGroup(null)}
+        />
       </div>
     );
   }
@@ -227,6 +311,9 @@ export default function ReviewView() {
   return (
     <div className="space-y-4">
       <ReviewTopBar />
+      {group && (
+        <GroupBadge group={group} onSwitch={() => setGroup(null)} />
+      )}
       <ProgressBar current={cursor + 1} total={queue.length} />
       {phase.kind === "quiz" && (
         <QuizPanel
@@ -1392,35 +1479,194 @@ function ReviewSkeleton() {
   );
 }
 
-function EmptyState() {
+function EmptyState({
+  group,
+  onReset,
+}: {
+  group: ReviewGroup | null;
+  onReset: () => void;
+}) {
+  // 当用户选了组但那一组今日已无字 → 引导切回选择器看另一组。
+  const showSwitcher = group === "active" || group === "passive";
   return (
     <div className="space-y-3 rounded-xl border border-dashed border-[var(--border)] p-6 text-center">
-      <p className="text-base font-medium">今天没有需要复习的单词。</p>
+      <p className="text-base font-medium">
+        {showSwitcher
+          ? `${groupLabel(group!)}组今日没有需要复习的单词。`
+          : "今天没有需要复习的单词。"}
+      </p>
       <p className="text-sm text-[var(--fg-soft)]">
-        先去
-        <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
-          首页
-        </Link>
-        查几个新词吧；它们会按艾宾浩斯曲线安排复习。
+        {showSwitcher ? (
+          <>
+            可以
+            <button
+              type="button"
+              onClick={onReset}
+              className="mx-1 text-[var(--accent)] hover:underline"
+            >
+              切回选择其他组
+            </button>
+            ，或者回
+            <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
+              首页
+            </Link>
+            看看。
+          </>
+        ) : (
+          <>
+            先去
+            <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
+              首页
+            </Link>
+            查几个新词吧；它们会按艾宾浩斯曲线安排复习。
+          </>
+        )}
       </p>
     </div>
   );
 }
 
-function DoneState({ finished, total }: { finished: number; total: number }) {
+function DoneState({
+  finished,
+  total,
+  group,
+  onReset,
+}: {
+  finished: number;
+  total: number;
+  group: ReviewGroup | null;
+  onReset: () => void;
+}) {
+  const canSwitch = group === "active" || group === "passive";
   return (
     <div className="space-y-3 rounded-xl border border-[var(--border)] p-6 text-center">
       <p className="text-2xl">🎉</p>
       <p className="text-base font-medium">
-        今日 {finished} / {total} 个单词已完成
+        {canSwitch
+          ? `今日${groupLabel(group!)}组 ${finished} / ${total} 个单词已完成`
+          : `今日 ${finished} / ${total} 个单词已完成`}
       </p>
       <p className="text-sm text-[var(--fg-soft)]">
-        别忘了
-        <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
-          回首页
-        </Link>
-        看看打卡日历。
+        {canSwitch ? (
+          <>
+            还有时间？
+            <button
+              type="button"
+              onClick={onReset}
+              className="mx-1 text-[var(--accent)] hover:underline"
+            >
+              去复习另一组
+            </button>
+            ，或者
+            <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
+              回首页
+            </Link>
+            。
+          </>
+        ) : (
+          <>
+            别忘了
+            <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
+              回首页
+            </Link>
+            看看打卡日历。
+          </>
+        )}
       </p>
+    </div>
+  );
+}
+
+/**
+ * <GroupPicker /> — 进入 /review 后的组选择器。
+ * 仅当听说写、阅读两组今日都有待复习单词时才会展示（否则上一层直接 auto-pick）。
+ */
+function GroupPicker({
+  activeCount,
+  passiveCount,
+  onPick,
+}: {
+  activeCount: number;
+  passiveCount: number;
+  onPick: (g: ReviewGroup) => void;
+}) {
+  return (
+    <div className="rounded-xl border border-[var(--border)] p-6">
+      <p className="text-center text-base font-medium">选择今日复习内容</p>
+      <p className="mt-1 text-center text-xs text-[var(--fg-soft)]">
+        听说写组走 近义词/拼写 + 造句 流程；阅读组只识记词形 + 自评。
+      </p>
+      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => onPick("active")}
+          className="group flex flex-col items-start rounded-xl border border-[var(--border)] bg-[var(--bg)] p-4 text-left transition hover:border-[var(--accent)] hover:shadow-sm active:translate-y-[1px]"
+        >
+          <span className="text-[13px] uppercase tracking-wider text-[var(--fg-soft)]">
+            Group A
+          </span>
+          <span className="mt-1 text-lg font-semibold text-[var(--fg)] group-hover:text-[var(--accent)]">
+            听说写组
+          </span>
+          <span className="mt-2 text-xs text-[var(--fg-soft)]">
+            今日待复习 <span className="font-semibold text-[var(--fg)] tabular-nums">{activeCount}</span> 个
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onPick("passive")}
+          className="group flex flex-col items-start rounded-xl border border-[var(--border)] bg-[var(--bg)] p-4 text-left transition hover:border-[var(--accent)] hover:shadow-sm active:translate-y-[1px]"
+        >
+          <span className="text-[13px] uppercase tracking-wider text-[var(--fg-soft)]">
+            Group B
+          </span>
+          <span className="mt-1 text-lg font-semibold text-[var(--fg)] group-hover:text-[var(--accent)]">
+            阅读组
+          </span>
+          <span className="mt-2 text-xs text-[var(--fg-soft)]">
+            今日待复习 <span className="font-semibold text-[var(--fg)] tabular-nums">{passiveCount}</span> 个
+          </span>
+        </button>
+      </div>
+      <div className="mt-4 flex justify-center">
+        <button
+          type="button"
+          onClick={() => onPick("all")}
+          className="text-xs text-[var(--fg-soft)] underline decoration-dotted underline-offset-4 hover:text-[var(--accent)]"
+        >
+          一起复习（共 {activeCount + passiveCount} 个）
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * <GroupBadge /> — 复习中展示当前分组、并提供一个“切换”入口。
+ * 切换会重新回到 GroupPicker（即使另一组也为空也不拦，上层会自己 fallback 到 empty）。
+ */
+function GroupBadge({
+  group,
+  onSwitch,
+}: {
+  group: ReviewGroup;
+  onSwitch: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-md bg-[var(--bg-soft)] px-3 py-1.5 text-xs">
+      <div className="text-[var(--fg-soft)]">
+        当前复习：
+        <span className="ml-1 font-semibold text-[var(--fg)]">
+          {groupLabel(group)}组
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={onSwitch}
+        className="text-[var(--fg-soft)] underline decoration-dotted underline-offset-4 hover:text-[var(--accent)]"
+      >
+        切换组
+      </button>
     </div>
   );
 }
