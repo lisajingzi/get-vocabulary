@@ -15,7 +15,6 @@
  *     diagnosis: string[],
  *     suggestions?: Array<{ text; reason }>,
  *     distinction?: string,
- *     ielts?: string,
  *     model: string,
  *     usage: { input; output; total },
  *   }
@@ -68,7 +67,6 @@ interface ResponseBody {
   diagnosis: string[];
   suggestions?: Suggestion[];
   distinction?: string;
-  ielts?: string;
   model: string;
   usage: ZhipuUsage;
 }
@@ -111,8 +109,7 @@ function buildPrompt(lemma: string, sentence: string, sense?: SenseHint) {
     '  "segments": [{"text":"..."}, {"text":"...","wrong":true,"fix":"..."}],',
     '  "diagnosis": ["<中文，含 `rule name`>"],',
     '  "suggestions": [{"text":"<English>","reason":"<中文>"}],',
-    '  "distinction": "<optional 中文>",',
-    '  "ielts": "<optional English with target word>"',
+    '  "distinction": "<optional 中文>"',
     "}",
   ].join("\n");
 }
@@ -184,10 +181,6 @@ function normaliseResponse(
     typeof p.distinction === "string" && p.distinction.trim()
       ? p.distinction.trim()
       : undefined;
-  const ielts =
-    typeof p.ielts === "string" && p.ielts.trim()
-      ? p.ielts.trim()
-      : undefined;
   return {
     ok,
     recommended,
@@ -196,7 +189,6 @@ function normaliseResponse(
     diagnosis,
     suggestions: suggestionsClean,
     distinction,
-    ielts,
   };
 }
 

@@ -112,7 +112,6 @@ interface CorrectionResult {
    */
   suggestions?: Array<{ text: string; reason: string }>;
   distinction?: string;
-  ielts?: string;
   /** Which model in the fallback chain actually produced this result. */
   model?: string;
   /** Token usage reported by the model for this call. Ephemeral — surfaced
@@ -1425,18 +1424,6 @@ function CoachFeedback({
               </li>
             ))}
           </ul>
-        </div>
-      )}
-
-      {/* 4. IELTS-speaking sample */}
-      {result.ielts && (
-        <div className="space-y-1 border-t border-[var(--border)]/60 pt-2">
-          <p className="text-[11px] font-medium text-[var(--fg-soft)]">
-            雅思口语可这样说
-          </p>
-          <p className="italic leading-relaxed text-[var(--fg)]">
-            “{result.ielts}”
-          </p>
         </div>
       )}
     </div>
