@@ -1266,14 +1266,26 @@ function ComposePanel({
             下一题 →
           </button>
         ) : (
-          <button
-            type="button"
-            onClick={submit}
-            disabled={busy || !draft.trim()}
-            className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {busy ? "批改中…" : result ? "再改一次" : "提交批改"}
-          </button>
+          <div className="flex items-center gap-2">
+            {result && result.ok === false && (
+              <button
+                type="button"
+                onClick={handleNext}
+                title="AI 有时会误判，若你确认原句没问题可直接通过"
+                className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+              >
+                保留原句，通过 →
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={submit}
+              disabled={busy || !draft.trim()}
+              className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {busy ? "批改中…" : result ? "再改一次" : "提交批改"}
+            </button>
+          </div>
         )}
       </div>
     </section>
