@@ -456,6 +456,7 @@ def _extract_senses(html_str: str) -> List[dict]:
             continue
         # examples lie OUTSIDE <def>, but inside the same <sn-g>; pass `inner`
         examples = _extract_examples(inner)
+        img = _extract_illustration(inner)
         sense: dict = {"pos": pos_for(s)}
         if en_def:
             sense["def"] = en_def
@@ -463,8 +464,91 @@ def _extract_senses(html_str: str) -> List[dict]:
             sense["chn"] = zh_def
         if examples:
             sense["ex"] = examples
+        if img:
+            sense["img"] = img
         senses.append(sense)
     return senses
+
+
+# Filenames that appear as `<img>` tags for pure UI decoration (idiom / phrasal
+# verb section markers). Not real content illustrations — we skip them.
+_GENERIC_IMG_STEMS = {
+    "idioms.svg", "idm.svg", "pvs.svg", "phrase.svg", "phrases.svg",
+}
+
+_ILL_SRC_RE = re.compile(r'<img\b[^>]*\bsrc="([^"]+)"[^>]*>', re.IGNORECASE)
+
+def _extract_illustration(sense_html: str) -> Optional[dict]:
+    """Pull the illustration image(s) attached to a sense.
+
+    Oxford wraps each picture in `<ill-g>…</ill-g>` and often ships both a
+    thumbnail and a full-size version:
+
+        <ill-g thumb="y"><ill><div class='pic'>
+          <div class='pic_thumb'><img src="thumb_ant.jpg"></div>
+          <div class='big_pic'><img src="insects_comp.jpg"></div>
+        </div></ill></ill-g>
+
+    Returns ``{"thumb": "...", "big": "..."}`` (either key optional) or
+    ``None`` when the sense has no illustration.
+    """
+    # Look for the first <ill-g>. If there's none, bail immediately so we
+    # don't accidentally pick up decorative <img> tags outside the block.
+    m_ill = re.search(r"<ill-g\b[^>]*>(.*?)</ill-g>",
+                      sense_html, re.IGNORECASE | re.DOTALL)
+    if not m_ill:
+        return None
+    block = m_ill.group(1)
+    thumb: Optional[str] = None
+    big: Optional[str] = None
+
+    def _first_img_src(html_chunk: str) -> Optional[str]:
+        m = _ILL_SRC_RE.search(html_chunk)
+        if not m:
+            return None
+        fname = os.path.basename(m.group(1))
+        return None if fname.lower() in _GENERIC_IMG_STEMS else fname
+
+    # First pass: honour explicit CSS classes when present.
+    # Match <div class='pic_thumb' …>…<img …>…</div> (and same for big_pic).
+    # We restrict the inner body with [^<]|<(?!/div>) style is overkill; the
+    # Oxford markup nests only a single <img> here, so a lazy .*? works.
+    for m in re.finditer(
+        r"<div\b[^>]*class=['\"][^'\"]*pic_thumb[^'\"]*['\"][^>]*>(.*?)</div>",
+        block, re.IGNORECASE | re.DOTALL,
+    ):
+        fname = _first_img_src(m.group(1))
+        if fname and thumb is None:
+            thumb = fname
+            break
+    for m in re.finditer(
+        r"<div\b[^>]*class=['\"][^'\"]*big_pic[^'\"]*['\"][^>]*>(.*?)</div>",
+        block, re.IGNORECASE | re.DOTALL,
+    ):
+        fname = _first_img_src(m.group(1))
+        if fname and big is None:
+            big = fname
+            break
+
+    # Fallback: some entries have a bare <img> inside <ill-g> with no wrapper.
+    if thumb is None and big is None:
+        for m_src in _ILL_SRC_RE.finditer(block):
+            fname = os.path.basename(m_src.group(1))
+            if fname.lower() in _GENERIC_IMG_STEMS:
+                continue
+            # Guess: filenames starting with "thumb_" are the thumbnail.
+            if fname.lower().startswith("thumb_") and thumb is None:
+                thumb = fname
+            elif big is None:
+                big = fname
+    if not thumb and not big:
+        return None
+    out: dict = {}
+    if thumb:
+        out["thumb"] = thumb
+    if big:
+        out["big"] = big
+    return out
 
 
 def extract_entry(lemma: str, html_str: str) -> Optional[dict]:

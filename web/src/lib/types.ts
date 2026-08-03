@@ -23,6 +23,16 @@ export interface DictSense {
   chn?: string;
   /** 0..6 example sentences (the parser caps this). */
   ex?: DictExample[];
+  /**
+   * Illustration attached to this sense in the Oxford 9 mdx.
+   * `thumb` is a ~300px thumbnail; `big` is the full-size composition
+   * image (often labelled with multiple related nouns). Both are optional;
+   * senses without an illustration have `img` omitted entirely.
+   *
+   * The values are bare filenames (e.g. `"thumb_ant.jpg"`); resolve them
+   * against `NEXT_PUBLIC_COS_IMAGE_BASE` to get a fetchable URL.
+   */
+  img?: { thumb?: string; big?: string };
 }
 
 /**

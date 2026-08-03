@@ -14,6 +14,7 @@ __pycache__/
 .venv/
 venv/
 scripts/dict-out/
+scripts/.dict-images/
 scripts/*.log
 
 # --- Source dictionary (NOT redistributable; not for the repo) -------------

@@ -552,6 +552,12 @@ export default function WordDetailView({ slug, from }: Props) {
                         {sense.chn}
                       </p>
                     )}
+                    {sense.img && (
+                      <SenseIllustration
+                        img={sense.img}
+                        alt={sense.chn || sense.def || entry.lemma}
+                      />
+                    )}
                     {sense.ex && sense.ex.length > 0 && (
                       <ul className="mt-2 space-y-2 border-l border-[var(--border)] pl-3">
                         {sense.ex.map((ex, ei) => (
@@ -904,5 +910,96 @@ function PhrasesSection({ phrases }: { phrases: DictPhrase[] }) {
         </button>
       )}
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * <SenseIllustration /> — the illustration image the Oxford 9 mdx ships with
+ * certain senses (mostly nouns for concrete things: animals, body parts,
+ * instruments, geometric shapes …).
+ *
+ * The parser emits `{ thumb?, big? }` where the values are bare filenames
+ * (e.g. `"thumb_ant.jpg"`, `"insects_comp.jpg"`). We resolve them against
+ * `NEXT_PUBLIC_COS_IMAGE_BASE` — a public URL prefix like
+ * `https://<bucket>.cos.<region>.myqcloud.com/dict/images` — so we don't
+ * bloat the Next.js build with 140 MB of assets.
+ *
+ * If the env var is missing the component renders nothing (graceful
+ * degrade — the rest of the dictionary entry still works). This lets us
+ * ship the code before the images are uploaded and lets local dev without
+ * COS credentials keep working.
+ *
+ * UX:
+ *  - Thumbnail-sized preview inline. `big_pic` is often a shared 2500 px
+ *    composition (e.g. "insects_comp.jpg" is the SAME picture for `ant`,
+ *    `bee`, `wasp` … each with a different thumb). Clicking opens it in a
+ *    lightbox so the user can read the labels.
+ */
+function SenseIllustration({
+  img,
+  alt,
+}: {
+  img: { thumb?: string; big?: string };
+  alt: string;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const base = process.env.NEXT_PUBLIC_COS_IMAGE_BASE;
+  if (!base) return null;
+
+  // Prefer the thumbnail inline; fall back to `big` if the entry only ships
+  // one image. Guard against a completely empty img object just in case.
+  const previewFile = img.thumb || img.big;
+  const bigFile = img.big || img.thumb;
+  if (!previewFile) return null;
+
+  const previewUrl = `${base.replace(/\/$/, "")}/${previewFile}`;
+  const bigUrl = bigFile
+    ? `${base.replace(/\/$/, "")}/${bigFile}`
+    : previewUrl;
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-2 inline-block overflow-hidden rounded-md border border-[var(--border)] transition hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+        aria-label={`查看插图：${alt}`}
+      >
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src={previewUrl}
+          alt={alt}
+          loading="lazy"
+          className="block h-24 w-24 object-cover"
+        />
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setOpen(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={bigUrl}
+            alt={alt}
+            onClick={(e) => e.stopPropagation()}
+            className="max-h-[90vh] max-w-[92vw] rounded-md bg-white object-contain shadow-2xl"
+          />
+          <button
+            type="button"
+            onClick={() => setOpen(false)}
+            className="absolute right-4 top-4 rounded-full bg-white/90 px-3 py-1 text-sm font-medium text-black shadow hover:bg-white"
+            aria-label="关闭"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+    </>
   );
 }
