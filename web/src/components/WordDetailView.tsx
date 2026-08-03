@@ -537,7 +537,7 @@ export default function WordDetailView({ slug, from }: Props) {
             {senses.map((sense, si) => (
               <li
                 key={si}
-                className="rounded-lg border border-[var(--border)] p-4"
+                className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-4"
               >
                 <div className="flex items-start gap-3">
                   <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--bg-soft)] text-xs text-[var(--fg-soft)]">
