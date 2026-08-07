@@ -24,8 +24,9 @@
 
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import {
+  addDistinction,
   addNote,
   addSentence,
   type NotebookKind,
@@ -36,7 +37,23 @@ function NewNotebookEntryForm() {
   const router = useRouter();
   const search = useSearchParams();
   const rawKind = (search.get("kind") ?? "phrase") as NotebookKind;
-  const kind: NotebookKind = rawKind === "sentence" ? "sentence" : "phrase";
+  const kind: NotebookKind =
+    rawKind === "sentence"
+      ? "sentence"
+      : rawKind === "distinction"
+      ? "distinction"
+      : "phrase";
+
+  // Distinction doesn't use this form — it needs a word list + freeform,
+  // both of which live on the detail page. If someone lands here with
+  // ?kind=distinction (e.g. an old bookmark), spawn an empty row and
+  // hop straight to its editor. router.replace so the back button
+  // doesn't return them to this dead-end form.
+  useEffect(() => {
+    if (kind !== "distinction") return;
+    const entry = addDistinction();
+    router.replace(`/notebook/distinction/${encodeURIComponent(entry.id)}`);
+  }, [kind, router]);
 
   const [text, setText] = useState("");
   const [note, setNote] = useState("");
@@ -88,6 +105,10 @@ function NewNotebookEntryForm() {
 
   return (
     <div className="mx-auto max-w-2xl space-y-5">
+      {kind === "distinction" ? (
+        <p className="text-sm text-[var(--fg-soft)]">正在创建辨析…</p>
+      ) : (
+        <>
       <header className="space-y-2">
         <div className="flex items-center gap-2 text-xs text-[var(--fg-soft)]">
           <Link href="/notebook" className="hover:text-[var(--accent)]">
@@ -169,6 +190,8 @@ className="w-full resize-none rounded-md border border-[var(--border)] bg-transp
           </button>
         </div>
       </form>
+        </>
+      )}
     </div>
   );
 }

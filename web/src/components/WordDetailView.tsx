@@ -26,6 +26,7 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import AIExamplesPanel from "@/components/AIExamplesPanel";
 import DerivedFormPanel from "@/components/DerivedFormPanel";
+import DistinctionRefs from "@/components/DistinctionRefs";
 import HighlightedSentence from "@/components/HighlightedSentence";
 import NotesPanel from "@/components/NotesPanel";
 import SpeakButton from "@/components/SpeakButton";
@@ -380,6 +381,10 @@ export default function WordDetailView({ slug, from }: Props) {
           onPosChange={handlePosChange}
         />
 
+        {/* 词组辨析 cross-refs — shown 也在 not-found 分支，
+            方便用户从任何单词页跳回已整理的辨析组。 */}
+        <DistinctionRefs word={query} />
+
         {/* 首次入库强制弹窗——不选不能关。fixed 定位不影响外层 flow。 */}
         {purposePromptOpen && (
           <PurposePromptModal
@@ -594,13 +599,16 @@ export default function WordDetailView({ slug, from }: Props) {
         <PhrasesSection phrases={entry.phrases} />
       )}
 
-      {/* AI 例句区（Day 4）—— 围绕用户搜的词（typed），不是字典原形。
+      {/* AI 例句区（Day 4）——围绕用户搜的词（typed），不是字典原形。
           这样 arousal 的例句不会跑到 arouse 的缓存键上去。 */}
       <AIExamplesPanel lemma={typed} senses={entry.senses} />
 
+      {/* 词组辨析 cross-refs — 自动扫描含本词的笔记本“辨析”条目。
+          放在笔记区之上，便于用户看完例句后直接回辨析页回忆对比。 */}
+      <DistinctionRefs word={typed} />
+
       {/* 笔记区（Day 3a）——笔记跟着用户搜的词，与 wordbook 条目的 key 一致。 */}
       <NotesPanel lemma={typed} />
-
       {/* 首次入库强制弹窗：详情页刚把词收进单词本且未选过复习方式时弹出。
           选完才能关——不提供关闭按钮 / ESC / 遨罩关闭，避免用户遗忘分类。 */}
       {purposePromptOpen && (

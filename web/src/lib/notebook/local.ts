@@ -1,9 +1,12 @@
 /**
  * Local-first storage for the "笔记本" (notebook) feature.
  *
- * The notebook holds two kinds of user-authored records:
- *   - "phrase"   → 短语，例如 "take advantage of"
- *   - "sentence" → 完整的句子
+ * The notebook holds three kinds of user-authored records:
+ *   - "phrase"       → 短语，例如 "take advantage of"
+ *   - "sentence"     → 完整的句子
+ *   - "distinction"  → 词义辨析组，例如 "affect / effect / impact"，
+ *                      内含若干个相关的单词条目 + 每条可选的中文解释 +
+ *                      一段自由笔记大框
  *
  * Notebook entries are DELIBERATELY kept separate from the wordbook:
  *   - No 新朋友 / 老朋友 status, no Ebbinghaus level, no daily review queue.
@@ -29,8 +32,19 @@
 const ENTRIES_KEY = "get:notebook:v1";
 const NOTES_KEY = "get:notebook-notes:v1";
 
-export type NotebookKind = "phrase" | "sentence";
+export type NotebookKind = "phrase" | "sentence" | "distinction";
 export type NotebookSource = "manual" | "ai";
+
+/** One entry inside a distinction group. */
+export interface DistinctionWord {
+  /** Stable id so React keys stay steady across edits. */
+  id: string;
+  /** The word itself, e.g. "affect". Free-form — usually a single lemma
+   *  but users can type whatever they like ("in spite of", "so as to"…). */
+  word: string;
+  /** Optional user-authored explanation. Free-form Chinese/English mix. */
+  explanation?: string;
+}
 
 /**
  * The AI payload returned by /api/ai/phrase and cached on the entry.
@@ -65,10 +79,20 @@ export interface NotebookEntry {
   id: string;
   kind: NotebookKind;
   source: NotebookSource;
-  /** Original text (phrase or sentence). Stored verbatim for display. */
+  /** Original text (phrase or sentence). Stored verbatim for display.
+   *  For "distinction" entries this is a DERIVED cache of the joined
+   *  word list (e.g. "affect / effect / impact") so existing list-page
+   *  sorting, search, and cloud-sync merge logic keep working unchanged;
+   *  the source of truth is `words` below. */
   text: string;
   /** Only present when source === "ai". Cached, never re-fetched. */
   ai?: PhraseAIResult;
+  /** Only present when kind === "distinction". The ordered list of words
+   *  the user is comparing, each with an optional explanation. */
+  words?: DistinctionWord[];
+  /** Only present when kind === "distinction". Free-form scratch pad
+   *  shown at the bottom of the distinction detail page. */
+  freeform?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -232,6 +256,97 @@ export function addSentence(text: string): NotebookEntry {
   store[id] = entry;
   writeEntries(store);
   return entry;
+}
+
+// ---------------------------------------------------------------------------
+// distinction helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build the display title for a distinction entry from its word list.
+ * Empty words (user just clicked "add" and hasn't typed) are filtered out
+ * so half-typed rows don't leak into the header / list page. If NOTHING
+ * is filled in yet, returns the empty string — callers render "未命名辨析"
+ * placeholder in that case.
+ */
+export function distinctionTitle(words: DistinctionWord[] | undefined): string {
+  if (!words || words.length === 0) return "";
+  return words
+    .map((w) => w.word.trim())
+    .filter((w) => w.length > 0)
+    .join(" / ");
+}
+
+/**
+ * Create a fresh, empty distinction entry and return it. The user will
+ * populate the words / freeform on the detail page immediately after
+ * being redirected there. We intentionally seed with ONE empty word row
+ * so the detail page's editor renders a usable first input on mount.
+ */
+export function addDistinction(): NotebookEntry {
+  const store = readEntries();
+  const id = makeUuid();
+  const now = new Date().toISOString();
+  const seedWord: DistinctionWord = { id: makeUuid(), word: "" };
+  const entry: NotebookEntry = {
+    id,
+    kind: "distinction",
+    source: "manual",
+    text: "", // derived from words; empty until the user types something
+    words: [seedWord],
+    freeform: "",
+    createdAt: now,
+    updatedAt: now,
+  };
+  store[id] = entry;
+  writeEntries(store);
+  return entry;
+}
+
+/**
+ * Patch a distinction entry. Accepts a partial of the mutable fields
+ * (words / freeform) and always refreshes `text` from the resulting word
+ * list so the list page shows the current title without extra work.
+ * Returns null if the id doesn't exist or points at a non-distinction.
+ */
+export function updateDistinction(
+  id: string,
+  patch: { words?: DistinctionWord[]; freeform?: string },
+): NotebookEntry | null {
+  const store = readEntries();
+  const existing = store[id];
+  if (!existing || existing.kind !== "distinction") return null;
+  const nextWords = patch.words ?? existing.words ?? [];
+  const nextFreeform =
+    patch.freeform !== undefined ? patch.freeform : existing.freeform ?? "";
+  const next: NotebookEntry = {
+    ...existing,
+    words: nextWords,
+    freeform: nextFreeform,
+    text: distinctionTitle(nextWords),
+    updatedAt: new Date().toISOString(),
+  };
+  store[id] = next;
+  writeEntries(store);
+  return next;
+}
+
+/**
+ * Return all distinction entries that contain the given word (case-
+ * insensitive, whitespace-trimmed). Used by <WordDetailView /> to render
+ * the "词组辨析" cross-reference block on a single word's detail page.
+ * Sorted newest-first so the most recently touched group surfaces on top.
+ */
+export function listDistinctionsContaining(word: string): NotebookEntry[] {
+  const needle = word.trim().toLowerCase();
+  if (!needle) return [];
+  const all = Object.values(readEntries()).filter(
+    (e) => e.kind === "distinction",
+  );
+  const matches = all.filter((e) =>
+    (e.words ?? []).some((w) => w.word.trim().toLowerCase() === needle),
+  );
+  return matches.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
 }
 
 /** Overwrite the raw text on an existing entry (both phrase & sentence). */

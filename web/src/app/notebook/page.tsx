@@ -24,6 +24,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import {
+  addDistinction,
   listEntries,
   type NotebookEntry,
   type NotebookKind,
@@ -63,11 +64,13 @@ export default function NotebookPage() {
   const counts = useMemo(() => {
     let phrase = 0;
     let sentence = 0;
+    let distinction = 0;
     for (const e of entries) {
       if (e.kind === "phrase") phrase += 1;
       else if (e.kind === "sentence") sentence += 1;
+      else if (e.kind === "distinction") distinction += 1;
     }
-    return { phrase, sentence };
+    return { phrase, sentence, distinction };
   }, [entries]);
 
   const visible = useMemo(
@@ -75,8 +78,20 @@ export default function NotebookPage() {
     [entries, tab],
   );
 
-  const addLabel = tab === "phrase" ? "记短语" : "记句子";
-  const addHref = `/notebook/new?kind=${tab}`;
+  const addLabel =
+    tab === "phrase" ? "记短语" : tab === "sentence" ? "记句子" : "记辨析";
+  // Phrase / sentence entries are typed on the /notebook/new form first,
+  // then a row is created on submit. Distinction entries are big enough
+  // (word list + freeform) that a lightweight form would just be a
+  // redirect anyway — so we skip it: 记辨析 spawns an empty row and
+  // jumps straight to its detail editor.
+  const addHref =
+    tab === "distinction" ? undefined : `/notebook/new?kind=${tab}`;
+
+  function handleCreateDistinction() {
+    const entry = addDistinction();
+    router.push(`/notebook/distinction/${encodeURIComponent(entry.id)}`);
+  }
 
   return (
     <div className="space-y-5">
@@ -123,6 +138,7 @@ export default function NotebookPage() {
               [
                 { key: "phrase", label: `短语 · ${counts.phrase}` },
                 { key: "sentence", label: `句子 · ${counts.sentence}` },
+                { key: "distinction", label: `辨析 · ${counts.distinction}` },
               ] as const
             ).map((it) => {
               const active = tab === it.key;
@@ -144,13 +160,26 @@ export default function NotebookPage() {
             })}
           </div>
 
-          {/* Add-entry entry point — label follows the current tab. */}
-          <Link
-            href={addHref}
-            className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] px-3 py-1 text-sm text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
-          >
-            ✏️ {addLabel}
-          </Link>
+          {/* Add-entry entry point — label follows the current tab.
+              Distinction uses a plain <button> that creates an empty row
+              inline and jumps to its editor; the other kinds still go
+              through the /notebook/new composer. */}
+          {addHref ? (
+            <Link
+              href={addHref}
+              className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] px-3 py-1 text-sm text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+            >
+              ✏️ {addLabel}
+            </Link>
+          ) : (
+            <button
+              type="button"
+              onClick={handleCreateDistinction}
+              className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] px-3 py-1 text-sm text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+            >
+              ✏️ {addLabel}
+            </button>
+          )}
         </div>
       </header>
 
@@ -158,7 +187,9 @@ export default function NotebookPage() {
         <p className="text-sm text-[var(--fg-soft)]">
           {tab === "phrase"
             ? "还没有记录任何短语。可以在上方搜索短语，或点击「记短语」自己写一条。"
-            : "还没有记录任何句子。点击「记句子」写一条你想记住的话吧。"}
+            : tab === "sentence"
+            ? "还没有记录任何句子。点击「记句子」写一条你想记住的话吧。"
+            : "还没有记录任何词义辨析。点击「记辨析」把容易混淆的一组词整理到一起。"}
         </p>
       ) : (
         <ul className="divide-y divide-[var(--border)] rounded-lg border border-[var(--border)]">
@@ -166,7 +197,15 @@ export default function NotebookPage() {
             const href =
               e.kind === "phrase"
                 ? `/notebook/phrase/${encodeURIComponent(e.id)}`
-                : `/notebook/sentence/${encodeURIComponent(e.id)}`;
+                : e.kind === "sentence"
+                ? `/notebook/sentence/${encodeURIComponent(e.id)}`
+                : `/notebook/distinction/${encodeURIComponent(e.id)}`;
+            // Distinction rows show the derived title; when the user
+            // has just created a row but not typed anything yet, `text`
+            // is an empty string — show a placeholder so the row is
+            // still discoverable and clickable.
+            const displayText =
+              e.kind === "distinction" && !e.text ? "未命名辨析" : e.text;
             return (
               <li key={e.id} className="group">
                 <Link
@@ -178,13 +217,16 @@ export default function NotebookPage() {
                       <span
                         className={[
                           "min-w-0 flex-1 truncate",
-                          e.kind === "phrase"
+                          e.kind === "phrase" || e.kind === "distinction"
                             ? "font-medium"
                             : "text-sm text-[var(--fg)]",
+                          e.kind === "distinction" && !e.text
+                            ? "text-[var(--fg-soft)]"
+                            : "",
                         ].join(" ")}
-                        title={e.text}
+                        title={displayText}
                       >
-                        {e.text}
+                        {displayText}
                       </span>
                       {e.source === "ai" && (
                         <span className="shrink-0 rounded bg-[var(--accent-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--accent)]">
