@@ -52,7 +52,12 @@ function NewNotebookEntryForm() {
   useEffect(() => {
     if (kind !== "distinction") return;
     const entry = addDistinction();
-    router.replace(`/notebook/distinction/${encodeURIComponent(entry.id)}`);
+    // Fresh entry → jump straight into edit mode; the ?edit=1 flag is
+    // read by the detail page so the user can start typing right away
+    // without having to click "修改" first.
+    router.replace(
+      `/notebook/distinction/${encodeURIComponent(entry.id)}?edit=1`,
+    );
   }, [kind, router]);
 
   const [text, setText] = useState("");
