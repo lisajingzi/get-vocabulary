@@ -70,10 +70,21 @@ export interface WordbookEntry {
    *  true = 已标记雅思；undefined/false = 未标记。用来在单词本、详情页和批量导入里
    *  区分“雅思专用”词。 */
   ielts?: boolean;
-  /** IELTS 核心例句 / 短语。为空时详情页会用字典第一个 sense 的例句兜底展示；
-   *  用户在详情页手动编辑后写入此字段，之后所有地方（详情页头部、单词本列表）
-   *  都优先展示此字段。仅在 `ielts === true` 时才会被读取渲染。 */
+  /** 核心例句 / 短语。词条创建时自动从字典抽取默认值（优先短语→例句），
+   *  用户可在详情页手动覆盖，回退到空字符串则不再有值。
+   *  与 ielts 无关：所有词条统一展示。 */
   coreExample?: string;
+  /** 雅思分组名（导入时用户填写）。空/未定义 = 未分组。多个词可共享同一组名，
+   *  同一词多次导入以最后一次为准。 */
+  group?: string;
+  /** 累计复习次数（对/错都 +1）。用作筛选与排序依据。 */
+  reviewCount?: number;
+  /** 累计错误次数（历史错误的总次数，只增不减）。
+   *  用于筛选/排序；即使一个词从错词本移除，errorCount 仍保留原值。 */
+  errorCount?: number;
+  /** 当前是否在错词本内。首次错误 → true；错词本重温复习正确 → false。
+   *  与 errorCount 分离：errorCount 是历史，inWrongBook 是当前状态。 */
+  inWrongBook?: boolean;
 }
 
 /**
@@ -406,9 +417,8 @@ export function setIelts(lemma: string, flag: boolean): WordbookEntry | null {
 }
 
 /**
- * Set the IELTS core example / phrase. Trimmed empty string clears the
- * override (so the UI falls back to the dictionary default). No-op if the
- * lemma isn't in the wordbook yet.
+ * Set the core example / phrase. Trimmed empty string clears the override.
+ * No-op if the lemma isn't in the wordbook yet.
  */
 export function setCoreExample(
   lemma: string,
@@ -424,6 +434,137 @@ export function setCoreExample(
     coreExample: trimmed.length > 0 ? trimmed : undefined,
     lastSeenAt: new Date().toISOString(),
   };
+  store[key] = next;
+  writeStore(store);
+  return next;
+}
+
+/**
+ * Set the IELTS import group name. Empty string clears the group.
+ * No-op if the lemma isn't in the wordbook yet.
+ */
+export function setGroup(
+  lemma: string,
+  group: string,
+): WordbookEntry | null {
+  const key = lemma.toLowerCase().trim();
+  const store = readStore();
+  const existing = store[key];
+  if (!existing) return null;
+  const trimmed = group.trim();
+  const next: WordbookEntry = {
+    ...existing,
+    group: trimmed.length > 0 ? trimmed : undefined,
+    lastSeenAt: new Date().toISOString(),
+  };
+  store[key] = next;
+  writeStore(store);
+  return next;
+}
+
+/**
+ * Record the outcome of a review attempt on stats (reviewCount / errorCount /
+ * inWrongBook), independent from `recordReview()` which handles the
+ * Ebbinghaus level & schedule. This is called AFTER recordReview so both
+ * sets of stats stay in sync.
+ *
+ * Rules (per product spec):
+ *   - reviewCount += 1 always (both pass and fail).
+ *   - fail → errorCount += 1, inWrongBook = true.
+ *   - pass:
+ *       * if opts.fromWrongBook === true (重温错词) → inWrongBook = false;
+ *         errorCount is NOT changed (historical count is immutable).
+ *       * otherwise → inWrongBook untouched, errorCount untouched.
+ */
+export function recordReviewStats(
+  lemma: string,
+  result: "pass" | "fail",
+  opts?: { fromWrongBook?: boolean },
+): WordbookEntry | null {
+  const key = lemma.toLowerCase().trim();
+  const store = readStore();
+  const existing = store[key];
+  if (!existing) return null;
+  const prevReview = existing.reviewCount ?? 0;
+  const prevError = existing.errorCount ?? 0;
+  const prevInWrong = existing.inWrongBook === true;
+  let nextError = prevError;
+  let nextInWrong = prevInWrong;
+  if (result === "fail") {
+    nextError = prevError + 1;
+    nextInWrong = true;
+  } else if (opts?.fromWrongBook) {
+    // Successful re-review from wrong-book → remove from wrong-book.
+    nextInWrong = false;
+  }
+  const next: WordbookEntry = {
+    ...existing,
+    reviewCount: prevReview + 1,
+    errorCount: nextError,
+    inWrongBook: nextInWrong,
+    lastSeenAt: new Date().toISOString(),
+  };
+  store[key] = next;
+  writeStore(store);
+  return next;
+}
+
+/**
+ * One-shot store migration: backfill new fields on legacy rows.
+ * Idempotent — safe to call on every app load.
+ *   - reviewCount → 0 if missing
+ *   - errorCount → 0 if missing
+ *   - inWrongBook → false if missing
+ *  (coreExample is left as-is; the caller is responsible for backfilling
+ *  it from the dictionary at load time, since this module has no dict
+ *  access.)
+ */
+export function migrateEntries(): void {
+  if (typeof window === "undefined") return;
+  const store = readStore();
+  let dirty = false;
+  for (const [key, entry] of Object.entries(store)) {
+    let changed = false;
+    const patched: WordbookEntry = { ...entry };
+    if (patched.reviewCount === undefined) {
+      patched.reviewCount = 0;
+      changed = true;
+    }
+    if (patched.errorCount === undefined) {
+      patched.errorCount = 0;
+      changed = true;
+    }
+    if (patched.inWrongBook === undefined) {
+      patched.inWrongBook = false;
+      changed = true;
+    }
+    if (changed) {
+      store[key] = patched;
+      dirty = true;
+    }
+  }
+  if (dirty) writeStore(store);
+}
+
+/**
+ * Backfill a single entry's coreExample if it's currently empty.
+ * Caller resolves the default text from the dictionary and passes it in.
+ * No-op if the entry doesn't exist or already has a coreExample.
+ */
+export function backfillCoreExample(
+  lemma: string,
+  defaultExample: string,
+): WordbookEntry | null {
+  const trimmed = defaultExample.trim();
+  if (!trimmed) return null;
+  const key = lemma.toLowerCase().trim();
+  const store = readStore();
+  const existing = store[key];
+  if (!existing) return null;
+  if (existing.coreExample && existing.coreExample.trim().length > 0) {
+    return existing;
+  }
+  const next: WordbookEntry = { ...existing, coreExample: trimmed };
   store[key] = next;
   writeStore(store);
   return next;

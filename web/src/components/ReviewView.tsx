@@ -1,33 +1,27 @@
 "use client";
 
 /**
- * <ReviewView /> — the daily Ebbinghaus review flow.
+ * <ReviewView /> — 复习流程重构版。
  *
- * State machine per item:
+ * 用户流：
+ *   1. picker  → 用户选择筛选条件（雅思/非雅思、听说写/阅读、组名、已复习次数、错误次数）
+ *      + 实时显示总数 → 点击「确认」进入方式选择。
+ *   2. mode    → 用户在 识词 / 听写 之间二选一。
+ *   3. review  → 按选择的方式复习每一个词：
+ *      - 识词：先自评「认识 / 忘了」，再展示词义 + 例句 + 笔记 + 二级自评（认识后）
+ *              进入下一题时自动播放；顶部展示 coreExample。
+ *      - 听写：听音 → 拼写；进入题目时自动播放；提交后展示词义 + 例句 + 笔记。
+ *   4. done    → 完成态。
  *
- *   loading   →   quiz   ─pass─→   compose   ─grade ok─→   advance(pass)
- *                  │                                   ╲
- *                  └─fail (retry until correct)         ─grade not ok─→ stays in compose
+ * 错词本模式（通过 URL ?mode=wrongbook 进入）：
+ *   - 跳过 picker，直接把词范围锁定为 entry.inWrongBook === true 的全部词，
+ *     进入 mode → review → done。
+ *   - 每次结果调用 recordReviewStats(..., { fromWrongBook: true })：
+ *       * 复习正确 → inWrongBook = false，errorCount 不变；
+ *       * 复习错误 → inWrongBook 保持 true，errorCount += 1。
  *
- *              or
- *
- *   loading   →   spell  ─pass─→   compose   ─…
- *                  │
- *                  └─fail (retry until correct, marks failedOnce)
- *
- * The `spell` phase kicks in when the offline WordNet table has no usable
- * synonym for the target lemma — rather than showing dubious "synonyms"
- * we test recall via spelling. The user hears the word, types it, and
- * we advance on an exact match.
- *
- *   advance(pass) writes recordReview('pass'), bumps level, schedules next due,
- *   then moves to the next queue entry. If the queue is empty we land on
- *   the "done" screen.
- *
- *   advance(fail) only fires when the user couldn't pick the right synonym
- *   (or spell the target). The "lose a level" event happens once per item,
- *   regardless of how many wrong attempts they made — that matches the
- *   user's brief: "失败一次退回一级".
+ * 打卡：每次复习结果（对/错）都记录到 review-log（`recordReviewEvent`），
+ *      当天累计 > 0 → 触发 recordPunchToday()。这样错词本重温也算打卡。
  */
 
 import Link from "next/link";
@@ -35,383 +29,197 @@ import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   listEntries,
+  listNotes,
   recordReview,
+  recordReviewStats,
   type WordbookEntry,
 } from "@/lib/wordbook/local";
 import { MAX_LEVEL } from "@/lib/wordbook/scheduler";
-import { getTodaySnapshot } from "@/lib/wordbook/daily-snapshot";
 import { recordPunchToday } from "@/lib/wordbook/punches";
-import {
-  buildSynonymQuestion,
-  type SynonymQuestion,
-} from "@/lib/wordbook/synonyms";
+import { recordReviewEvent } from "@/lib/wordbook/review-log";
 import SpeakButton from "@/components/SpeakButton";
-import {
-  AIErrorNotice,
-  AIUsageNote,
-  parseAIErrorAttempts,
-  type AIAttempt,
-} from "@/components/AIStatus";
 
-/**
- * 复习分组。
- *   - "active"  → 听说写组（entry.purpose === "active" 或未设置的老数据）
- *   - "passive" → 阅读组（entry.purpose === "passive"）
- *   - "all"    → 两组混合
- * 通过 URL ?group=active|passive|all 传入；不传或值非法时进入组选择界面。
- */
-export type ReviewGroup = "all" | "active" | "passive";
+/** 复习方式：识词 = 看到词判断是否认识 + 展开例句/笔记；听写 = 听音拼写。 */
+export type ReviewMode = "recognize" | "spell";
 
-function parseGroup(v: string | null | undefined): ReviewGroup | null {
-  if (v === "active" || v === "passive" || v === "all") return v;
-  return null;
+/** 筛选：雅思 / 非雅思 / 全部（必选，默认 all）。 */
+type IeltsFilter = "all" | "ielts" | "nonielts";
+/** 筛选：听说写 / 阅读 / 全部（必选，默认 all）。 */
+type PurposeFilter = "all" | "active" | "passive";
+
+interface FilterState {
+  ielts: IeltsFilter;
+  purpose: PurposeFilter;
+  /** 仅当 ielts === "ielts" 时展示。空数组 = 不限；否则要求 entry.group ∈ 该集合。 */
+  groups: string[];
+  /** 已复习次数（可多选具体数值）。空数组 = 不限。 */
+  reviewCounts: number[];
+  /** 错误次数（可多选具体数值）。空数组 = 不限。 */
+  errorCounts: number[];
 }
 
-function groupLabel(g: ReviewGroup): string {
-  return g === "active" ? "听说写" : g === "passive" ? "阅读" : "全部";
-}
+const emptyFilter: FilterState = {
+  ielts: "all",
+  purpose: "all",
+  groups: [],
+  reviewCounts: [],
+  errorCounts: [],
+};
 
 type Phase =
-  | { kind: "loading" }
-  | { kind: "picker"; activeCount: number; passiveCount: number }
-  | { kind: "empty" }
-  | { kind: "quiz"; q: SynonymQuestion; failedOnce: boolean }
-  | { kind: "spell"; target: string; failedOnce: boolean }
+  | { kind: "picker" }
+  | { kind: "mode-picker"; entries: WordbookEntry[] }
   | {
-      kind: "recognize";
-      target: string;
-      /** 一级自评：用户看到词形时的 “认识 / 忘了”。仅当 graded === "pass"
-       *  时，用户才会看到释义 + 例句，然后进入二级自评（记对了/记错了）。
-       *  graded === "fail" 直接展示释义作为学习材料，然后 fail advance。 */
-      graded: "pass" | "fail" | null;
-      /** 二级自评：仅当 graded === "pass" 时有意义。
-       *   - "pass"（记对了）→ 最终 advance("pass")
-       *   - "fail"（记错了）→ 最终 advance("fail")
-       *  graded === "fail" 时永远为 null（直接失败，不需要二次确认）。 */
-      confirmed: "pass" | "fail" | null;
-    }
-  | {
-      kind: "compose";
-      target: string;
-      prompt: SynonymQuestion["prompt"];
-      failedOnce: boolean;
+      kind: "review";
+      queue: WordbookEntry[];
+      cursor: number;
+      mode: ReviewMode;
+      fromWrongBook: boolean;
     }
   | { kind: "done"; finished: number; total: number };
 
-interface CorrectionResult {
-  ok: boolean;
-  recommended: string;
-  recommendedAlt?: string;
-  segments: Array<{ text: string; wrong?: boolean; fix?: string }>;
-  diagnosis: string[];
-  /**
-   * Track-B style suggestions (NOT errors). These are idiomatic upgrades
-   * offered even when the sentence is examiner-correct, and they never
-   * flip `ok` to false. Rendered in a separate, visually neutral zone
-   * so the learner never confuses "more natural" with "wrong".
-   */
-  suggestions?: Array<{ text: string; reason: string }>;
-  distinction?: string;
-  /** Which model in the fallback chain actually produced this result. */
-  model?: string;
-  /** Token usage reported by the model for this call. Ephemeral — surfaced
-   *  in a small footnote and never persisted. */
-  usage?: { input: number; output: number; total: number };
+function isWrongBookMode(v: string | null | undefined): boolean {
+  return v === "wrongbook";
 }
 
 export default function ReviewView() {
   const searchParams = useSearchParams();
-  const initialGroup = useMemo(
-    () => parseGroup(searchParams?.get("group") ?? null),
+  const wrongBookMode = useMemo(
+    () => isWrongBookMode(searchParams?.get("mode") ?? null),
     [searchParams],
   );
-  // null 表示尚未选择分组（走组选择界面）；一旦用户在选择器里点选或
-  // URL 已经带了 ?group=xxx，就固定住这一次复习会话的分组。
-  const [group, setGroup] = useState<ReviewGroup | null>(initialGroup);
-  const [queue, setQueue] = useState<WordbookEntry[]>([]);
-  const [cursor, setCursor] = useState(0);
-  const [phase, setPhase] = useState<Phase>({ kind: "loading" });
 
-  // ----- bootstrap: build today's queue whenever the chosen group changes --
-  //
-  // Runs on mount and every time the user picks / switches a group. If no
-  // group is chosen yet we compute per-group counts from today's snapshot
-  // and show the picker (short-circuited to auto-pick when only one side
-  // has anything to review — no point asking "which group?" when there's
-  // just one).
+  const [phase, setPhase] = useState<Phase>({ kind: "picker" });
+
+  // 错词本模式：直接跳过 picker，把 inWrongBook === true 的词全部塞进去，
+  // 进入方式选择。
   useEffect(() => {
-    // The home page froze a "today's queue" snapshot the first time it
-    // rendered (or here, whichever happened first). We rebuild the queue
-    // by intersecting that snapshot with the current entry state so that:
-    //   - already-reviewed-today cards are skipped
-    //   - cards moved to 老朋友 / archived during the day are dropped
-    //   - new lookups added later today are NOT reviewed today (→ tomorrow)
-    function localDayKey(d: Date): string {
-      const y = d.getFullYear();
-      const m = String(d.getMonth() + 1).padStart(2, "0");
-      const day = String(d.getDate()).padStart(2, "0");
-      return `${y}-${m}-${day}`;
-    }
-    const now = new Date();
-    const todayKey = localDayKey(now);
-    const snapshot = getTodaySnapshot(now);
-    const byLemma = new Map<string, WordbookEntry>();
-    for (const e of listEntries()) byLemma.set(e.lemma, e);
-    // Collect all still-due entries first, then partition by purpose so we
-    // can (a) count each side for the picker and (b) slice the visible
-    // queue by whichever group the user chose.
-    const allDue: WordbookEntry[] = [];
-    snapshot.forEach((lemma) => {
-      const e = byLemma.get(lemma);
-      if (!e) return;
-      if (e.status !== "new") return;
-      if (e.level >= MAX_LEVEL) return;
-      if (
-        e.lastReviewedAt &&
-        localDayKey(new Date(e.lastReviewedAt)) === todayKey
-      ) {
-        return;
-      }
-      allDue.push(e);
-    });
-    const isPassive = (e: WordbookEntry) => e.purpose === "passive";
-    const activeCount = allDue.filter((e) => !isPassive(e)).length;
-    const passiveCount = allDue.filter(isPassive).length;
+    if (!wrongBookMode) return;
+    const wrong = listEntries().filter((e) => e.inWrongBook === true);
+    setPhase({ kind: "mode-picker", entries: wrong });
+  }, [wrongBookMode]);
 
-    // No group chosen yet → decide whether to auto-pick or show picker.
-    if (group === null) {
-      if (activeCount === 0 && passiveCount === 0) {
-        setQueue([]);
-        setPhase({ kind: "empty" });
-        return;
-      }
-      // Only one side has words → skip the picker, jump straight in.
-      if (activeCount > 0 && passiveCount === 0) {
-        setGroup("active");
-        return;
-      }
-      if (passiveCount > 0 && activeCount === 0) {
-        setGroup("passive");
-        return;
-      }
-      // Both sides have words → let the user choose.
-      setPhase({ kind: "picker", activeCount, passiveCount });
-      return;
-    }
-
-    const due = allDue.filter((e) => {
-      if (group === "active") return !isPassive(e);
-      if (group === "passive") return isPassive(e);
-      return true;
-    });
-    // Stable order: oldest lastSeenAt first, mirrors pickDailyQueue's order
-    // so the user gets the same sequence whether they entered from snapshot
-    // or freshly computed queue.
-    due.sort((a, b) => (a.lastSeenAt < b.lastSeenAt ? -1 : 1));
-    setQueue(due);
-    setCursor(0);
-    if (due.length === 0) {
-      setPhase({ kind: "empty" });
-    }
-  }, [group]);
-
-  // ----- whenever cursor moves to a new in-bounds item, build its quiz ----
-  const buildQuestion = useCallback(async (item: WordbookEntry, failedOnce: boolean) => {
-    setPhase({ kind: "loading" });
-    // 阅读词（purpose === "passive")走轻量识记流程：看词形 → 自评
-    // "认识 / 忘了" → 揭示释义 → 下一题。不轰 quiz、不拼写、不造句。
-    if (item.purpose === "passive") {
-      setPhase({
-        kind: "recognize",
-        target: item.lemma,
-        graded: null,
-        confirmed: null,
-      });
-      return;
-    }
-    const q = await buildSynonymQuestion(item.lemma);
-    if (!q) {
-      // Offline synonym table has nothing usable for this lemma — typically
-      // a concrete noun ("quarry", "anvil") or a rare adjective. Instead
-      // of teaching the user a fake "synonym", we test recall via spelling.
-      setPhase({ kind: "spell", target: item.lemma, failedOnce });
-      return;
-    }
-    setPhase({ kind: "quiz", q, failedOnce });
-  }, []);
-
-  useEffect(() => {
-    if (queue.length === 0) return;
-    if (cursor >= queue.length) {
-      // Queue cleared — record the punch-in for today (idempotent).
-      recordPunchToday();
-      setPhase({ kind: "done", finished: queue.length, total: queue.length });
-      return;
-    }
-    const item = queue[cursor];
-    void buildQuestion(item, false);
-  }, [cursor, queue, buildQuestion]);
-
-  // ----- advance helper: persist outcome + step the cursor ----------------
   const advance = useCallback(
     (result: "pass" | "fail") => {
-      if (queue.length === 0) return;
-      const item = queue[cursor];
-      if (item) recordReview(item.lemma, result);
-      setCursor((c) => c + 1);
+      setPhase((prev) => {
+        if (prev.kind !== "review") return prev;
+        const item = prev.queue[prev.cursor];
+        if (item) {
+          // 1) 艾宾浩斯曲线：level 增减 + nextReviewAt 更新。
+          recordReview(item.lemma, result);
+          // 2) 统计字段：reviewCount / errorCount / inWrongBook。
+          recordReviewStats(item.lemma, result, {
+            fromWrongBook: prev.fromWrongBook,
+          });
+          // 3) 打卡日志：+1；触发当日 punch。
+          recordReviewEvent();
+          recordPunchToday();
+        }
+        const nextCursor = prev.cursor + 1;
+        if (nextCursor >= prev.queue.length) {
+          return { kind: "done", finished: prev.queue.length, total: prev.queue.length };
+        }
+        return { ...prev, cursor: nextCursor };
+      });
     },
-    [queue, cursor],
+    [],
   );
 
-  // ---- render ------------------------------------------------------------
-
-  if (phase.kind === "loading") {
-    return (
-      <div className="space-y-4">
-        <ReviewTopBar />
-        <ReviewSkeleton />
-      </div>
-    );
-  }
   if (phase.kind === "picker") {
     return (
       <div className="space-y-4">
-        <ReviewTopBar />
-        <GroupPicker
-          activeCount={phase.activeCount}
-          passiveCount={phase.passiveCount}
-          onPick={(g) => setGroup(g)}
-        />
-      </div>
-    );
-  }
-  if (phase.kind === "empty") {
-    return (
-      <div className="space-y-4">
-        <ReviewTopBar />
-        <EmptyState group={group} onReset={() => setGroup(null)} />
-      </div>
-    );
-  }
-  if (phase.kind === "done") {
-    return (
-      <div className="space-y-4">
-        <ReviewTopBar />
-        <DoneState
-          finished={phase.finished}
-          total={phase.total}
-          group={group}
-          onReset={() => setGroup(null)}
+        <ReviewTopBar wrongBook={wrongBookMode} />
+        <FilterPicker
+          onConfirm={(entries) =>
+            entries.length === 0
+              ? setPhase({ kind: "done", finished: 0, total: 0 })
+              : setPhase({ kind: "mode-picker", entries })
+          }
         />
       </div>
     );
   }
 
+  if (phase.kind === "mode-picker") {
+    return (
+      <div className="space-y-4">
+        <ReviewTopBar wrongBook={wrongBookMode} />
+        <ModePicker
+          total={phase.entries.length}
+          wrongBook={wrongBookMode}
+          onPick={(mode) =>
+            phase.entries.length === 0
+              ? setPhase({ kind: "done", finished: 0, total: 0 })
+              : setPhase({
+                  kind: "review",
+                  queue: phase.entries,
+                  cursor: 0,
+                  mode,
+                  fromWrongBook: wrongBookMode,
+                })
+          }
+          onBack={() =>
+            wrongBookMode
+              ? setPhase({ kind: "done", finished: 0, total: 0 })
+              : setPhase({ kind: "picker" })
+          }
+        />
+      </div>
+    );
+  }
+
+  if (phase.kind === "done") {
+    return (
+      <div className="space-y-4">
+        <ReviewTopBar wrongBook={wrongBookMode} />
+        <DoneState
+          finished={phase.finished}
+          total={phase.total}
+          onReset={() =>
+            wrongBookMode
+              ? // 错词本模式退出到错词本首页
+                (window.location.href = "/wrongbook")
+              : setPhase({ kind: "picker" })
+          }
+        />
+      </div>
+    );
+  }
+
+  // review
+  const item = phase.queue[phase.cursor];
   return (
     <div className="space-y-4">
-      <ReviewTopBar />
-      {group && (
-        <GroupBadge group={group} onSwitch={() => setGroup(null)} />
-      )}
-      <ProgressBar current={cursor + 1} total={queue.length} />
-      {phase.kind === "quiz" && (
-        <QuizPanel
-          q={phase.q}
-          failedOnce={phase.failedOnce}
-          onCorrect={() =>
-            setPhase({
-              kind: "compose",
-              target: phase.q.target,
-              prompt: phase.q.prompt,
-              failedOnce: phase.failedOnce,
-            })
-          }
-          onWrong={() =>
-            setPhase({ kind: "quiz", q: phase.q, failedOnce: true })
-          }
-        />
-      )}
-      {phase.kind === "spell" && (
-        <SpellPanel
-          target={phase.target}
-          failedOnce={phase.failedOnce}
-          onCorrect={() =>
-            setPhase({
-              kind: "compose",
-              target: phase.target,
-              // We deliberately don't pass a Chinese gloss into the compose
-              // step: showing it turns composing-with-the-word into a
-              // translation exercise. ComposePanel already handles this.
-              prompt: { def: undefined, chn: undefined, pos: undefined },
-              failedOnce: phase.failedOnce,
-            })
-          }
-          onWrong={() =>
-            setPhase({
-              kind: "spell",
-              target: phase.target,
-              failedOnce: true,
-            })
-          }
-        />
-      )}
-      {phase.kind === "recognize" && (
-        <RecognizePanel
-          target={phase.target}
-          graded={phase.graded}
-          confirmed={phase.confirmed}
-          onGrade={(g) =>
-            setPhase({
-              kind: "recognize",
-              target: phase.target,
-              graded: g,
-              // 切换一级自评时清空二级自评，避免残留。
-              confirmed: null,
-            })
-          }
-          onConfirm={(c) =>
-            setPhase({
-              kind: "recognize",
-              target: phase.target,
-              graded: phase.graded,
-              confirmed: c,
-            })
-          }
-          onNext={() => {
-            // 最终 pass 判定：一级 认识 + 二级 记对了。
-            // 其余（忘了 / 认识-记错了）都算 fail。
-            const finalPass =
-              phase.graded === "pass" && phase.confirmed === "pass";
-            advance(finalPass ? "pass" : "fail");
-          }}
-        />
-      )}
-      {phase.kind === "compose" && (
-        <ComposePanel
-          target={phase.target}
-          prompt={phase.prompt}
-          failedOnce={phase.failedOnce}
-          onAccepted={() => advance(phase.failedOnce ? "fail" : "pass")}
-        />
+      <ReviewTopBar wrongBook={wrongBookMode} />
+      <ProgressBar current={phase.cursor + 1} total={phase.queue.length} />
+      {phase.mode === "recognize" ? (
+        <RecognizeCard key={item.lemma} entry={item} onAdvance={advance} />
+      ) : (
+        <SpellCard key={item.lemma} entry={item} onAdvance={advance} />
       )}
     </div>
   );
 }
 
 // ===========================================================================
-// Sub-components
+// TopBar / Progress / Done
 // ===========================================================================
 
-function ReviewTopBar() {
+function ReviewTopBar({ wrongBook }: { wrongBook: boolean }) {
   return (
-    <div className="flex justify-start">
+    <div className="flex items-center justify-between">
       <Link
-        href="/"
+        href={wrongBook ? "/wrongbook" : "/"}
         className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] bg-[var(--bg)] px-3 py-1.5 text-xs text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--fg)]"
       >
         <span aria-hidden>←</span>
-        返回首页
+        {wrongBook ? "返回错词本" : "返回首页"}
       </Link>
+      {wrongBook && (
+        <span className="rounded-full border border-red-300 bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-500">
+          重温错词
+        </span>
+      )}
     </div>
   );
 }
@@ -436,279 +244,432 @@ function ProgressBar({ current, total }: { current: number; total: number }) {
   );
 }
 
-/**
- * Spelling-recall panel. Rendered when the offline synonym table has no
- * usable entry for the target lemma, so the near-synonym multiple-choice
- * quiz can't be constructed. The user hears the word (via <SpeakButton />)
- * and types it back.
- *
- * Design decisions:
- *   - The prompt intentionally does NOT display the Chinese gloss (per
- *     spec: "拼写题的题干不要显示中文释义"). The audio is the only cue,
- *     matching how the user actually needs to recall the word in the wild.
- *   - Comparison is case-insensitive and whitespace-trimmed, but otherwise
- *     exact — no fuzzy match, no first-letter hints. Getting close doesn't
- *     count. This is a recall test.
- *   - On wrong answers we surface the correct spelling AND the target's
- *     Chinese gloss (safe now — the recall attempt is over) so the user
- *     still learns something before advancing.
- *   - The compose step that follows does the real "prove you understand
- *     the meaning" work, so a wrong spelling here just means they see the
- *     word first and then compose with it.
- */
-function SpellPanel({
-  target,
-  failedOnce,
-  onCorrect,
-  onWrong,
+function DoneState({
+  finished,
+  total,
+  onReset,
 }: {
-  target: string;
-  failedOnce: boolean;
-  onCorrect: () => void;
-  onWrong: () => void;
+  finished: number;
+  total: number;
+  onReset: () => void;
 }) {
-  const [draft, setDraft] = useState("");
-  const [feedback, setFeedback] = useState<
-    "right" | "wrong" | "revealed" | null
-  >(null);
-  const [gloss, setGloss] = useState<{
-    pos?: string;
-    def?: string;
-    chn?: string;
-  } | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  return (
+    <div className="space-y-3 rounded-xl border border-[var(--border)] p-6 text-center">
+      <p className="text-2xl">🎉</p>
+      <p className="text-base font-medium">
+        {total === 0
+          ? "没有符合条件的单词"
+          : `本次 ${finished} / ${total} 个单词已完成`}
+      </p>
+      <p className="text-sm text-[var(--fg-soft)]">
+        <button
+          type="button"
+          onClick={onReset}
+          className="text-[var(--accent)] hover:underline"
+        >
+          再来一次
+        </button>
+        ，或者
+        <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
+          回首页
+        </Link>
+        看看打卡日历。
+      </p>
+    </div>
+  );
+}
 
-  // Reset every time the target changes (retry after wrong answer, or the
-  // outer queue moves us to a new lemma).
+// ===========================================================================
+// Filter Picker
+// ===========================================================================
+
+function FilterPicker({
+  onConfirm,
+}: {
+  onConfirm: (entries: WordbookEntry[]) => void;
+}) {
+  const [allEntries, setAllEntries] = useState<WordbookEntry[]>([]);
+  const [filter, setFilter] = useState<FilterState>(emptyFilter);
+
   useEffect(() => {
-    setDraft("");
-    setFeedback(null);
-    setGloss(null);
-    inputRef.current?.focus();
-  }, [target]);
+    setAllEntries(listEntries());
+  }, []);
 
-  // Lazy-load the gloss for the "you got it wrong" and "you got it right"
-  // reveal panels. Cheap: `lookup` is memoised at the shard level.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const { lookup } = await import("@/lib/dict");
-      const got = await lookup(target);
-      if (cancelled) return;
-      const s = got?.entry.senses?.[0];
-      setGloss(s ? { pos: s.pos, def: s.def, chn: s.chn } : null);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [target]);
-
-  function submit() {
-    const guess = draft.trim().toLowerCase();
-    if (!guess) return;
-    if (guess === target.toLowerCase()) {
-      setFeedback("right");
-    } else {
-      setFeedback("wrong");
-      onWrong();
+  // 派生：候选的组名（仅雅思词）、复习次数集合、错误次数集合。
+  const allGroups = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of allEntries) {
+      if (e.ielts !== true) continue;
+      if (e.group && e.group.trim().length > 0) set.add(e.group);
     }
-  }
+    return Array.from(set).sort();
+  }, [allEntries]);
 
-  function giveUp() {
-    // "我不会" — user surrenders. Book it as a wrong answer (same effect as
-    // typing the wrong spelling) and reveal the correct word + gloss. No
-    // retry offered; the only forward path is "下一步" into compose.
-    setFeedback("revealed");
-    onWrong();
-  }
+  const allReviewCounts = useMemo(() => {
+    const set = new Set<number>();
+    for (const e of allEntries) set.add(e.reviewCount ?? 0);
+    return Array.from(set).sort((a, b) => a - b);
+  }, [allEntries]);
 
-  function retry() {
-    setDraft("");
-    setFeedback(null);
-    inputRef.current?.focus();
+  const allErrorCounts = useMemo(() => {
+    const set = new Set<number>();
+    for (const e of allEntries) set.add(e.errorCount ?? 0);
+    return Array.from(set).sort((a, b) => a - b);
+  }, [allEntries]);
+
+  // 应用筛选：命中的词条列表 + 总数（复习范围仅限还没毕业的 new 词）。
+  const matched = useMemo(() => {
+    return allEntries.filter((e) => {
+      if (e.status !== "new") return false;
+      if (e.level >= MAX_LEVEL) return false;
+      if (filter.ielts === "ielts" && e.ielts !== true) return false;
+      if (filter.ielts === "nonielts" && e.ielts === true) return false;
+      if (filter.purpose !== "all") {
+        const actual = e.purpose ?? "active";
+        if (actual !== filter.purpose) return false;
+      }
+      if (filter.ielts === "ielts" && filter.groups.length > 0) {
+        if (!e.group || !filter.groups.includes(e.group)) return false;
+      }
+      if (filter.reviewCounts.length > 0) {
+        if (!filter.reviewCounts.includes(e.reviewCount ?? 0)) return false;
+      }
+      if (filter.errorCounts.length > 0) {
+        if (!filter.errorCounts.includes(e.errorCount ?? 0)) return false;
+      }
+      return true;
+    });
+  }, [allEntries, filter]);
+
+  function toggle<T>(arr: T[], v: T): T[] {
+    return arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v];
   }
 
   return (
-    <section className="space-y-4 rounded-xl border border-[var(--border)] p-4">
+    <section className="space-y-5 rounded-xl border border-[var(--border)] p-5">
       <header className="space-y-1">
-        <div className="flex items-center gap-2">
-          <h2 className="text-2xl font-semibold tracking-tight">
-            <span aria-hidden>＿＿＿＿</span>
-          </h2>
-          <SpeakButton text={target} variant="us" />
-        </div>
-        <p className="pt-2 text-xs text-[var(--fg-soft)]">
-          请听音后拼写出这个单词：
+        <h2 className="text-base font-semibold tracking-tight">选择复习内容</h2>
+        <p className="text-xs text-[var(--fg-soft)]">
+          先选类型再选方式；下方会实时计算命中的单词总数。
         </p>
       </header>
 
-      <div className="flex items-center gap-2">
-        <input
-          ref={inputRef}
-          type="text"
-          autoComplete="off"
-          autoCorrect="off"
-          autoCapitalize="none"
-          spellCheck={false}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              e.preventDefault();
-              if (feedback === "right" || feedback === "revealed") onCorrect();
-              else if (feedback === "wrong") retry();
-              else submit();
-            }
-          }}
-          disabled={feedback === "right" || feedback === "revealed"}
-          placeholder="在此输入…"
-          className="flex-1 rounded-md border border-[var(--border)] bg-transparent px-3 py-2 text-base outline-none focus:border-[var(--accent)] disabled:opacity-60"
-        />
-        {feedback === "right" || feedback === "revealed" ? (
-          <button
-            type="button"
-            onClick={onCorrect}
-            className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-2 text-xs text-white transition hover:opacity-90"
-          >
-            下一步 →
-          </button>
-        ) : feedback === "wrong" ? (
-          <button
-            type="button"
-            onClick={retry}
-            className="rounded-md border border-[var(--border)] px-3 py-2 text-xs transition hover:border-[var(--accent)]"
-          >
-            再试一次
-          </button>
-        ) : (
-          <>
-            <button
-              type="button"
-              onClick={submit}
-              disabled={!draft.trim()}
-              className="rounded-md border border-[var(--border)] px-3 py-2 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              提交
-            </button>
-            <button
-              type="button"
-              onClick={giveUp}
-              title="放弃本题，直接查看答案（本题会记为失败）"
-              className="rounded-md border border-[var(--border)] px-3 py-2 text-xs text-[var(--fg-soft)] transition hover:border-red-400 hover:text-red-500"
-            >
-              我不会
-            </button>
-          </>
-        )}
+      {/* 雅思 / 非雅思 —— 必选组 */}
+      <div className="space-y-1.5">
+        <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+          雅思归属（必选）
+        </p>
+        <div
+          className="inline-flex rounded-md border border-[var(--border)] p-0.5"
+          role="radiogroup"
+        >
+          {(
+            [
+              { key: "all", label: "全部" },
+              { key: "ielts", label: "雅思" },
+              { key: "nonielts", label: "非雅思" },
+            ] as const
+          ).map((it) => {
+            const active = filter.ielts === it.key;
+            return (
+              <button
+                key={it.key}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() =>
+                  setFilter((f) => ({
+                    ...f,
+                    ielts: it.key,
+                    // 切换到非雅思时清空组名筛选。
+                    groups: it.key === "ielts" ? f.groups : [],
+                  }))
+                }
+                className={[
+                  "rounded px-2.5 py-1 text-xs transition",
+                  active
+                    ? "bg-[var(--accent)] text-white"
+                    : "text-[var(--fg-soft)] hover:text-[var(--fg)]",
+                ].join(" ")}
+              >
+                {it.label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
-      {feedback === "wrong" && (
-        <div className="space-y-1.5 rounded-lg border border-red-200 bg-red-50/60 p-3 text-sm dark:border-red-900/40 dark:bg-red-950/20">
-          <p className="text-xs font-medium text-red-500">拼写不对，再试一次。</p>
-          <p className="text-xs text-[var(--fg-soft)]">
-            提示：仔细再听一遍读音。
-          </p>
+      {/* 复习方式（听说写 / 阅读）—— 必选 */}
+      <div className="space-y-1.5">
+        <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+          学习方式（必选）
+        </p>
+        <div
+          className="inline-flex rounded-md border border-[var(--border)] p-0.5"
+          role="radiogroup"
+        >
+          {(
+            [
+              { key: "all", label: "全部" },
+              { key: "active", label: "听说写" },
+              { key: "passive", label: "阅读" },
+            ] as const
+          ).map((it) => {
+            const active = filter.purpose === it.key;
+            return (
+              <button
+                key={it.key}
+                type="button"
+                role="radio"
+                aria-checked={active}
+                onClick={() => setFilter((f) => ({ ...f, purpose: it.key }))}
+                className={[
+                  "rounded px-2.5 py-1 text-xs transition",
+                  active
+                    ? "bg-[var(--accent)] text-white"
+                    : "text-[var(--fg-soft)] hover:text-[var(--fg)]",
+                ].join(" ")}
+              >
+                {it.label}
+              </button>
+            );
+          })}
         </div>
-      )}
+      </div>
 
-      {feedback === "revealed" && (
-        <div className="space-y-2 rounded-lg border border-red-200 bg-red-50/60 p-3 text-sm dark:border-red-900/40 dark:bg-red-950/20">
-          <p className="text-xs font-medium text-red-500">
-            本题记为失败。正确答案：
+      {/* 雅思组名 —— 仅在 ielts === "ielts" 时展示；多选 */}
+      {filter.ielts === "ielts" && allGroups.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+            雅思组名（多选，留空 = 全部组）
           </p>
-          <div className="space-y-0.5">
-            <div className="flex items-baseline gap-2">
-              <span className="text-base font-semibold">{target}</span>
-              {gloss?.pos && (
-                <span className="text-[10px] text-[var(--fg-soft)]">
-                  ({gloss.pos})
-                </span>
-              )}
-            </div>
-            {gloss?.def && (
-              <p className="text-xs text-[var(--fg)]">{gloss.def}</p>
-            )}
-            {gloss?.chn && (
-              <p className="text-xs text-[var(--fg-soft)]">{gloss.chn}</p>
-            )}
+          <div className="flex flex-wrap gap-1.5">
+            {allGroups.map((g) => {
+              const active = filter.groups.includes(g);
+              return (
+                <button
+                  key={g}
+                  type="button"
+                  onClick={() =>
+                    setFilter((f) => ({ ...f, groups: toggle(f.groups, g) }))
+                  }
+                  className={[
+                    "rounded-full border px-2.5 py-0.5 text-[11px] transition",
+                    active
+                      ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                      : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--fg-soft)] hover:text-[var(--fg)]",
+                  ].join(" ")}
+                >
+                  {g}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
 
-      {feedback === "right" && (
-        <div className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--bg-soft)]/50 p-3 text-sm">
-          <p className="text-xs font-medium text-[var(--accent)]">
-            拼写正确
-            {failedOnce ? "（本题之前错过一次，本次将算作失败）" : ""}！
+      {/* 已复习次数（可多选具体值）*/}
+      {allReviewCounts.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+            已复习次数（多选，留空 = 不限）
           </p>
-          <div className="space-y-0.5">
-            <div className="flex items-baseline gap-2">
-              <span className="text-base font-semibold">{target}</span>
-              {gloss?.pos && (
-                <span className="text-[10px] text-[var(--fg-soft)]">
-                  ({gloss.pos})
-                </span>
-              )}
-            </div>
-            {gloss?.def && (
-              <p className="text-xs text-[var(--fg)]">{gloss.def}</p>
-            )}
-            {gloss?.chn && (
-              <p className="text-xs text-[var(--fg-soft)]">{gloss.chn}</p>
-            )}
+          <div className="flex flex-wrap gap-1.5">
+            {allReviewCounts.map((n) => {
+              const active = filter.reviewCounts.includes(n);
+              return (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() =>
+                    setFilter((f) => ({
+                      ...f,
+                      reviewCounts: toggle(f.reviewCounts, n),
+                    }))
+                  }
+                  className={[
+                    "rounded-full border px-2.5 py-0.5 text-[11px] tabular-nums transition",
+                    active
+                      ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                      : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--fg-soft)] hover:text-[var(--fg)]",
+                  ].join(" ")}
+                >
+                  {n}
+                </button>
+              );
+            })}
           </div>
         </div>
       )}
+
+      {/* 错误次数（可多选具体值）*/}
+      {allErrorCounts.length > 0 && (
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+            错误次数（多选，留空 = 不限）
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {allErrorCounts.map((n) => {
+              const active = filter.errorCounts.includes(n);
+              return (
+                <button
+                  key={n}
+                  type="button"
+                  onClick={() =>
+                    setFilter((f) => ({
+                      ...f,
+                      errorCounts: toggle(f.errorCounts, n),
+                    }))
+                  }
+                  className={[
+                    "rounded-full border px-2.5 py-0.5 text-[11px] tabular-nums transition",
+                    active
+                      ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                      : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--fg-soft)] hover:text-[var(--fg)]",
+                  ].join(" ")}
+                >
+                  {n}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* 汇总 & 确认按钮 */}
+      <div className="flex items-center justify-between gap-3 border-t border-[var(--border)] pt-4">
+        <p className="text-sm">
+          <span className="text-[var(--fg-soft)]">符合条件的单词：</span>
+          <span className="font-semibold text-[var(--fg)] tabular-nums">
+            {matched.length}
+          </span>
+          <span className="ml-0.5 text-[var(--fg-soft)]">个</span>
+        </p>
+        <button
+          type="button"
+          onClick={() => onConfirm(matched)}
+          disabled={matched.length === 0}
+          className="rounded-md bg-[var(--accent)] px-4 py-1.5 text-sm font-medium text-white transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          确认 →
+        </button>
+      </div>
     </section>
   );
 }
 
-/**
- * <RecognizePanel /> — 阅读词（purpose === "passive"）的轻量复记面板。
- *
- * 两步自评：
- *   1. 一级：显示词形 + 发音（不先看释义），用户自评 “认识 ✓” 或 “忘了 ✗”。
- *   2. 展开 1–2 个主词义 + 各自例句。
- *      - 若 一级 = 忘了       → 直接算失败，仅供学习，按 “下一题” 结束。
- *      - 若 一级 = 认识       → 显示二级自评 “记对了 / 记错了”，
- *                              二次确认后按 “下一题” 结束。
- *
- * 打卡判定（与需求原文一致）：
- *   忘了                → fail
- *   认识 + 记对了       → pass
- *   认识 + 记错了       → fail
- *
- * 词形本身是可跳转链接（同标签），点击进入 /word/[slug]，
- * WordDetailView 的返回按钮会走 router.back() 直接回到复习页，
- * 复习进度不会丢失（React 状态在 back forward cache 中保留）。
- */
-function RecognizePanel({
-  target,
-  graded,
-  confirmed,
-  onGrade,
-  onConfirm,
-  onNext,
-}: {
-  target: string;
-  graded: "pass" | "fail" | null;
-  confirmed: "pass" | "fail" | null;
-  onGrade: (g: "pass" | "fail") => void;
-  onConfirm: (c: "pass" | "fail") => void;
-  onNext: () => void;
-}) {
-  // 取字典里的前 2 个主词义（不同 POS 优先，覆盖多词性），
-  // 每个词义带自己的首个例句。null = 加载中；[] = 加载完毕但字典未收录。
-  const [senses, setSenses] = useState<
-    | Array<{
-        pos?: string;
-        def?: string;
-        chn?: string;
-        example?: { en: string; cn?: string };
-      }>
-    | null
-  >(null);
+// ===========================================================================
+// Mode Picker
+// ===========================================================================
 
+function ModePicker({
+  total,
+  wrongBook,
+  onPick,
+  onBack,
+}: {
+  total: number;
+  wrongBook: boolean;
+  onPick: (m: ReviewMode) => void;
+  onBack: () => void;
+}) {
+  return (
+    <section className="space-y-4 rounded-xl border border-[var(--border)] p-5">
+      <header className="space-y-1">
+        <h2 className="text-base font-semibold tracking-tight">选择复习方式</h2>
+        <p className="text-xs text-[var(--fg-soft)]">
+          共 <span className="font-semibold text-[var(--fg)]">{total}</span> 个单词，选一种方式开始。
+        </p>
+      </header>
+
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => onPick("recognize")}
+          disabled={total === 0}
+          className="group flex flex-col items-start rounded-xl border border-[var(--border)] p-4 text-left transition hover:border-[var(--accent)] hover:shadow-sm active:translate-y-[1px] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <span className="text-[13px] uppercase tracking-wider text-[var(--fg-soft)]">
+            Mode A
+          </span>
+          <span className="mt-1 text-lg font-semibold group-hover:text-[var(--accent)]">
+            识词
+          </span>
+          <span className="mt-2 text-xs text-[var(--fg-soft)]">
+            看见词形自评「认识 / 忘了」，展示例句、核心短语和笔记，最后二次确认。
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onPick("spell")}
+          disabled={total === 0}
+          className="group flex flex-col items-start rounded-xl border border-[var(--border)] p-4 text-left transition hover:border-[var(--accent)] hover:shadow-sm active:translate-y-[1px] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <span className="text-[13px] uppercase tracking-wider text-[var(--fg-soft)]">
+            Mode B
+          </span>
+          <span className="mt-1 text-lg font-semibold group-hover:text-[var(--accent)]">
+            听写
+          </span>
+          <span className="mt-2 text-xs text-[var(--fg-soft)]">
+            听音后拼写；进入题目时自动播放一次，也可反复播放。
+          </span>
+        </button>
+      </div>
+
+      <div className="flex justify-start">
+        <button
+          type="button"
+          onClick={onBack}
+          className="text-xs text-[var(--fg-soft)] underline decoration-dotted underline-offset-4 hover:text-[var(--accent)]"
+        >
+          {wrongBook ? "← 放弃重温" : "← 返回重新筛选"}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+// ===========================================================================
+// Recognize Card — 识词模式
+// ===========================================================================
+
+interface Gloss {
+  pos?: string;
+  def?: string;
+  chn?: string;
+  example?: { en: string; cn?: string };
+}
+
+function useAutoPlay(target: string) {
+  // 每次 target 变化时自动播放一次单词朗读。使用 Web Speech API 兜底；
+  // 若 SpeakButton 使用自定义音频（如 COS），这里的自动播放依然生效因为
+  // 全站朗读走同一套 lib/tts。
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    // 惯例：项目内使用 window.speechSynthesis，SpeakButton 也走同一套。
+    try {
+      const utter = new SpeechSynthesisUtterance(target);
+      utter.lang = "en-US";
+      utter.rate = 0.95;
+      // 稍后一点播放，避免 UI 未挂载时被忽略。
+      const id = window.setTimeout(() => {
+        try {
+          window.speechSynthesis.cancel();
+          window.speechSynthesis.speak(utter);
+        } catch {
+          /* noop */
+        }
+      }, 200);
+      return () => window.clearTimeout(id);
+    } catch {
+      return;
+    }
+  }, [target]);
+}
+
+function useGloss(target: string): Gloss[] | null {
+  const [senses, setSenses] = useState<Gloss[] | null>(null);
   useEffect(() => {
     setSenses(null);
     let cancelled = false;
@@ -717,8 +678,7 @@ function RecognizePanel({
       const got = await lookup(target);
       if (cancelled) return;
       const all = got?.entry.senses ?? [];
-      // 先按 POS 去重（同 POS 只保留第一条，尽量覆盖不同词性），
-      // 兜底再补回被跳过的次要词义，最多 2 条。
+      // 按 POS 去重优先，最多 2 条。
       const seenPos = new Set<string>();
       const primary: typeof all = [];
       const rest: typeof all = [];
@@ -745,12 +705,33 @@ function RecognizePanel({
       cancelled = true;
     };
   }, [target]);
+  return senses;
+}
 
-  // 最终打卡结果（仅用于渲染提示文案 & 决定 “下一题” 是否可点）。
-  //   graded === null              → 尚未一级自评，隐藏 “下一题”。
-  //   graded === "fail"            → 直接失败，可以点 “下一题”。
-  //   graded === "pass" & !confirmed→ 待二级自评，隐藏 “下一题”。
-  //   graded === "pass" & confirmed → 二级已选，可以点 “下一题”。
+/** 只提取笔记的正文数组，供识词模式底部展示。 */
+function useNotes(target: string): { body: string }[] {
+  const [notes, setNotes] = useState<{ body: string }[]>([]);
+  useEffect(() => {
+    setNotes(listNotes(target).map((n) => ({ body: n.body })));
+  }, [target]);
+  return notes;
+}
+
+function RecognizeCard({
+  entry,
+  onAdvance,
+}: {
+  entry: WordbookEntry;
+  onAdvance: (result: "pass" | "fail") => void;
+}) {
+  const target = entry.lemma;
+  useAutoPlay(target);
+  const senses = useGloss(target);
+  const notes = useNotes(target);
+  // 一级自评：认识 / 忘了；二级自评：记对了 / 记错了（仅当一级 = 认识 时启用）。
+  const [graded, setGraded] = useState<"pass" | "fail" | null>(null);
+  const [confirmed, setConfirmed] = useState<"pass" | "fail" | null>(null);
+
   const canAdvance =
     graded === "fail" || (graded === "pass" && confirmed !== null);
   const finalPass = graded === "pass" && confirmed === "pass";
@@ -759,7 +740,6 @@ function RecognizePanel({
     <section className="space-y-4 rounded-xl border border-[var(--border)] p-4">
       <header className="space-y-1">
         <div className="flex flex-wrap items-baseline gap-2">
-          {/* 同标签跳转到详情页；详情页返回按钮走 router.back() 直接回来。 */}
           <Link
             href={`/word/${encodeURIComponent(target)}?from=review`}
             className="text-2xl font-semibold tracking-tight underline decoration-transparent underline-offset-4 transition hover:decoration-[var(--accent)] hover:text-[var(--accent)]"
@@ -768,25 +748,23 @@ function RecognizePanel({
             {target}
           </Link>
           <SpeakButton text={target} variant="us" />
-          <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
-            阅读词
-          </span>
         </div>
-        <p className="pt-1 text-xs text-[var(--fg-soft)]">
-          {graded === null
-            ? "看这个单词，你能想起它的意思吗？先自评，再看释义。"
-            : graded === "pass" && confirmed === null
-              ? "看下方释义和例句，对照一下你刚才想的意思——是否记对了？"
-              : "对照释义后确认结果，然后进入下一题。"}
-        </p>
+        {/* 核心短语 / 例句 —— 展示英文（不显示中文，避免直接暴露词义）。 */}
+        {entry.coreExample && (
+          <p className="text-xs text-[var(--fg-soft)]">
+            {stripChinese(entry.coreExample)}
+          </p>
+        )}
       </header>
 
-      {/* 一级自评：graded === null 时两个都可点；已选后保持高亮，
-          但仍然允许 “重新选择”（切回另一个会清空二级自评）。 */}
+      {/* 一级自评 */}
       <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          onClick={() => onGrade("pass")}
+          onClick={() => {
+            setGraded("pass");
+            setConfirmed(null);
+          }}
           className={[
             "rounded-md border px-3 py-1.5 text-sm transition",
             graded === "pass"
@@ -798,7 +776,10 @@ function RecognizePanel({
         </button>
         <button
           type="button"
-          onClick={() => onGrade("fail")}
+          onClick={() => {
+            setGraded("fail");
+            setConfirmed(null);
+          }}
           className={[
             "rounded-md border px-3 py-1.5 text-sm transition",
             graded === "fail"
@@ -810,7 +791,7 @@ function RecognizePanel({
         </button>
       </div>
 
-      {/* 释义 + 例句：仅在一级自评后显示，避免 “先看释义再自评”。 */}
+      {/* 释义 / 例句 / 笔记 —— 一级自评后展示 */}
       {graded !== null && (
         <div
           className={[
@@ -878,7 +859,26 @@ function RecognizePanel({
             </ul>
           )}
 
-          {/* 二级自评：仅在一级 = 认识 时出现。 */}
+          {/* 用户笔记 —— 有则展示 */}
+          {notes.length > 0 && (
+            <div className="space-y-1.5 border-t border-[var(--border)]/60 pt-2">
+              <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+                我的笔记
+              </p>
+              <ul className="space-y-1.5">
+                {notes.map((n, i) => (
+                  <li
+                    key={i}
+                    className="whitespace-pre-wrap text-xs leading-relaxed text-[var(--fg)]"
+                  >
+                    {n.body}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* 二级自评：仅在一级 = 认识 时出现 */}
           {graded === "pass" && (
             <div className="space-y-2 border-t border-[var(--border)]/60 pt-2">
               <p className="text-[11px] font-medium text-[var(--fg-soft)]">
@@ -887,7 +887,7 @@ function RecognizePanel({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => onConfirm("pass")}
+                  onClick={() => setConfirmed("pass")}
                   className={[
                     "rounded-md border px-3 py-1.5 text-xs transition",
                     confirmed === "pass"
@@ -899,7 +899,7 @@ function RecognizePanel({
                 </button>
                 <button
                   type="button"
-                  onClick={() => onConfirm("fail")}
+                  onClick={() => setConfirmed("fail")}
                   className={[
                     "rounded-md border px-3 py-1.5 text-xs transition",
                     confirmed === "fail"
@@ -913,20 +913,20 @@ function RecognizePanel({
             </div>
           )}
 
-          {/* 底部结果提示 + 下一题按钮。canAdvance 才亮 “下一题”。 */}
+          {/* 底部结果 + 下一题按钮 */}
           <div className="flex items-center justify-between pt-1">
             <p className="text-[11px] text-[var(--fg-soft)]">
               {graded === "fail"
-                ? "自评忘了 —— 本题记为失败，level -1。"
+                ? "自评忘了 —— 本题记为失败。"
                 : confirmed === null
                   ? "请确认你是否真的记对了。"
                   : finalPass
-                    ? "记对了 —— 本题记为通过，level +1。"
-                    : "记错了 —— 本题记为失败，level -1。"}
+                    ? "记对了 —— 本题记为通过。"
+                    : "记错了 —— 本题记为失败。"}
             </p>
             <button
               type="button"
-              onClick={onNext}
+              onClick={() => onAdvance(finalPass ? "pass" : "fail")}
               disabled={!canAdvance}
               className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-1.5 text-xs text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -939,51 +939,64 @@ function RecognizePanel({
   );
 }
 
-function QuizPanel({
-  q,
-  failedOnce,
-  onCorrect,
-  onWrong,
+/** 从 "en — cn" 或 "en-cn" 类混合字符串里剥掉中文部分，只留英文。 */
+function stripChinese(s: string): string {
+  // 优先切 " — "、"—"、" - "，取第一个 chunk。
+  for (const sep of [" — ", "—", " – ", "–", " - "]) {
+    const idx = s.indexOf(sep);
+    if (idx > 0) return s.slice(0, idx).trim();
+  }
+  // 否则删掉所有 CJK 字符。
+  return s.replace(/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/g, "").trim();
+}
+
+// ===========================================================================
+// Spell Card — 听写模式
+// ===========================================================================
+
+function SpellCard({
+  entry,
+  onAdvance,
 }: {
-  q: SynonymQuestion;
-  failedOnce: boolean;
-  onCorrect: () => void;
-  onWrong: () => void;
+  entry: WordbookEntry;
+  onAdvance: (result: "pass" | "fail") => void;
 }) {
-  const [picked, setPicked] = useState<number | null>(null);
-  const [feedback, setFeedback] = useState<"right" | "wrong" | null>(null);
-  // Track every wrong index so already-tried distractors visibly stay marked
-  // while the user keeps trying. We don't reveal the correct answer though.
-  const [wrongPicks, setWrongPicks] = useState<Set<number>>(new Set());
+  const target = entry.lemma;
+  useAutoPlay(target);
+  const senses = useGloss(target);
+  const notes = useNotes(target);
 
-  // Reset state whenever a new question arrives.
+  const [draft, setDraft] = useState("");
+  const [feedback, setFeedback] = useState<"right" | "wrong" | "revealed" | null>(
+    null,
+  );
+  const inputRef = useRef<HTMLInputElement>(null);
+
   useEffect(() => {
-    setPicked(null);
+    setDraft("");
     setFeedback(null);
-    setWrongPicks(new Set());
-  }, [q.target]);
+    inputRef.current?.focus();
+  }, [target]);
 
-  function handlePick(i: number) {
-    if (feedback === "right") return;
-    if (wrongPicks.has(i)) return; // already known wrong, ignore
-    setPicked(i);
-    if (i === q.answerIndex) {
+  function submit() {
+    const guess = draft.trim().toLowerCase();
+    if (!guess) return;
+    if (guess === target.toLowerCase()) {
       setFeedback("right");
-      // No auto-advance: the user reviews the explanation panel and clicks
-      // "下一题" themselves.
     } else {
       setFeedback("wrong");
-      setWrongPicks((s) => new Set(s).add(i));
-      onWrong();
     }
   }
 
-  const wrongLemma =
-    feedback === "wrong" && picked !== null ? q.choices[picked] : null;
-  const wrongGloss = wrongLemma ? q.glossMap[wrongLemma] : undefined;
+  function giveUp() {
+    setFeedback("revealed");
+  }
 
-  const correctLemma = q.choices[q.answerIndex];
-  const correctGloss = q.glossMap[correctLemma];
+  function retry() {
+    setDraft("");
+    setFeedback(null);
+    inputRef.current?.focus();
+  }
 
   return (
     <section className="space-y-4 rounded-xl border border-[var(--border)] p-4">
@@ -992,680 +1005,141 @@ function QuizPanel({
           <h2 className="text-2xl font-semibold tracking-tight">
             <span aria-hidden>＿＿＿＿</span>
           </h2>
-          {/* Always-on speak button: the user explicitly asked for this so
-              they can identify which word is being tested. Yes, this is
-              technically a hint — they can recognise the word by sound —
-              but the synonym selection still requires knowing the meaning,
-              not just the spelling. */}
-          <SpeakButton text={q.target} variant="us" />
-        </div>
-        {q.prompt.pos && (
-          <span className="inline-block rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[11px] text-[var(--fg-soft)]">
-            {q.prompt.pos}
-          </span>
-        )}
-        <p className="pt-2 text-xs text-[var(--fg-soft)]">
-          请选择最接近的近义词：
-        </p>
-      </header>
-
-      <ul className="grid grid-cols-1 gap-2 md:grid-cols-2">
-        {q.choices.map((lemma, i) => {
-          const isPicked = picked === i;
-          const isAnswer = i === q.answerIndex;
-          const isKnownWrong = wrongPicks.has(i);
-          let cls =
-            "rounded-lg border border-[var(--border)] px-3 py-2 text-left text-sm transition hover:border-[var(--accent)] disabled:cursor-not-allowed";
-          // Only mark the correct answer AFTER the user has chosen it.
-          // No more "color reveal" while they're still guessing.
-          if (feedback === "right" && isAnswer) {
-            cls += " border-[var(--accent)] bg-[var(--accent-soft)]";
-          } else if (isKnownWrong) {
-            cls += " border-red-300 text-red-400 line-through opacity-60";
-          } else if (feedback === "wrong" && isPicked) {
-            cls += " border-red-400 text-red-500";
-          }
-          return (
-            <li key={lemma}>
-              <button
-                type="button"
-                onClick={() => handlePick(i)}
-                disabled={feedback === "right" || isKnownWrong}
-                className={cls}
-              >
-                {lemma}
-              </button>
-            </li>
-          );
-        })}
-      </ul>
-
-      {feedback === "wrong" && (
-        <div className="space-y-1.5 rounded-lg border border-red-200 bg-red-50/60 p-3 text-sm dark:border-red-900/40 dark:bg-red-950/20">
-          <p className="text-xs font-medium text-red-500">不对，再试一次。</p>
-          {wrongLemma && (
-            <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
-              <span className="font-semibold text-[var(--fg)]">
-                {wrongLemma}
-              </span>
-              {wrongGloss?.pos && (
-                <span className="ml-1 text-[10px] opacity-70">
-                  ({wrongGloss.pos})
-                </span>
-              )}
-              {wrongGloss?.chn && (
-                <span className="ml-2">{wrongGloss.chn}</span>
-              )}
-            </p>
-          )}
-        </div>
-      )}
-
-      {feedback === "right" && (
-        <div className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--bg-soft)]/50 p-3 text-sm">
-          <p className="text-xs font-medium text-[var(--accent)]">
-            答对了
-            {failedOnce ? "（本题之前错过一次，本次将算作失败）" : ""}！
-          </p>
-
-          {/* Correct synonym's gloss */}
-          <div className="space-y-0.5">
-            <div className="flex items-baseline gap-2">
-              <span className="text-base font-semibold">{correctLemma}</span>
-              {correctGloss?.pos && (
-                <span className="text-[10px] text-[var(--fg-soft)]">
-                  ({correctGloss.pos})
-                </span>
-              )}
-            </div>
-            {correctGloss?.def && (
-              <p className="text-xs text-[var(--fg)]">{correctGloss.def}</p>
-            )}
-            {correctGloss?.chn && (
-              <p className="text-xs text-[var(--fg-soft)]">
-                {correctGloss.chn}
-              </p>
-            )}
-          </div>
-
-          {/* Target word's own gloss — now safe to reveal */}
-          <div className="space-y-0.5 border-t border-[var(--border)]/60 pt-2">
-            <div className="flex items-baseline gap-2">
-              <span className="text-xs uppercase tracking-wider text-[var(--fg-soft)]">
-                本题单词
-              </span>
-              <span className="text-base font-semibold">{q.target}</span>
-              {q.prompt.pos && (
-                <span className="text-[10px] text-[var(--fg-soft)]">
-                  ({q.prompt.pos})
-                </span>
-              )}
-            </div>
-            {q.prompt.def && (
-              <p className="text-xs text-[var(--fg)]">{q.prompt.def}</p>
-            )}
-            {q.prompt.chn && (
-              <p className="text-xs text-[var(--fg-soft)]">{q.prompt.chn}</p>
-            )}
-          </div>
-
-          {/* Quick "why these are similar" hint based on overlapping CN tokens. */}
-          {q.sharedTokens.length > 0 && (
-            <p className="text-[11px] leading-relaxed text-[var(--fg-soft)]">
-              共同语义：
-              {q.sharedTokens.map((t, i) => (
-                <span
-                  key={t}
-                  className="ml-1 rounded bg-[var(--bg)] px-1.5 py-0.5 text-[var(--fg)]"
-                >
-                  {t}
-                  {i < q.sharedTokens.length - 1 ? "" : ""}
-                </span>
-              ))}
-              <span className="ml-1">
-                。具体使用语境上仍有差异，可结合各自释义体会。
-              </span>
-            </p>
-          )}
-
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={onCorrect}
-              className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-1.5 text-xs text-white transition hover:opacity-90"
-            >
-              下一步 →
-            </button>
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function ComposePanel({
-  target,
-  prompt,
-  failedOnce,
-  onAccepted,
-}: {
-  target: string;
-  prompt: SynonymQuestion["prompt"];
-  failedOnce: boolean;
-  onAccepted: () => void;
-}) {
-  const [draft, setDraft] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<CorrectionResult | null>(null);
-  const [attempts, setAttempts] = useState<AIAttempt[]>([]);
-  const taRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => {
-    setDraft("");
-    setResult(null);
-    setAttempts([]);
-    taRef.current?.focus();
-  }, [target]);
-
-  async function submit() {
-    const sentence = draft.trim();
-    if (!sentence) return;
-    setBusy(true);
-    setAttempts([]);
-    try {
-      const res = await fetch("/api/ai/correct", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          lemma: target,
-          sentence,
-          sense: { def: prompt.def, chn: prompt.chn, pos: prompt.pos },
-        }),
-      });
-      if (!res.ok) {
-        setAttempts(await parseAIErrorAttempts(res));
-        return;
-      }
-      const data = (await res.json()) as CorrectionResult;
-      setResult(data);
-    } catch (e) {
-      setAttempts([
-        { model: "network", reason: (e as Error).message || "网络请求失败" },
-      ]);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function handleNext() {
-    onAccepted();
-  }
-
-  return (
-    <section className="space-y-3 rounded-xl border border-[var(--border)] p-4">
-      <header className="space-y-1">
-        <div className="flex items-baseline gap-2">
-          <Link
-            href={`/word/${encodeURIComponent(target)}?from=review`}
-            target="_blank"
-            rel="noopener"
-            className="text-xl font-semibold underline decoration-transparent underline-offset-4 transition hover:decoration-[var(--accent)] hover:text-[var(--accent)]"
-            title="在新标签页查看单词详情（保留造句进度）"
-          >
-            {target}
-          </Link>
           <SpeakButton text={target} variant="us" />
         </div>
-        {/* Intentionally NOT rendering prompt.chn / prompt.def here:
-            the compose step is supposed to test whether the user actually
-            internalised the meaning, so we hide the gloss to avoid making
-            it a translation exercise. The synonym-quiz step above already
-            unfolded the full explanation, so the user has had their
-            chance to study the meaning before reaching this screen. */}
-        <p className="pt-1 text-xs text-[var(--fg-soft)]">
-          请用 <span className="font-medium text-[var(--fg)]">{target}</span>{" "}
-          造一个英文句子：
+        <p className="pt-2 text-xs text-[var(--fg-soft)]">
+          请听音后拼写出这个单词：
         </p>
       </header>
 
-      <textarea
-        ref={taRef}
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        rows={3}
-        placeholder={`例：They had to ${target} the project after only three weeks.`}
-        className="w-full resize-none rounded-md border border-[var(--border)] bg-transparent p-2 text-sm outline-none focus:border-[var(--accent)]"
-        disabled={busy || result?.ok === true}
-      />
-
-      {result && <CoachFeedback result={result} original={draft.trim()} />}
-
-      {result?.model && result.usage && (
-        <AIUsageNote model={result.model} usage={result.usage} />
-      )}
-
-      {attempts.length > 0 && !busy && (
-        <AIErrorNotice
-          attempts={attempts}
-          hint="可稍后重试；也可以直接跳过批改，进入下一题"
+      <div className="flex items-center gap-2">
+        <input
+          ref={inputRef}
+          type="text"
+          autoComplete="off"
+          autoCorrect="off"
+          autoCapitalize="none"
+          spellCheck={false}
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              if (feedback === "right" || feedback === "revealed") {
+                onAdvance(feedback === "right" ? "pass" : "fail");
+              } else if (feedback === "wrong") retry();
+              else submit();
+            }
+          }}
+          disabled={feedback === "right" || feedback === "revealed"}
+          placeholder="在此输入…"
+          className="flex-1 rounded-md border border-[var(--border)] bg-transparent px-3 py-2 text-base outline-none focus:border-[var(--accent)] disabled:opacity-60"
         />
-      )}
-
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-[11px] text-[var(--fg-soft)]">
-          {failedOnce
-            ? "近义词题之前答错，本题完成后会回退一级。"
-            : "答对一次即可通过本题。"}
-        </p>
-        {result?.ok ? (
+        {feedback === "right" || feedback === "revealed" ? (
           <button
             type="button"
-            onClick={handleNext}
-            className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-1.5 text-xs text-white"
+            onClick={() => onAdvance(feedback === "right" ? "pass" : "fail")}
+            className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-2 text-xs text-white transition hover:opacity-90"
           >
             下一题 →
           </button>
+        ) : feedback === "wrong" ? (
+          <button
+            type="button"
+            onClick={retry}
+            className="rounded-md border border-[var(--border)] px-3 py-2 text-xs transition hover:border-[var(--accent)]"
+          >
+            再试一次
+          </button>
         ) : (
-          <div className="flex items-center gap-2">
-            {result && result.ok === false && (
-              <button
-                type="button"
-                onClick={handleNext}
-                title="AI 有时会误判，若你确认原句没问题可直接通过"
-                className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs text-[var(--fg-soft)] transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
-              >
-                保留原句，通过 →
-              </button>
-            )}
+          <>
             <button
               type="button"
               onClick={submit}
-              disabled={busy || !draft.trim()}
-              className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!draft.trim()}
+              className="rounded-md border border-[var(--border)] px-3 py-2 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {busy ? "批改中…" : result ? "再改一次" : "提交批改"}
+              提交
             </button>
-          </div>
+            <button
+              type="button"
+              onClick={giveUp}
+              title="放弃本题，直接查看答案（本题会记为失败）"
+              className="rounded-md border border-[var(--border)] px-3 py-2 text-xs text-[var(--fg-soft)] transition hover:border-red-400 hover:text-red-500"
+            >
+              我不会
+            </button>
+          </>
         )}
       </div>
-    </section>
-  );
-}
 
-function CorrectedSentence({
-  segments,
-}: {
-  segments: Array<{ text: string; wrong?: boolean; fix?: string }>;
-}) {
-  return (
-    <p className="leading-relaxed">
-      {segments.map((s, i) =>
-        s.wrong ? (
-          <span key={i}>
-            <span className="text-red-500 line-through">{s.text}</span>
-            {s.fix && (
-              <span className="ml-1 text-[var(--accent)]">{s.fix}</span>
-            )}{" "}
-          </span>
-        ) : (
-          <span key={i}>{s.text}</span>
-        ),
+      {feedback === "wrong" && (
+        <div className="space-y-1.5 rounded-lg border border-red-200 bg-red-50/60 p-3 text-sm dark:border-red-900/40 dark:bg-red-950/20">
+          <p className="text-xs font-medium text-red-500">拼写不对，再试一次。</p>
+          <p className="text-xs text-[var(--fg-soft)]">
+            提示：仔细再听一遍读音。
+          </p>
+        </div>
       )}
-    </p>
-  );
-}
 
-/**
- * Coach-style feedback card. Renders four optional zones:
- *   1. Verdict line + diff over the learner's original sentence.
- *   2. Recommended native rewrite(s).
- *   3. Diagnosis bullets + optional confusable-word distinction.
- *   4. IELTS-speaking sample sentence.
- *
- * The card adapts its accent colour to whether the verdict is `good`
- * (= ok=true) or `needs_work`. The intent is: even when the original is
- * already correct, the user still gets a small upgrade suggestion, so the
- * card always has *something* to teach.
- */
-function CoachFeedback({
-  result,
-  original,
-}: {
-  result: CorrectionResult;
-  original: string;
-}) {
-  const isGood = result.ok;
-  const showDiff =
-    !isGood && result.segments.some((s) => s.wrong);
-  const showRecommended =
-    result.recommended && result.recommended.trim() !== original.trim();
-
-  return (
-    <div
-      className={[
-        "space-y-3 rounded-lg border p-3 text-sm",
-        isGood
-          ? "border-[var(--accent)]/40 bg-[var(--accent-soft)]/40"
-          : "border-amber-300/60 bg-amber-50/50 dark:border-amber-700/40 dark:bg-amber-950/20",
-      ].join(" ")}
-    >
-      {/* 1. Verdict + diff (or just the original when good) */}
-      <div className="space-y-1">
-        <p
+      {(feedback === "right" || feedback === "revealed") && (
+        <div
           className={[
-            "text-[11px] font-semibold uppercase tracking-wider",
-            isGood ? "text-[var(--accent)]" : "text-amber-600 dark:text-amber-400",
+            "space-y-3 rounded-lg border p-3 text-sm",
+            feedback === "right"
+              ? "border-[var(--accent)]/40 bg-[var(--accent-soft)]/40"
+              : "border-red-200 bg-red-50/60 dark:border-red-900/40 dark:bg-red-950/20",
           ].join(" ")}
         >
-          {isGood ? "✓ 句子可用" : "需要打磨"}
-        </p>
-        {showDiff ? (
-          <CorrectedSentence segments={result.segments} />
-        ) : (
-          <p className="leading-relaxed text-[var(--fg-soft)]">{original}</p>
-        )}
-      </div>
+          <div className="space-y-0.5">
+            <div className="flex items-baseline gap-2">
+              <span className="text-base font-semibold">{target}</span>
+              {senses?.[0]?.pos && (
+                <span className="text-[10px] text-[var(--fg-soft)]">
+                  ({senses[0].pos})
+                </span>
+              )}
+            </div>
+            {senses?.[0]?.def && (
+              <p className="text-xs text-[var(--fg)]">{senses[0].def}</p>
+            )}
+            {senses?.[0]?.chn && (
+              <p className="text-xs text-[var(--fg-soft)]">{senses[0].chn}</p>
+            )}
+          </div>
 
-      {/* 2. Recommended rewrite(s) */}
-      {showRecommended && (
-        <div className="space-y-1 border-t border-[var(--border)]/60 pt-2">
-          <p className="text-[11px] font-medium text-[var(--fg-soft)]">
-            {isGood ? "更地道的说法" : "推荐表达"}
-          </p>
-          <p className="font-medium leading-relaxed text-[var(--fg)]">
-            {result.recommended}
-          </p>
-          {result.recommendedAlt && (
-            <p className="leading-relaxed text-[var(--fg-soft)]">
-              <span className="mr-1 text-[10px] uppercase tracking-wider opacity-70">
-                or
-              </span>
-              {result.recommendedAlt}
-            </p>
+          {senses?.[0]?.example && (
+            <div className="space-y-0.5 rounded-md border border-[var(--border)]/60 bg-[var(--bg)] px-2 py-1.5">
+              <p className="text-xs italic leading-relaxed text-[var(--fg)]">
+                “{senses[0].example.en}”
+              </p>
+              {senses[0].example.cn && (
+                <p className="text-[11px] leading-relaxed text-[var(--fg-soft)]">
+                  {senses[0].example.cn}
+                </p>
+              )}
+            </div>
+          )}
+
+          {notes.length > 0 && (
+            <div className="space-y-1.5 border-t border-[var(--border)]/60 pt-2">
+              <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+                我的笔记
+              </p>
+              <ul className="space-y-1.5">
+                {notes.map((n, i) => (
+                  <li
+                    key={i}
+                    className="whitespace-pre-wrap text-xs leading-relaxed text-[var(--fg)]"
+                  >
+                    {n.body}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </div>
       )}
-
-      {/* 3. Diagnosis + distinction (Track-A: real errors only) */}
-      {(result.diagnosis.length > 0 || result.distinction) && (
-        <div className="space-y-1 border-t border-[var(--border)]/60 pt-2">
-          <p className="text-[11px] font-medium text-[var(--fg-soft)]">
-            为什么这样改
-          </p>
-          <ul className="space-y-1 text-xs leading-relaxed text-[var(--fg)]">
-            {result.diagnosis.map((d, i) => (
-              <li key={i} className="flex gap-1.5">
-                <span className="text-[var(--fg-soft)]">·</span>
-                <span dangerouslySetInnerHTML={{ __html: renderInlineCode(d) }} />
-              </li>
-            ))}
-            {result.distinction && (
-              <li className="flex gap-1.5">
-                <span className="text-[var(--fg-soft)]">·</span>
-                <span
-                  dangerouslySetInnerHTML={{
-                    __html: renderInlineCode(result.distinction),
-                  }}
-                />
-              </li>
-            )}
-          </ul>
-        </div>
-      )}
-
-      {/* 3b. Track-B style suggestions — visually distinct from errors:
-              neutral slate palette, explicit "不算错" label. Rendered
-              regardless of ok, because idiomatic upgrades exist on top
-              of a grammatically fine sentence too. */}
-      {result.suggestions && result.suggestions.length > 0 && (
-        <div className="space-y-1.5 border-t border-[var(--border)]/60 pt-2">
-          <p className="text-[11px] font-medium text-[var(--fg-soft)]">
-            更地道的说法
-            <span className="ml-1.5 rounded-sm bg-[var(--fg-soft)]/10 px-1 py-0.5 text-[9px] font-normal uppercase tracking-wider text-[var(--fg-soft)]">
-              不算错
-            </span>
-          </p>
-          <ul className="space-y-1.5">
-            {result.suggestions.map((s, i) => (
-              <li key={i} className="space-y-0.5">
-                <p className="leading-relaxed text-[var(--fg)]">{s.text}</p>
-                <p
-                  className="pl-2 text-xs leading-relaxed text-[var(--fg-soft)]"
-                  dangerouslySetInnerHTML={{ __html: renderInlineCode(s.reason) }}
-                />
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * Render markdown-style backticks (`word`) as inline <code>. This is the
- * tiniest possible markdown subset — we only support backticks because the
- * coach prompt explicitly emits them around English words inside Chinese
- * explanations, and we want those words to stand out visually.
- *
- * Input is sanitised by HTML-escaping the surrounding text first, so it is
- * safe to feed into dangerouslySetInnerHTML.
- */
-function renderInlineCode(s: string): string {
-  const escape = (t: string) =>
-    t
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  // Split on `…` while keeping the matched groups.
-  const parts = s.split(/`([^`]+)`/g);
-  return parts
-    .map((p, i) =>
-      i % 2 === 1
-        ? `<code class="rounded bg-[var(--bg)] px-1 py-0.5 font-mono text-[0.85em] text-[var(--fg)]">${escape(p)}</code>`
-        : escape(p),
-    )
-    .join("");
-}
-
-function ReviewSkeleton() {
-  return (
-    <div className="space-y-3">
-      <div className="h-4 w-32 animate-pulse rounded bg-[var(--bg-soft)]" />
-      <div className="h-32 animate-pulse rounded-xl bg-[var(--bg-soft)]" />
-    </div>
-  );
-}
-
-function EmptyState({
-  group,
-  onReset,
-}: {
-  group: ReviewGroup | null;
-  onReset: () => void;
-}) {
-  // 当用户选了组但那一组今日已无字 → 引导切回选择器看另一组。
-  const showSwitcher = group === "active" || group === "passive";
-  return (
-    <div className="space-y-3 rounded-xl border border-dashed border-[var(--border)] p-6 text-center">
-      <p className="text-base font-medium">
-        {showSwitcher
-          ? `${groupLabel(group!)}组今日没有需要复习的单词。`
-          : "今天没有需要复习的单词。"}
-      </p>
-      <p className="text-sm text-[var(--fg-soft)]">
-        {showSwitcher ? (
-          <>
-            可以
-            <button
-              type="button"
-              onClick={onReset}
-              className="mx-1 text-[var(--accent)] hover:underline"
-            >
-              切回选择其他组
-            </button>
-            ，或者回
-            <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
-              首页
-            </Link>
-            看看。
-          </>
-        ) : (
-          <>
-            先去
-            <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
-              首页
-            </Link>
-            查几个新词吧；它们会按艾宾浩斯曲线安排复习。
-          </>
-        )}
-      </p>
-    </div>
-  );
-}
-
-function DoneState({
-  finished,
-  total,
-  group,
-  onReset,
-}: {
-  finished: number;
-  total: number;
-  group: ReviewGroup | null;
-  onReset: () => void;
-}) {
-  const canSwitch = group === "active" || group === "passive";
-  return (
-    <div className="space-y-3 rounded-xl border border-[var(--border)] p-6 text-center">
-      <p className="text-2xl">🎉</p>
-      <p className="text-base font-medium">
-        {canSwitch
-          ? `今日${groupLabel(group!)}组 ${finished} / ${total} 个单词已完成`
-          : `今日 ${finished} / ${total} 个单词已完成`}
-      </p>
-      <p className="text-sm text-[var(--fg-soft)]">
-        {canSwitch ? (
-          <>
-            还有时间？
-            <button
-              type="button"
-              onClick={onReset}
-              className="mx-1 text-[var(--accent)] hover:underline"
-            >
-              去复习另一组
-            </button>
-            ，或者
-            <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
-              回首页
-            </Link>
-            。
-          </>
-        ) : (
-          <>
-            别忘了
-            <Link href="/" className="mx-1 text-[var(--accent)] hover:underline">
-              回首页
-            </Link>
-            看看打卡日历。
-          </>
-        )}
-      </p>
-    </div>
-  );
-}
-
-/**
- * <GroupPicker /> — 进入 /review 后的组选择器。
- * 仅当听说写、阅读两组今日都有待复习单词时才会展示（否则上一层直接 auto-pick）。
- */
-function GroupPicker({
-  activeCount,
-  passiveCount,
-  onPick,
-}: {
-  activeCount: number;
-  passiveCount: number;
-  onPick: (g: ReviewGroup) => void;
-}) {
-  return (
-    <div className="rounded-xl border border-[var(--border)] p-6">
-      <p className="text-center text-base font-medium">选择今日复习内容</p>
-      <p className="mt-1 text-center text-xs text-[var(--fg-soft)]">
-        听说写组走 近义词/拼写 + 造句 流程；阅读组只识记词形 + 自评。
-      </p>
-      <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <button
-          type="button"
-          onClick={() => onPick("active")}
-          className="group flex flex-col items-start rounded-xl border border-[var(--border)] bg-[var(--bg)] p-4 text-left transition hover:border-[var(--accent)] hover:shadow-sm active:translate-y-[1px]"
-        >
-          <span className="text-[13px] uppercase tracking-wider text-[var(--fg-soft)]">
-            Group A
-          </span>
-          <span className="mt-1 text-lg font-semibold text-[var(--fg)] group-hover:text-[var(--accent)]">
-            听说写组
-          </span>
-          <span className="mt-2 text-xs text-[var(--fg-soft)]">
-            今日待复习 <span className="font-semibold text-[var(--fg)] tabular-nums">{activeCount}</span> 个
-          </span>
-        </button>
-        <button
-          type="button"
-          onClick={() => onPick("passive")}
-          className="group flex flex-col items-start rounded-xl border border-[var(--border)] bg-[var(--bg)] p-4 text-left transition hover:border-[var(--accent)] hover:shadow-sm active:translate-y-[1px]"
-        >
-          <span className="text-[13px] uppercase tracking-wider text-[var(--fg-soft)]">
-            Group B
-          </span>
-          <span className="mt-1 text-lg font-semibold text-[var(--fg)] group-hover:text-[var(--accent)]">
-            阅读组
-          </span>
-          <span className="mt-2 text-xs text-[var(--fg-soft)]">
-            今日待复习 <span className="font-semibold text-[var(--fg)] tabular-nums">{passiveCount}</span> 个
-          </span>
-        </button>
-      </div>
-      <div className="mt-4 flex justify-center">
-        <button
-          type="button"
-          onClick={() => onPick("all")}
-          className="text-xs text-[var(--fg-soft)] underline decoration-dotted underline-offset-4 hover:text-[var(--accent)]"
-        >
-          一起复习（共 {activeCount + passiveCount} 个）
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/**
- * <GroupBadge /> — 复习中展示当前分组、并提供一个“切换”入口。
- * 切换会重新回到 GroupPicker（即使另一组也为空也不拦，上层会自己 fallback 到 empty）。
- */
-function GroupBadge({
-  group,
-  onSwitch,
-}: {
-  group: ReviewGroup;
-  onSwitch: () => void;
-}) {
-  return (
-    <div className="flex items-center justify-between rounded-md bg-[var(--bg-soft)] px-3 py-1.5 text-xs">
-      <div className="text-[var(--fg-soft)]">
-        当前复习：
-        <span className="ml-1 font-semibold text-[var(--fg)]">
-          {groupLabel(group)}组
-        </span>
-      </div>
-      <button
-        type="button"
-        onClick={onSwitch}
-        className="text-[var(--fg-soft)] underline decoration-dotted underline-offset-4 hover:text-[var(--accent)]"
-      >
-        切换组
-      </button>
-    </div>
+    </section>
   );
 }

@@ -68,6 +68,12 @@ export default function RootLayout({
               笔记本
               </Link>
               <Link
+                href="/wrongbook"
+                className="ml-4 text-[var(--fg-soft)] transition hover:text-[var(--fg)]"
+              >
+                错词本
+              </Link>
+              <Link
                 href="/settings"
                 className="ml-4 text-[var(--fg-soft)] transition hover:text-[var(--fg)]"
               >

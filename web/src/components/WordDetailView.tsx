@@ -34,8 +34,10 @@ import { toast } from "@/components/Toast";
 import { lookup, type LookupResult } from "@/lib/dict";
 import type { DictPhrase } from "@/lib/types";
 import {
+  backfillCoreExample,
   getEntry,
   getKnownLemmaSet,
+  listNotes,
   recordLookup,
   setCoreExample,
   setIelts,
@@ -45,6 +47,7 @@ import {
   type WordbookEntry,
   type WordbookPurpose,
 } from "@/lib/wordbook/local";
+import { pickDefaultCoreExample } from "@/lib/wordbook/core-example";
 
 interface Props {
   slug: string;
@@ -132,7 +135,18 @@ export default function WordDetailView({ slug, from }: Props) {
           skipCount: !countAsLookupRef.current,
         });
         const created = getEntry(result.query);
-        setBookEntry(created);
+        // 回填默认 coreExample（无论新旧条目）：若字段已有值自动跳过。
+        // 这里直接拿本次 lookup 结果中的 senses/phrases，不再重复发请求。
+        if (created) {
+          const defaultExample = pickDefaultCoreExample(
+            result.entry.senses,
+            result.entry.phrases,
+          );
+          if (defaultExample) {
+            backfillCoreExample(result.query, defaultExample);
+          }
+        }
+        setBookEntry(getEntry(result.query));
         if (!wasExisting && created && !created.purpose) {
           setPurposePromptOpen(true);
         }
@@ -274,6 +288,25 @@ export default function WordDetailView({ slug, from }: Props) {
     return () => window.removeEventListener("get:wordbook-change", refresh);
   }, []);
 
+  // 是否有任何笔记 —— 决定详情页布局顺序：有笔记 → CoreExample → Notes → Senses，
+  // 无笔记 → CoreExample → Senses → Notes（Notes 作为“加笔记”入口挂在页尾）。
+  // 订阅 notes 存储的变化事件（addNote / updateNote / deleteNote 都会 dispatch）
+  // 让顺序可以在写完第一条笔记之后立即上移。
+  const [hasAnyNote, setHasAnyNote] = useState(false);
+  useEffect(() => {
+    let lemma: string | null = null;
+    if (state.kind === "ok") lemma = state.result.query;
+    else if (state.kind === "not-found") lemma = query;
+    if (!lemma) return;
+    const key = lemma;
+    function refresh() {
+      setHasAnyNote(listNotes(key).length > 0);
+    }
+    refresh();
+    window.addEventListener("get:notes-change", refresh);
+    return () => window.removeEventListener("get:notes-change", refresh);
+  }, [state, query]);
+
   // Back button — prefer router.back() so we land on whatever screen the
   // user came from (search results / wordbook / home). Falls back to "/".
   const handleBack = useCallback(() => {
@@ -409,9 +442,8 @@ export default function WordDetailView({ slug, from }: Props) {
           )}
         </header>
 
-        {/* IELTS 核心例句 / 短语 — 仅雅思词展示。not-found 分支无字典例句兜底，
-            默认给空字符串，完全交用户手写。 */}
-        {bookEntry?.ielts === true && (
+        {/* 核心例句 / 短语 — not-found 无字典例句兜底，默认为空，完全交用户手写。 */}
+        {bookEntry && (
           <CoreExampleCard
             lemma={query}
             value={bookEntry.coreExample ?? ""}
@@ -420,26 +452,14 @@ export default function WordDetailView({ slug, from }: Props) {
           />
         )}
 
-        {/* 雅思词：把笔记区提到“雅思实用建议”位置，同一份 notes 存储；
-            非雅思词则展示在下方默认的 NotesPanel。 */}
-        {bookEntry?.ielts === true ? (
-          <NotesPanel
-            lemma={query}
-            requirePosOnFirstSave
-            initialPos={bookEntry?.pos}
-            onFirstSave={handleFirstNoteSave}
-            onPosChange={handlePosChange}
-            titleOverride="雅思实用建议"
-          />
-        ) : (
-          <NotesPanel
-            lemma={query}
-            requirePosOnFirstSave
-            initialPos={bookEntry?.pos}
-            onFirstSave={handleFirstNoteSave}
-            onPosChange={handlePosChange}
-          />
-        )}
+        {/* 统一布局：有笔记时把笔记提到前面（无词义，笔记就是主体）。 */}
+        <NotesPanel
+          lemma={query}
+          requirePosOnFirstSave
+          initialPos={bookEntry?.pos}
+          onFirstSave={handleFirstNoteSave}
+          onPosChange={handlePosChange}
+        />
 
         {/* 词组辨析 cross-refs — shown 也在 not-found 分支，
             方便用户从任何单词页跳回已整理的辨析组。 */}
@@ -547,10 +567,9 @@ export default function WordDetailView({ slug, from }: Props) {
         )}
       </header>
 
-      {/* IELTS 核心例句 / 短语 — 仅在雅思标记启用时展示，位置靠顶，
-          方便“以句子/短语方式记单词”。默认从字典第一个 sense 抽例句，
-          没有则回退到 phrases；用户可手动编辑、保存后优先展示。 */}
-      {bookEntry?.ielts === true && (
+      {/* 核心例句 / 短语 — 所有词都展示。默认从字典抽取（优先短语，
+          其次例句），用户手动编辑后优先展示自定义。 */}
+      {bookEntry && (
         <CoreExampleCard
           lemma={typed}
           value={bookEntry.coreExample ?? ""}
@@ -559,12 +578,9 @@ export default function WordDetailView({ slug, from }: Props) {
         />
       )}
 
-      {/* 雅思实用建议—本质就是同一份笔记，只把展示位置挑到第二模块（核心例句之下）、
-          标题改为“雅思实用建议”。非雅思词仍保持页尾的默认 NotesPanel（见下方）。 */}
-      {bookEntry?.ielts === true && (
-        <NotesPanel lemma={typed} titleOverride="雅思实用建议" />
-      )}
-
+      {/* 有笔记时：笔记位于“核心例句之下、词义之上”（作为个性化主体）。
+          词义区块在后面自然接上，不重复渲染 NotesPanel。 */}
+      {hasAnyNote && <NotesPanel lemma={typed} />}
       {/* Origin-form notice — only when the user searched an inflected form
           (e.g. "arousal" → "arouse"). We surface the canonical lemma + its
           part-of-speech + a one-line gloss so the user immediately sees the
@@ -689,10 +705,9 @@ export default function WordDetailView({ slug, from }: Props) {
           放在笔记区之上，便于用户看完例句后直接回辨析页回忆对比。 */}
       <DistinctionRefs word={typed} />
 
-      {/* 笔记区（Day 3a）——笔记跟着用户搜的词，与 wordbook 条目的 key 一致。
-          雅思词已在上方满足同一份 notes（titleOverride="雅思实用建议"），
-          此处不再重复渲染，以免同一份 notes 在一个页面上两处双开。 */}
-      {bookEntry?.ielts !== true && <NotesPanel lemma={typed} />}
+      {/* 笔记区（Day 3a）——无笔记时才在页尾展示（“无笔记→词义→笔记”的顺序）；
+          有笔记时已在上方“核心例句 → 笔记 → 词义”处展示，避免重复渲染。 */}
+      {!hasAnyNote && <NotesPanel lemma={typed} />}
       {/* 首次入库强制弹窗：详情页刚把词收进单词本且未选过复习方式时弹出。
           选完才能关——不提供关闭按钮 / ESC / 遨罩关闭，避免用户遗忘分类。 */}
       {purposePromptOpen && (
@@ -1241,23 +1256,5 @@ function CoreExampleCard({
   );
 }
 
-/**
- * 从字典结构里拣出一句最常用的例句 / 短语，用作核心例句卡片的默认值。
- * 顺序：第一个 sense 的第一条例句 → 第一个 phrases 的 example → 第一个 phrases
- * 的 filled 短语本身。任何一层拿到就返回；都没有就返回空串（卡片将显示占位）。
- */
-function pickDefaultCoreExample(
-  senses: import("@/lib/types").DictSense[],
-  phrases: import("@/lib/types").DictPhrase[] | undefined,
-): string {
-  const ex = senses?.[0]?.ex?.[0];
-  if (ex?.en) return ex.cn ? `${ex.en} — ${ex.cn}` : ex.en;
-  const ph = phrases?.[0];
-  if (ph?.example?.en) {
-    return ph.example.cn
-      ? `${ph.example.en} — ${ph.example.cn}`
-      : ph.example.en;
-  }
-  if (ph?.filled) return ph.filled;
-  return "";
-}
+// 注：从字典结构里拣出核心例句 / 短语的 helper 已移至
+// `@/lib/wordbook/core-example`，供本文件与批量迁移逻辑共用。

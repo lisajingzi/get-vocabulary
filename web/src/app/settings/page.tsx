@@ -18,7 +18,13 @@ import {
   setDailyCapPassive,
   DAILY_CAP_CHOICES,
 } from "@/lib/wordbook/preferences";
-import { getEntry, recordLookup, setIelts } from "@/lib/wordbook/local";
+import {
+  getEntry,
+  recordLookup,
+  setGroup,
+  setIelts,
+  setPurpose,
+} from "@/lib/wordbook/local";
 
 type Status = "idle" | "loading" | "ok" | "error";
 
@@ -43,6 +49,7 @@ export default function SettingsPage() {
   // 雅思批量导入 — 与上方的 sync-code import 完全无关，只是因为拼写接近，
   // 变量名带上 ielts 前缀以防止回头看代码时搞混。
   const [ieltsInput, setIeltsInput] = useState("");
+  const [ieltsGroup, setIeltsGroup] = useState("");
   const [ieltsStatus, setIeltsStatus] = useState<Status>("idle");
   const [ieltsMsg, setIeltsMsg] = useState("");
   const [ieltsImporting, setIeltsImporting] = useState(false);
@@ -171,6 +178,8 @@ export default function SettingsPage() {
       return;
     }
 
+    const groupName = ieltsGroup.trim();
+
     setIeltsImporting(true);
     let created = 0;
     let existed = 0;
@@ -179,11 +188,16 @@ export default function SettingsPage() {
       if (before) {
         // 已存在 → 不刷新 queryCount / lastQueriedAt，只补雅思标记。
         setIelts(lemma, true);
+        // 强制切回 active（按需求 1.2：导入时默认听说写），保留后续用户切换能力。
+        setPurpose(lemma, "active");
+        if (groupName) setGroup(lemma, groupName);
         existed += 1;
       } else {
         // 不存在 → 新建条目（默认 status="new" / level=0 / queryCount=1）
         recordLookup(lemma);
         setIelts(lemma, true);
+        setPurpose(lemma, "active");
+        if (groupName) setGroup(lemma, groupName);
         created += 1;
       }
     }
@@ -191,7 +205,7 @@ export default function SettingsPage() {
     setIeltsInput("");
     setIeltsStatus("ok");
     setIeltsMsg(
-      `已导入 ${words.length} 个：新增 ${created} 个，已存在 ${existed} 个（均已标记为雅思）`,
+      `已导入 ${words.length} 个：新增 ${created} 个，已存在 ${existed} 个${groupName ? `（分组：${groupName}）` : ""}`,
     );
     window.setTimeout(() => setIeltsStatus("idle"), 5000);
   }
@@ -315,6 +329,19 @@ export default function SettingsPage() {
             ℹ️ 仅识别英文字母 / 连字符开头的行；序号、中文注释、空行会自动过滤。导入后可在单词详情页手动指定听说写 / 阅读模式。
           </p>
         </div>
+        <label className="block space-y-1">
+          <span className="text-xs text-[var(--fg-soft)]">分组名（可选）</span>
+          <input
+            type="text"
+            value={ieltsGroup}
+            onChange={(e) => setIeltsGroup(e.target.value)}
+            placeholder="例：List 1、教材第一章、真经5-Unit3……"
+            className="w-full rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+          />
+          <span className="block text-[11px] text-[var(--fg-soft)]">
+            同一分组名可重复使用（同一个单词若再次导入到别的组名，会更新为新组）；留空则不分组。
+          </span>
+        </label>
         <textarea
           value={ieltsInput}
           onChange={(e) => setIeltsInput(e.target.value)}

@@ -37,6 +37,12 @@ import {
 } from "@/lib/notebook/local";
 import { listPunches, writePunchesRaw } from "@/lib/wordbook/punches";
 import {
+  readReviewLog,
+  writeReviewLog,
+  mergeReviewLog,
+  type ReviewLog,
+} from "@/lib/wordbook/review-log";
+import {
   getPreferences,
   replacePreferences,
   type Preferences,
@@ -119,6 +125,12 @@ export interface SyncSnapshot {
    * queues when they resume review on another device.
    */
   dailySnapshot?: SnapshotPayload;
+  /**
+   * Per-day review event counts. Records how many review attempts happened
+   * each local day (both daily-review and wrong-book re-review). Merged
+   * by max-per-day to converge across devices.
+   */
+  reviewLog?: ReviewLog;
 }
 
 function buildSnapshot(): SyncSnapshot {
@@ -133,6 +145,7 @@ function buildSnapshot(): SyncSnapshot {
     punches: listPunches(),
     preferences: getPreferences(),
     dailySnapshot: daily ?? undefined,
+    reviewLog: readReviewLog(),
   };
 }
 
@@ -269,6 +282,12 @@ export async function pull(overrideSyncId?: string): Promise<{
   // Preferences: no timestamp on either side, so just take the remote value
   // if present. Small blob, low stakes; last-write-wins is fine.
   if (remote.preferences) replacePreferences(remote.preferences);
+
+  // Review log — merge by max-per-day.
+  if (remote.reviewLog) {
+    const merged = mergeReviewLog(readReviewLog(), remote.reviewLog);
+    writeReviewLog(merged);
+  }
 
   // If today's snapshot was frozen empty *before* this pull merged data in
   // (typical on a device that just bound to an existing sync code), drop it

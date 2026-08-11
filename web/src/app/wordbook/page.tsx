@@ -38,7 +38,7 @@ import {
 import SpeakButton from "@/components/SpeakButton";
 import DefinitionModal from "@/components/DefinitionModal";
 
-type SortKey = "recent" | "count" | "alpha";
+type SortKey = "recent" | "count" | "alpha" | "error";
 /** “all” = 不筛选。后两项对应 WordbookPurpose。 */
 type PurposeFilter = "all" | WordbookPurpose;
 /** 雅思筛选：与 purpose 正交的独立胶囊组。
@@ -47,20 +47,16 @@ type PurposeFilter = "all" | WordbookPurpose;
  *   - "nonielts" → 非雅思（entry.ielts !== true） */
 type IeltsFilter = "all" | "ielts" | "nonielts";
 
-const POS_OPTIONS = [
-  { value: "all", label: "全部" },
-  { value: "verb", label: "动词" },
-  { value: "noun", label: "名词" },
-  { value: "adjective", label: "形容词" },
-  { value: "adverb", label: "副词" },
-  { value: "other", label: "其他" },
-] as const;
-type PosOption = (typeof POS_OPTIONS)[number]["value"];
+const POS_OPTIONS_UNUSED: never[] = [];
+// 取消“词性 / 时间”两个筛选项后，POS_OPTIONS 与时间相关 helper 均不再使用。
+// 保留一个空占位避免 import/type 重命名冲突，具体实现已删除。
+void POS_OPTIONS_UNUSED;
 
 const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
   { value: "recent", label: "最近查询" },
   { value: "count", label: "查询次数" },
   { value: "alpha", label: "字母顺序" },
+  { value: "error", label: "错误次数" },
 ];
 
 /** 单词本每页展示多少条 —— 太长会让整页滚动很累。 */
@@ -89,10 +85,8 @@ function WordbookPageInner() {
   const searchParams = useSearchParams();
   const [entries, setEntries] = useState<WordbookEntry[]>([]);
   const [tab, setTab] = useState<WordbookStatus>("new");
-  const [pos, setPos] = useState<PosOption>("all");
   const [purpose, setPurpose] = useState<PurposeFilter>("all");
   const [ielts, setIeltsFilter] = useState<IeltsFilter>("all");
-  const [month, setMonth] = useState<string>("all"); // "all" | "YYYY-MM"
   const [sortKey, setSortKey] = useState<SortKey>("recent");
   const [undo, setUndo] = useState<UndoState | null>(null);
   // 当前页码（1-based）。同步到 URL 的 ?page=N，这样从详情页 back 回来时
@@ -150,41 +144,21 @@ function WordbookPageInner() {
 
   // Build the month dropdown options from whatever lastQueriedAt months the
   // current tab actually contains. Without this we'd offer empty months.
-  const monthOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const e of entries) {
-      if (e.status !== tab) continue;
-      const ym = monthKey(e.lastQueriedAt ?? e.lastSeenAt);
-      if (ym) set.add(ym);
-    }
-    const sorted = Array.from(set).sort().reverse(); // newest first
-    return [
-      { value: "all", label: "全部时间" },
-      ...sorted.map((ym) => ({ value: ym, label: monthLabel(ym) })),
-    ];
-  }, [entries, tab]);
-
-  // If switching tabs invalidates the current month selection, drop back to "all".
-  useEffect(() => {
-    if (month === "all") return;
-    if (!monthOptions.some((o) => o.value === month)) setMonth("all");
-  }, [month, monthOptions]);
+  // (Kept as unused-safe removal: month & pos filters are gone per product spec.)
 
   const visible = useMemo(() => {
     const filtered = entries
       .filter((e) => e.status === tab)
-      .filter((e) => matchPos(e.pos, pos))
       .filter((e) => matchPurpose(e.purpose, purpose))
-      .filter((e) => matchIelts(e.ielts, ielts))
-      .filter((e) => matchMonth(e.lastQueriedAt ?? e.lastSeenAt, month));
+      .filter((e) => matchIelts(e.ielts, ielts));
     return [...filtered].sort(buildComparator(sortKey));
-  }, [entries, tab, pos, purpose, ielts, month, sortKey]);
+  }, [entries, tab, purpose, ielts, sortKey]);
 
   // 任何筛选/tab 切换都把页码拽回第 1 页，避免出现
   //   “老朋友 25 条，切到只剩 3 条的 tab 后 page=3 → 空列表” 这种尴尬。
   useEffect(() => {
     setPage(1);
-  }, [tab, pos, purpose, ielts, month, sortKey]);
+  }, [tab, purpose, ielts, sortKey]);
 
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
   // 若 visible 变短导致 page 超出（例如把某个词移到别的 tab 后当前页空了），
@@ -387,34 +361,6 @@ function WordbookPageInner() {
             })}
           </div>
           <label className="inline-flex items-center gap-1.5 text-[var(--fg-soft)]">
-            词性
-            <select
-              value={pos}
-              onChange={(e) => setPos(e.target.value as PosOption)}
-              className="rounded-md border border-[var(--border)] bg-transparent px-2 py-1 text-[var(--fg)] outline-none"
-            >
-              {POS_OPTIONS.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="inline-flex items-center gap-1.5 text-[var(--fg-soft)]">
-            时间
-            <select
-              value={month}
-              onChange={(e) => setMonth(e.target.value)}
-              className="rounded-md border border-[var(--border)] bg-transparent px-2 py-1 text-[var(--fg)] outline-none"
-            >
-              {monthOptions.map((o) => (
-                <option key={o.value} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="inline-flex items-center gap-1.5 text-[var(--fg-soft)]">
             排序
             <select
               value={sortKey}
@@ -511,9 +457,9 @@ function WordbookPageInner() {
                             </span>
                           )}
                         </div>
-                        {/* 雅思核心例句 — 听力训练模式下需隐藏（否则例句会直接逢穿单词）。
+                        {/* 核心例句 / 短语 — 所有词展示。听力训练模式下需隐藏（例句会直接透露单词）。
                             未揭示时直接不渲染；揭示时才展。 */}
-                        {e.ielts && e.coreExample && showLemma && (
+                        {e.coreExample && showLemma && (
                           <div
                             className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--fg-soft)]"
                             title={e.coreExample}
@@ -551,7 +497,7 @@ function WordbookPageInner() {
                             </span>
                           )}
                         </div>
-                        {e.ielts && e.coreExample && (
+                        {e.coreExample && (
                           <div
                             className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--fg-soft)]"
                             title={e.coreExample}
@@ -690,16 +636,6 @@ function goBack(router: ReturnType<typeof useRouter>) {
   }
 }
 
-function matchPos(stored: string | undefined, want: PosOption): boolean {
-  if (want === "all") return true;
-  const s = (stored ?? "").toLowerCase();
-  if (want === "other") {
-    return !["verb", "noun", "adjective", "adverb"].some((p) => s.includes(p));
-  }
-  return s.includes(want);
-}
-
-/** “all” 匹配全部；否则严格比对 purpose，未设置时视为 “active”（与其他代码一致）。 */
 function matchPurpose(
   stored: WordbookPurpose | undefined,
   want: PurposeFilter,
@@ -720,26 +656,6 @@ function matchIelts(
   return want === "ielts" ? isIelts : !isIelts;
 }
 
-/** Returns "YYYY-MM" for the given ISO timestamp, or null if unparseable. */
-function monthKey(iso: string | undefined): string | null {
-  if (!iso) return null;
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return null;
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  return `${y}-${m}`;
-}
-
-function monthLabel(ym: string): string {
-  const [y, m] = ym.split("-");
-  return `${y}年${m}月`;
-}
-
-function matchMonth(iso: string | undefined, want: string): boolean {
-  if (want === "all") return true;
-  return monthKey(iso) === want;
-}
-
 function buildComparator(key: SortKey) {
   switch (key) {
     case "recent":
@@ -758,6 +674,14 @@ function buildComparator(key: SortKey) {
     case "alpha":
       return (a: WordbookEntry, b: WordbookEntry) =>
         a.lemma < b.lemma ? -1 : 1;
+    case "error":
+      // 错误次数从高到低；次数相同时回到 lemma 字母序作为稳定 tiebreaker。
+      return (a: WordbookEntry, b: WordbookEntry) => {
+        const ae = a.errorCount ?? 0;
+        const be = b.errorCount ?? 0;
+        if (ae !== be) return be - ae;
+        return a.lemma < b.lemma ? -1 : 1;
+      };
   }
 }
 
