@@ -37,6 +37,8 @@ import {
   getEntry,
   getKnownLemmaSet,
   recordLookup,
+  setCoreExample,
+  setIelts,
   setPos,
   setPurpose,
   setStatus,
@@ -205,6 +207,36 @@ export default function WordDetailView({ slug, from }: Props) {
     [state, query],
   );
 
+  // 切换雅思标记。与 purpose 正交：雅思词可以同时是听说写 / 阅读，不影响
+  // 复习曲线，仅控制详情页的“雅思专属块”（核心例句 / 实用建议）
+  // 与列表页的胶囊展示。
+  const handleToggleIelts = useCallback(() => {
+    let lemma: string | null = null;
+    if (state.kind === "ok") lemma = state.result.query;
+    else if (state.kind === "not-found") lemma = query;
+    if (!lemma) return;
+    const nextFlag = !(bookEntry?.ielts === true);
+    const updated = setIelts(lemma, nextFlag);
+    if (!updated) return;
+    setBookEntry(updated);
+    toast(nextFlag ? "已标记为雅思词" : "已取消雅思标记");
+  }, [state, query, bookEntry?.ielts]);
+
+  // 保存雅思核心例句 / 短语。空字符串 = 清除覆盖，回退到字典默认例句。
+  const handleSaveCoreExample = useCallback(
+    (text: string) => {
+      let lemma: string | null = null;
+      if (state.kind === "ok") lemma = state.result.query;
+      else if (state.kind === "not-found") lemma = query;
+      if (!lemma) return;
+      const updated = setCoreExample(lemma, text);
+      if (!updated) return;
+      setBookEntry(updated);
+      toast(text.trim().length === 0 ? "已回退默认例句" : "核心例句已保存");
+    },
+    [state, query],
+  );
+
   // 弹窗内点选后：写入 purpose、关闭弹窗、给一条 toast 确认。与常驻
   // <PurposeToggle> 不同，这里 toast 用 “本次已设置为” 更贴合首次场景。
   const handlePurposePromptChoose = useCallback(
@@ -366,6 +398,10 @@ export default function WordDetailView({ slug, from }: Props) {
                 purpose={bookEntry.purpose ?? "active"}
                 onChange={handleTogglePurpose}
               />
+              <IeltsToggle
+                active={bookEntry.ielts === true}
+                onToggle={handleToggleIelts}
+              />
               <span className="text-xs text-[var(--fg-soft)]">
                 已查 {bookEntry.queryCount} 次
               </span>
@@ -373,13 +409,37 @@ export default function WordDetailView({ slug, from }: Props) {
           )}
         </header>
 
-        <NotesPanel
-          lemma={query}
-          requirePosOnFirstSave
-          initialPos={bookEntry?.pos}
-          onFirstSave={handleFirstNoteSave}
-          onPosChange={handlePosChange}
-        />
+        {/* IELTS 核心例句 / 短语 — 仅雅思词展示。not-found 分支无字典例句兜底，
+            默认给空字符串，完全交用户手写。 */}
+        {bookEntry?.ielts === true && (
+          <CoreExampleCard
+            lemma={query}
+            value={bookEntry.coreExample ?? ""}
+            defaultExample=""
+            onSave={handleSaveCoreExample}
+          />
+        )}
+
+        {/* 雅思词：把笔记区提到“雅思实用建议”位置，同一份 notes 存储；
+            非雅思词则展示在下方默认的 NotesPanel。 */}
+        {bookEntry?.ielts === true ? (
+          <NotesPanel
+            lemma={query}
+            requirePosOnFirstSave
+            initialPos={bookEntry?.pos}
+            onFirstSave={handleFirstNoteSave}
+            onPosChange={handlePosChange}
+            titleOverride="雅思实用建议"
+          />
+        ) : (
+          <NotesPanel
+            lemma={query}
+            requirePosOnFirstSave
+            initialPos={bookEntry?.pos}
+            onFirstSave={handleFirstNoteSave}
+            onPosChange={handlePosChange}
+          />
+        )}
 
         {/* 词组辨析 cross-refs — shown 也在 not-found 分支，
             方便用户从任何单词页跳回已整理的辨析组。 */}
@@ -476,12 +536,34 @@ export default function WordDetailView({ slug, from }: Props) {
               purpose={bookEntry.purpose ?? "active"}
               onChange={handleTogglePurpose}
             />
+            <IeltsToggle
+              active={bookEntry.ielts === true}
+              onToggle={handleToggleIelts}
+            />
             <span className="text-xs text-[var(--fg-soft)]">
               已查 {bookEntry.queryCount} 次
             </span>
           </div>
         )}
       </header>
+
+      {/* IELTS 核心例句 / 短语 — 仅在雅思标记启用时展示，位置靠顶，
+          方便“以句子/短语方式记单词”。默认从字典第一个 sense 抽例句，
+          没有则回退到 phrases；用户可手动编辑、保存后优先展示。 */}
+      {bookEntry?.ielts === true && (
+        <CoreExampleCard
+          lemma={typed}
+          value={bookEntry.coreExample ?? ""}
+          defaultExample={pickDefaultCoreExample(entry.senses, entry.phrases)}
+          onSave={handleSaveCoreExample}
+        />
+      )}
+
+      {/* 雅思实用建议—本质就是同一份笔记，只把展示位置挑到第二模块（核心例句之下）、
+          标题改为“雅思实用建议”。非雅思词仍保持页尾的默认 NotesPanel（见下方）。 */}
+      {bookEntry?.ielts === true && (
+        <NotesPanel lemma={typed} titleOverride="雅思实用建议" />
+      )}
 
       {/* Origin-form notice — only when the user searched an inflected form
           (e.g. "arousal" → "arouse"). We surface the canonical lemma + its
@@ -607,8 +689,10 @@ export default function WordDetailView({ slug, from }: Props) {
           放在笔记区之上，便于用户看完例句后直接回辨析页回忆对比。 */}
       <DistinctionRefs word={typed} />
 
-      {/* 笔记区（Day 3a）——笔记跟着用户搜的词，与 wordbook 条目的 key 一致。 */}
-      <NotesPanel lemma={typed} />
+      {/* 笔记区（Day 3a）——笔记跟着用户搜的词，与 wordbook 条目的 key 一致。
+          雅思词已在上方满足同一份 notes（titleOverride="雅思实用建议"），
+          此处不再重复渲染，以免同一份 notes 在一个页面上两处双开。 */}
+      {bookEntry?.ielts !== true && <NotesPanel lemma={typed} />}
       {/* 首次入库强制弹窗：详情页刚把词收进单词本且未选过复习方式时弹出。
           选完才能关——不提供关闭按钮 / ESC / 遨罩关闭，避免用户遗忘分类。 */}
       {purposePromptOpen && (
@@ -1010,4 +1094,170 @@ function SenseIllustration({
       )}
     </>
   );
+}
+
+/**
+ * 雅思标记胶囊 —— 与 PurposeToggle 正交的独立开关。
+ * 打开后详情页顶部展示「核心例句 / 短语」，且列表页在单词旁展示该例句；
+ * 关闭后一切回归默认字典视图。
+ */
+function IeltsToggle({
+  active,
+  onToggle,
+}: {
+  active: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={active}
+      onClick={onToggle}
+      title={active ? "取消雅思标记" : "标记为雅思学习词汇"}
+      className={[
+        "inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition",
+        active
+          ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+          : "border-[var(--border)] text-[var(--fg-soft)] hover:text-[var(--fg)] hover:border-[var(--fg-soft)]",
+      ].join(" ")}
+    >
+      <span aria-hidden>{active ? "✓" : "＋"}</span>
+      <span>雅思</span>
+    </button>
+  );
+}
+
+/**
+ * 雅思词的「核心例句 / 短语」卡片。放在详情页最上方，以句子/短语方式记单词。
+ *
+ * - 默认展示 `defaultExample`（由 <WordDetailView> 从 senses[0].ex[0] 或
+ *   phrases[0].example 拣出的常用例句）。
+ * - 用户手动编辑保存后，父组件会通过 onSave 写入 entry.coreExample；再次进
+ *   入时优先展示这个覆盖值。清空后自动回退到默认。
+ * - 提供朗读按钮，方便边听边记。
+ */
+function CoreExampleCard({
+  lemma,
+  value,
+  defaultExample,
+  onSave,
+}: {
+  lemma: string;
+  /** 当前存储的覆盖值；空字符串表示未覆盖，展示 defaultExample */
+  value: string;
+  /** 未覆盖时展示的默认例句；可能为空（词条没有例句可抽） */
+  defaultExample: string;
+  onSave: (text: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(value || defaultExample || "");
+
+  // 父组件传下来的 value / defaultExample 变化时，若未在编辑，把 draft 同步过去，
+  // 避免用户切换单词后 textarea 还留着上一个词的内容。
+  useEffect(() => {
+    if (!editing) setDraft(value || defaultExample || "");
+  }, [value, defaultExample, editing]);
+
+  const displayed = value.trim().length > 0 ? value : defaultExample;
+  const isFallback = value.trim().length === 0;
+
+  function handleSave() {
+    onSave(draft);
+    setEditing(false);
+  }
+
+  function handleCancel() {
+    setDraft(value || defaultExample || "");
+    setEditing(false);
+  }
+
+  return (
+    <section
+      className="space-y-2 rounded-lg border border-[var(--accent)]/40 bg-[var(--accent)]/5 p-4"
+      aria-label="雅思核心例句"
+    >
+      <div className="flex items-center justify-between gap-2">
+        <h2 className="text-sm font-medium uppercase tracking-wide text-[var(--accent)]">
+          核心例句 / 短语
+        </h2>
+        <div className="flex items-center gap-2">
+          {displayed && !editing && <SpeakButton text={displayed} variant="us" />}
+          {!editing ? (
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              className="rounded border border-[var(--border)] px-2 py-0.5 text-xs text-[var(--fg-soft)] transition hover:text-[var(--fg)] hover:border-[var(--fg-soft)]"
+            >
+              编辑
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={handleCancel}
+                className="rounded border border-[var(--border)] px-2 py-0.5 text-xs text-[var(--fg-soft)] transition hover:text-[var(--fg)]"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={handleSave}
+                className="rounded bg-[var(--accent)] px-2 py-0.5 text-xs text-white transition hover:opacity-90"
+              >
+                保存
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {editing ? (
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          rows={3}
+          placeholder={`写一句最能帮你记住 ${lemma} 的例句或短语…（清空并保存可回退到默认）`}
+          className="w-full resize-none rounded-md border border-[var(--border)] bg-transparent p-2 text-sm leading-relaxed outline-none focus:border-[var(--accent)]"
+        />
+      ) : displayed ? (
+        <p
+          className="text-sm leading-relaxed"
+          title={isFallback ? "默认例句（未自定义）" : "已自定义"}
+        >
+          {displayed}
+          {isFallback && (
+            <span className="ml-2 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
+              默认
+            </span>
+          )}
+        </p>
+      ) : (
+        <p className="text-sm text-[var(--fg-soft)]">
+          暂无例句，点「编辑」为 <span className="font-medium">{lemma}</span> 写一句你自己的核心例句 / 短语。
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * 从字典结构里拣出一句最常用的例句 / 短语，用作核心例句卡片的默认值。
+ * 顺序：第一个 sense 的第一条例句 → 第一个 phrases 的 example → 第一个 phrases
+ * 的 filled 短语本身。任何一层拿到就返回；都没有就返回空串（卡片将显示占位）。
+ */
+function pickDefaultCoreExample(
+  senses: import("@/lib/types").DictSense[],
+  phrases: import("@/lib/types").DictPhrase[] | undefined,
+): string {
+  const ex = senses?.[0]?.ex?.[0];
+  if (ex?.en) return ex.cn ? `${ex.en} — ${ex.cn}` : ex.en;
+  const ph = phrases?.[0];
+  if (ph?.example?.en) {
+    return ph.example.cn
+      ? `${ph.example.en} — ${ph.example.cn}`
+      : ph.example.en;
+  }
+  if (ph?.filled) return ph.filled;
+  return "";
 }

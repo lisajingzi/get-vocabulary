@@ -66,6 +66,14 @@ export interface WordbookEntry {
   /** Snapshot of the first sense's part-of-speech, captured at first lookup.
    *  Lets the wordbook page filter by pos without re-fetching dict shards. */
   pos?: string;
+  /** IELTS study flag — orthogonal to purpose (a word can be both 听说写 and 雅思).
+   *  true = 已标记雅思；undefined/false = 未标记。用来在单词本、详情页和批量导入里
+   *  区分“雅思专用”词。 */
+  ielts?: boolean;
+  /** IELTS 核心例句 / 短语。为空时详情页会用字典第一个 sense 的例句兜底展示；
+   *  用户在详情页手动编辑后写入此字段，之后所有地方（详情页头部、单词本列表）
+   *  都优先展示此字段。仅在 `ielts === true` 时才会被读取渲染。 */
+  coreExample?: string;
 }
 
 /**
@@ -371,6 +379,51 @@ export function setPos(lemma: string, pos: string): WordbookEntry | null {
   const existing = store[key];
   if (!existing) return null;
   const next: WordbookEntry = { ...existing, pos };
+  store[key] = next;
+  writeStore(store);
+  return next;
+}
+
+/**
+ * Toggle the IELTS flag on an existing entry. No-op (returns null) if the
+ * lemma isn't in the wordbook yet — the flag is meaningful only relative to
+ * a recorded entry. Independent of `purpose`: a word can simultaneously be
+ * 听说写 and 雅思, or 阅读 and 雅思.
+ */
+export function setIelts(lemma: string, flag: boolean): WordbookEntry | null {
+  const key = lemma.toLowerCase().trim();
+  const store = readStore();
+  const existing = store[key];
+  if (!existing) return null;
+  const next: WordbookEntry = {
+    ...existing,
+    ielts: flag,
+    lastSeenAt: new Date().toISOString(),
+  };
+  store[key] = next;
+  writeStore(store);
+  return next;
+}
+
+/**
+ * Set the IELTS core example / phrase. Trimmed empty string clears the
+ * override (so the UI falls back to the dictionary default). No-op if the
+ * lemma isn't in the wordbook yet.
+ */
+export function setCoreExample(
+  lemma: string,
+  text: string,
+): WordbookEntry | null {
+  const key = lemma.toLowerCase().trim();
+  const store = readStore();
+  const existing = store[key];
+  if (!existing) return null;
+  const trimmed = text.trim();
+  const next: WordbookEntry = {
+    ...existing,
+    coreExample: trimmed.length > 0 ? trimmed : undefined,
+    lastSeenAt: new Date().toISOString(),
+  };
   store[key] = next;
   writeStore(store);
   return next;

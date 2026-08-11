@@ -41,6 +41,11 @@ import DefinitionModal from "@/components/DefinitionModal";
 type SortKey = "recent" | "count" | "alpha";
 /** “all” = 不筛选。后两项对应 WordbookPurpose。 */
 type PurposeFilter = "all" | WordbookPurpose;
+/** 雅思筛选：与 purpose 正交的独立胶囊组。
+ *   - "all"    → 不筛
+ *   - "ielts"  → 仅雅思（entry.ielts === true）
+ *   - "nonielts" → 非雅思（entry.ielts !== true） */
+type IeltsFilter = "all" | "ielts" | "nonielts";
 
 const POS_OPTIONS = [
   { value: "all", label: "全部" },
@@ -86,6 +91,7 @@ function WordbookPageInner() {
   const [tab, setTab] = useState<WordbookStatus>("new");
   const [pos, setPos] = useState<PosOption>("all");
   const [purpose, setPurpose] = useState<PurposeFilter>("all");
+  const [ielts, setIeltsFilter] = useState<IeltsFilter>("all");
   const [month, setMonth] = useState<string>("all"); // "all" | "YYYY-MM"
   const [sortKey, setSortKey] = useState<SortKey>("recent");
   const [undo, setUndo] = useState<UndoState | null>(null);
@@ -169,15 +175,16 @@ function WordbookPageInner() {
       .filter((e) => e.status === tab)
       .filter((e) => matchPos(e.pos, pos))
       .filter((e) => matchPurpose(e.purpose, purpose))
+      .filter((e) => matchIelts(e.ielts, ielts))
       .filter((e) => matchMonth(e.lastQueriedAt ?? e.lastSeenAt, month));
     return [...filtered].sort(buildComparator(sortKey));
-  }, [entries, tab, pos, purpose, month, sortKey]);
+  }, [entries, tab, pos, purpose, ielts, month, sortKey]);
 
   // 任何筛选/tab 切换都把页码拽回第 1 页，避免出现
   //   “老朋友 25 条，切到只剩 3 条的 tab 后 page=3 → 空列表” 这种尴尬。
   useEffect(() => {
     setPage(1);
-  }, [tab, pos, purpose, month, sortKey]);
+  }, [tab, pos, purpose, ielts, month, sortKey]);
 
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
   // 若 visible 变短导致 page 超出（例如把某个词移到别的 tab 后当前页空了），
@@ -345,6 +352,40 @@ function WordbookPageInner() {
               );
             })}
           </div>
+          {/* 雅思筛选 — 与 purpose 正交的独立一组胶囊。
+              一个单词可以既是雅思又是听说写，所以这里单独一组、不与上面混。 */}
+          <div
+            className="inline-flex rounded-md border border-[var(--border)] p-0.5"
+            role="radiogroup"
+            aria-label="雅思筛选"
+          >
+            {(
+              [
+                { key: "all", label: "全部" },
+                { key: "ielts", label: "仅雅思" },
+                { key: "nonielts", label: "非雅思" },
+              ] as const
+            ).map((it) => {
+              const active = it.key === ielts;
+              return (
+                <button
+                  key={it.key}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => setIeltsFilter(it.key)}
+                  className={[
+                    "rounded px-2.5 py-1 transition",
+                    active
+                      ? "bg-[var(--accent)] text-white"
+                      : "text-[var(--fg-soft)] hover:text-[var(--fg)]",
+                  ].join(" ")}
+                >
+                  {it.label}
+                </button>
+              );
+            })}
+          </div>
           <label className="inline-flex items-center gap-1.5 text-[var(--fg-soft)]">
             词性
             <select
@@ -461,7 +502,25 @@ function WordbookPageInner() {
                               {shortPos(e.pos)}
                             </span>
                           )}
+                          {e.ielts && (
+                            <span
+                              title="雅思学习词汇"
+                              className="rounded bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--accent)]"
+                            >
+                              雅思
+                            </span>
+                          )}
                         </div>
+                        {/* 雅思核心例句 — 听力训练模式下需隐藏（否则例句会直接逢穿单词）。
+                            未揭示时直接不渲染；揭示时才展。 */}
+                        {e.ielts && e.coreExample && showLemma && (
+                          <div
+                            className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--fg-soft)]"
+                            title={e.coreExample}
+                          >
+                            {e.coreExample}
+                          </div>
+                        )}
                       </div>
                       <div className="shrink-0 space-x-3 text-xs text-[var(--fg-soft)]">
                         <span title="查询次数">×{e.queryCount}</span>
@@ -483,7 +542,23 @@ function WordbookPageInner() {
                               {shortPos(e.pos)}
                             </span>
                           )}
+                          {e.ielts && (
+                            <span
+                              title="雅思学习词汇"
+                              className="rounded bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--accent)]"
+                            >
+                              雅思
+                            </span>
+                          )}
                         </div>
+                        {e.ielts && e.coreExample && (
+                          <div
+                            className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--fg-soft)]"
+                            title={e.coreExample}
+                          >
+                            {e.coreExample}
+                          </div>
+                        )}
                       </div>
                       <div className="shrink-0 space-x-3 text-xs text-[var(--fg-soft)]">
                         <span title="查询次数">×{e.queryCount}</span>
@@ -632,6 +707,17 @@ function matchPurpose(
   if (want === "all") return true;
   const actual: WordbookPurpose = stored ?? "active";
   return actual === want;
+}
+
+/** 雅思筛选：all 全中；ielts 仅保留 flag 为 true；nonielts 仅保留 flag 不为 true。
+ *  undefined 视同 false，保证历史存量自然归入“非雅思”。 */
+function matchIelts(
+  stored: boolean | undefined,
+  want: IeltsFilter,
+): boolean {
+  if (want === "all") return true;
+  const isIelts = stored === true;
+  return want === "ielts" ? isIelts : !isIelts;
 }
 
 /** Returns "YYYY-MM" for the given ISO timestamp, or null if unparseable. */

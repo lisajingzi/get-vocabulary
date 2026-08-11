@@ -59,6 +59,12 @@ interface Props {
    * to the wordbook module. Only relevant when requirePosOnFirstSave=true.
    */
   onPosChange?: (pos: string) => void;
+  /**
+   * 自定义面板标题。未指定时渲染默认“笔记”。
+   * IELTS 详情页会把同一份笔记列表以“雅思实用建议”的名字展示，
+   * 存储仍是同一份 notes（只改标题不改数据）。
+   */
+  titleOverride?: string;
 }
 
 /** Allowed pos tokens. Stored values match the strings the wordbook page's
@@ -120,6 +126,7 @@ export default function NotesPanel({
   initialPos,
   onFirstSave,
   onPosChange,
+  titleOverride,
 }: Props) {
   const [notes, setNotes] = useState<WordNote[]>([]);
   const [draft, setDraft] = useState("");
@@ -245,7 +252,7 @@ export default function NotesPanel({
   return (
     <section className="space-y-3">
       <h2 className="text-sm font-medium uppercase tracking-wide text-[var(--accent)]">
-        笔记
+        {titleOverride ?? "笔记"}
       </h2>
 
       {/* New-note composer */}
