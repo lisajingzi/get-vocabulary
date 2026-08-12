@@ -510,7 +510,7 @@ export function setGroup(
   const existing = store[key];
   if (!existing) return null;
   const trimmed = group.trim();
-  next: WordbookEntry = {
+  const next: WordbookEntry = {
     ...existing,
     group: trimmed.length > 0 ? trimmed : undefined,
     lastSeenAt: new Date().toISOString(),
