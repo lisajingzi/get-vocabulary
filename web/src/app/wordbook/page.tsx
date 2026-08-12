@@ -197,12 +197,23 @@ function WordbookPageInner() {
 
   // 雅思导入组名取自用户已有数据（去重 + 按字典序）。当列表里一个组都没时，
   // 下拉隐藏，避免无雅思导入的用户看到空控件。
+  // 另外：手动查询后勾选"雅思"但未指定组的词会被归到 "__none__"（其他），
+  // 让用户能筛选"雅思里所有散词"。
   const groupOptions = useMemo(() => {
     const names = new Set<string>();
+    let hasOrphan = false;
     for (const e of entries) {
-      if (e.ielts && e.group && e.group.trim()) names.add(e.group.trim());
+      if (!e.ielts) continue;
+      const g = (e.group ?? "").trim();
+      if (g) names.add(g);
+      else hasOrphan = true;
     }
-    return Array.from(names).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+    const sorted = Array.from(names).sort((a, b) =>
+      a.localeCompare(b, "zh-Hans-CN"),
+    );
+    // "其他"固定排在真经组之后，方便快速定位散词。
+    if (hasOrphan) sorted.push("__none__");
+    return sorted;
   }, [entries]);
 
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
@@ -467,7 +478,7 @@ function WordbookPageInner() {
                 <option value="all">全部组</option>
                 {groupOptions.map((g) => (
                   <option key={g} value={g}>
-                    {g}
+                    {g === "__none__" ? "其他（无组）" : g}
                   </option>
                 ))}
               </select>
@@ -802,13 +813,15 @@ function matchIelts(
 }
 
 /**
- * 雅思词组名匹配。`want = "all"` 不筛；否则只保留 group 字段完全相等的条目。
+ * 雅思词组名匹配。`want = "all"` 不筛；`want = "__none__"` 表示"雅思里未归组
+ * 的散词"（用户手动查询后勾了"雅思"但没填组）；其他值按组名精确匹配。
  * 非雅思词天然没 group，会被直接过滤掉——这与“选了具体组名隐含只看雅思”
  * 的 UI 预期一致。
  */
 function matchGroup(entry: WordbookEntry, want: GroupFilter): boolean {
   if (want === "all") return true;
   const g = (entry.group ?? "").trim();
+  if (want === "__none__") return !g;
   return g === want;
 }
 
