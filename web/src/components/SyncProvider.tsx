@@ -45,7 +45,13 @@ const VISIBILITY_PULL_THROTTLE_MS = 5000;
 
 export default function SyncProvider() {
   useEffect(() => {
-    // \u5148\u505a\u672c\u5730\u6570\u636e\u8fc1\u79fb\uff1a\u65b0\u589e\u5b57\u6bb5\uff08reviewCount/errorCount/inWrongBook\uff09\u56de\u586b\n    // \u9ed8\u8ba4\u503c\uff0c\u540e\u7eed UI \u5c31\u4e0d\u9700\u8981\u5904\u5904\u5199 `?? 0` \u515c\u5e95\u3002coreExample \u8fc1\u79fb\u9700\u8981\n    // \u5b57\u5178\u53c2\u4e0e\uff0c\u5f02\u6b65\u542f\u52a8\u540e\u540e\u53f0\u9010\u6761\u56de\u586b\u3002\n    migrateEntries();\n    void migrateCoreExamples();\n\n    let lastPullAt = 0;
+    // 先做本地数据迁移：为老词条回填 reviewCount / errorCount / inWrongBook 等
+    // 新增字段的默认值，避免后续 UI 处处写 `?? 0` 兜底。coreExample 迁移需要
+    // 字典参与，异步在后台逐条回填。
+    migrateEntries();
+    void migrateCoreExamples();
+
+    let lastPullAt = 0;
     const doPull = () => {
       lastPullAt = Date.now();
       pull().catch(() => {});
