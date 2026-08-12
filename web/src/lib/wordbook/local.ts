@@ -555,7 +555,7 @@ export function normalizeIeltsGroups(): number {
     //   "真经-学校教育 3"  → "真经-学校教育"
     //   "真经-学校教育-2"  → "真经-学校教育"
     //   "真经-学校教育"    → "真经-学校教育" (no change)
-    let normalized = g.replace(/[\s\-_]*\d+$/u, "").trim();
+    let normalized = g.replace(/[\s\-_]*\d+$/, "").trim();
 
     // Step 2: apply explicit aliases.
     if (ALIASES[normalized]) normalized = ALIASES[normalized];
