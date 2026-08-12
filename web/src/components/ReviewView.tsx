@@ -920,10 +920,6 @@ function RecognizeCard({
     [onCardState, graded],
   );
 
-  const canAdvance =
-    graded === "fail" || (graded === "pass" && confirmed !== null);
-  const finalPass = graded === "pass" && confirmed === "pass";
-
   return (
     <section className="space-y-4">
       {/* 头部 — 词形与核心例句。 */}
@@ -970,8 +966,10 @@ function RecognizeCard({
         <button
           type="button"
           onClick={() => {
+            // 忘了 = 本题直接判失败，立即进入下一题；不再等待二次确认。
             setGraded("fail");
             setConfirmed(null);
+            onAdvance("fail");
           }}
           className={[
             "rounded-md border px-3 py-1.5 text-sm transition",
@@ -1070,7 +1068,8 @@ function RecognizeCard({
             </div>
           )}
 
-          {/* 二级自评：仅在一级 = 认识 时出现 */}
+          {/* 二级自评：仅在一级 = 认识 时出现。点击 = 直接判定 + 进下一题，
+              不再需要额外的“下一题”按钮。 */}
           {graded === "pass" && (
             <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 space-y-2">
               <p className="text-[11px] font-medium text-[var(--fg-soft)]">
@@ -1079,52 +1078,27 @@ function RecognizeCard({
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setConfirmed("pass")}
-                  className={[
-                    "rounded-md border px-3 py-1.5 text-xs transition",
-                    confirmed === "pass"
-                      ? "border-[var(--accent)] bg-[var(--accent)] text-white"
-                      : "border-[var(--border)] hover:border-[var(--accent)]",
-                  ].join(" ")}
+                  onClick={() => {
+                    setConfirmed("pass");
+                    onAdvance("pass");
+                  }}
+                  className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs transition hover:border-[var(--accent)] hover:bg-[var(--accent)] hover:text-white"
                 >
                   ✓ 记对了
                 </button>
                 <button
                   type="button"
-                  onClick={() => setConfirmed("fail")}
-                  className={[
-                    "rounded-md border px-3 py-1.5 text-xs transition",
-                    confirmed === "fail"
-                      ? "border-red-400 bg-red-500 text-white"
-                      : "border-[var(--border)] hover:border-red-400 hover:text-red-500",
-                  ].join(" ")}
+                  onClick={() => {
+                    setConfirmed("fail");
+                    onAdvance("fail");
+                  }}
+                  className="rounded-md border border-[var(--border)] px-3 py-1.5 text-xs transition hover:border-red-400 hover:bg-red-500 hover:text-white"
                 >
                   ✗ 记错了
                 </button>
               </div>
             </div>
           )}
-
-          {/* 底部结果 + 下一题按钮——不再包卡片，保持级别清晰。 */}
-          <div className="flex items-center justify-between px-1 pt-1">
-            <p className="text-[11px] text-[var(--fg-soft)]">
-              {graded === "fail"
-                ? "自评忘了 — 本题记为失败。"
-                : confirmed === null
-                  ? "请确认你是否真的记对了。"
-                  : finalPass
-                    ? "记对了 — 本题记为通过。"
-                    : "记错了 — 本题记为失败。"}
-            </p>
-            <button
-              type="button"
-              onClick={() => onAdvance(finalPass ? "pass" : "fail")}
-              disabled={!canAdvance}
-              className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-4 py-1.5 text-xs text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              下一题 →
-            </button>
-          </div>
         </div>
       )}
     </section>
