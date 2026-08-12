@@ -16,7 +16,7 @@
 
 import { useEffect } from "react";
 import { pull, schedulePush, flushPush } from "@/lib/sync/cloud";
-import { migrateEntries } from "@/lib/wordbook/local";
+import { migrateEntries, normalizeIeltsGroups } from "@/lib/wordbook/local";
 import { migrateCoreExamples } from "@/lib/wordbook/core-example";
 
 const CHANGE_EVENTS = [
@@ -50,6 +50,26 @@ export default function SyncProvider() {
     // 字典参与，异步在后台逐条回填。
     migrateEntries();
     void migrateCoreExamples();
+
+    // 一次性归一化雅思导入组名：去掉数字后缀 & 合并同主题。跑完打个
+    // localStorage 标记，避免每次刷新都扫全库。若未来云端拉下来老命名，
+    // 用户可以手动清 localStorage.get:group-normalize:v1 再触发。
+    const GROUP_MIGRATION_KEY = "get:group-normalize:v1";
+    try {
+      if (
+        typeof window !== "undefined" &&
+        !window.localStorage.getItem(GROUP_MIGRATION_KEY)
+      ) {
+        const changed = normalizeIeltsGroups();
+        window.localStorage.setItem(GROUP_MIGRATION_KEY, String(Date.now()));
+        if (changed > 0) {
+          // 触发一次云同步，把归一化后的组名推上去。
+          window.dispatchEvent(new Event("get:wordbook-change"));
+        }
+      }
+    } catch {
+      // localStorage \u53ef\u80fd\u4e0d\u53ef\u7528\uff0c\u5931\u8d25\u65f6\u5219\u4e0d\u9605\u53d1\u8fc1\u79fb\u3002
+    }
 
     let lastPullAt = 0;
     const doPull = () => {

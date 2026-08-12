@@ -510,7 +510,7 @@ export function setGroup(
   const existing = store[key];
   if (!existing) return null;
   const trimmed = group.trim();
-  const next: WordbookEntry = {
+  next: WordbookEntry = {
     ...existing,
     group: trimmed.length > 0 ? trimmed : undefined,
     lastSeenAt: new Date().toISOString(),
@@ -520,6 +520,54 @@ export function setGroup(
   return next;
 }
 
+/**
+ * Batch-normalize IELTS import groups.
+ *
+ * Motivation: 真经-学校教育1 / 真经-学校教育2 / 真经-学校教育 3 were imported
+ * as separate groups. The user wants them collapsed to a single group by
+ * stripping trailing digits (and any punctuation immediately before those
+ * digits). Also, "真经-历史文明" is explicitly aliased to "真经-历史文化"
+ * per user request.
+ *
+ * Safety:
+ *   - Only groups starting with the "真经-" prefix are touched, so any
+ *     hand-typed user group stays intact.
+ *   - Entries without a group are ignored.
+ *
+ * Returns the number of entries whose `group` was changed.
+ */
+export function normalizeIeltsGroups(): number {
+  const store = readStore();
+  const nowIso = new Date().toISOString();
+  let changed = 0;
+  const IELTS_PREFIX = "真经-";
+  // Manual alias table for cases that don't fit the "strip digits" rule.
+  const ALIASES: Record<string, string> = {
+    "真经-历史文明": "真经-历史文化",
+  };
+  for (const key of Object.keys(store)) {
+    const entry = store[key];
+    const g = entry.group?.trim();
+    if (!g || !g.startsWith(IELTS_PREFIX)) continue;
+
+    // Step 1: strip trailing digits (with optional separator before them).
+    //   "真经-学校教育1"   → "真经-学校教育"
+    //   "真经-学校教育 3"  → "真经-学校教育"
+    //   "真经-学校教育-2"  → "真经-学校教育"
+    //   "真经-学校教育"    → "真经-学校教育" (no change)
+    let normalized = g.replace(/[\s\-_]*\d+$/u, "").trim();
+
+    // Step 2: apply explicit aliases.
+    if (ALIASES[normalized]) normalized = ALIASES[normalized];
+
+    if (normalized && normalized !== g) {
+      store[key] = { ...entry, group: normalized, lastSeenAt: nowIso };
+      changed += 1;
+    }
+  }
+  if (changed > 0) writeStore(store);
+  return changed;
+}
 /**
  * Record the outcome of a review attempt on stats (reviewCount / errorCount /
  * inWrongBook), independent from `recordReview()` which handles the
