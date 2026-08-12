@@ -1022,10 +1022,10 @@ function RecognizeCard({
         <button
           type="button"
           onClick={() => {
-            // 忘了 = 本题直接判失败，立即进入下一题；不再等待二次确认。
+            // 忘了 = 本题终局判失败，但先展开释义/笔记让用户熟悉一下，
+            // 再点“下一题”才推进；不再立刻切走。
             setGraded("fail");
             setConfirmed(null);
-            onAdvance("fail");
           }}
           className={[
             "rounded-md border px-3 py-1.5 text-sm transition",
@@ -1153,6 +1153,22 @@ function RecognizeCard({
                   ✗ 记错了
                 </button>
               </div>
+            </div>
+          )}
+
+          {/* 一级 = 忘了：本题已判失败，展开释义供熟悉；手动“下一题”推进。 */}
+          {graded === "fail" && (
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 flex items-center justify-between gap-3">
+              <p className="text-[11px] text-[var(--fg-soft)]">
+                熟悉一下再走，本题已计为「未掌握」。
+              </p>
+              <button
+                type="button"
+                onClick={() => onAdvance("fail")}
+                className="rounded-md bg-[var(--accent)] px-4 py-1.5 text-xs font-medium text-white transition hover:brightness-105"
+              >
+                下一题 →
+              </button>
             </div>
           )}
         </div>
