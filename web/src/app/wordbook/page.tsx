@@ -521,7 +521,7 @@ function WordbookPageInner() {
                         </div>
                         {previewExample && showLemma && (
                           <div
-                            className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--fg-soft)]"
+                            className="mt-1 line-clamp-2 text-sm leading-snug text-[var(--fg-soft)]"
                             title={previewExample}
                           >
                             {previewExample}
@@ -553,7 +553,7 @@ function WordbookPageInner() {
                         </div>
                         {previewExample && (
                           <div
-                            className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--fg-soft)]"
+                            className="mt-1 line-clamp-2 text-sm leading-snug text-[var(--fg-soft)]"
                             title={previewExample}
                           >
                             {previewExample}
