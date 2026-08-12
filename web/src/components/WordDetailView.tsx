@@ -28,7 +28,8 @@ import AIExamplesPanel from "@/components/AIExamplesPanel";
 import DerivedFormPanel from "@/components/DerivedFormPanel";
 import DistinctionRefs from "@/components/DistinctionRefs";
 import HighlightedSentence from "@/components/HighlightedSentence";
-import NotesPanel from "@/components/NotesPanel";
+import NotesReadOnlyList from "@/components/NotesReadOnlyList";
+import NotesComposer from "@/components/NotesComposer";
 import SpeakButton from "@/components/SpeakButton";
 import { toast } from "@/components/Toast";
 import { lookup, type LookupResult } from "@/lib/dict";
@@ -37,7 +38,6 @@ import {
   backfillCoreExample,
   getEntry,
   getKnownLemmaSet,
-  listNotes,
   recordLookup,
   setCoreExample,
   setIelts,
@@ -288,24 +288,9 @@ export default function WordDetailView({ slug, from }: Props) {
     return () => window.removeEventListener("get:wordbook-change", refresh);
   }, []);
 
-  // 是否有任何笔记 —— 决定详情页布局顺序：有笔记 → CoreExample → Notes → Senses，
-  // 无笔记 → CoreExample → Senses → Notes（Notes 作为“加笔记”入口挂在页尾）。
-  // 订阅 notes 存储的变化事件（addNote / updateNote / deleteNote 都会 dispatch）
-  // 让顺序可以在写完第一条笔记之后立即上移。
-  const [hasAnyNote, setHasAnyNote] = useState(false);
-  useEffect(() => {
-    let lemma: string | null = null;
-    if (state.kind === "ok") lemma = state.result.query;
-    else if (state.kind === "not-found") lemma = query;
-    if (!lemma) return;
-    const key = lemma;
-    function refresh() {
-      setHasAnyNote(listNotes(key).length > 0);
-    }
-    refresh();
-    window.addEventListener("get:notes-change", refresh);
-    return () => window.removeEventListener("get:notes-change", refresh);
-  }, [state, query]);
+  // 是否有任何笔记——用于列表页的 “插入位置” 预留（以后可能扩展）。当前已将
+  // 已有笔记列表与 “新增笔记” 拆到 <NotesReadOnlyList /> 和 <NotesComposer />
+  // 两个组件里，这里不再需要顶层 hasAnyNote 变量。
 
   // Back button — prefer router.back() so we land on whatever screen the
   // user came from (search results / wordbook / home). Falls back to "/".
@@ -442,7 +427,7 @@ export default function WordDetailView({ slug, from }: Props) {
           )}
         </header>
 
-        {/* 核心例句 / 短语 — not-found 无字典例句兜底，默认为空，完全交用户手写。 */}
+        {/* 核心例句 / 短语 — not-found 无字典例句兑底，默认为空，完全交用户手写。 */}
         {bookEntry && (
           <CoreExampleCard
             lemma={query}
@@ -452,8 +437,12 @@ export default function WordDetailView({ slug, from }: Props) {
           />
         )}
 
-        {/* 统一布局：有笔记时把笔记提到前面（无词义，笔记就是主体）。 */}
-        <NotesPanel
+        {/* 已有笔记（只读列表 + 内联编辑），not-found 下依旧链到 lemma 的 note store。 */}
+        <NotesReadOnlyList lemma={query} />
+
+        {/* 新增笔记 composer — not-found 仍需首次保存选词性，以创建单词本条目。
+            使用 requirePosOnFirstSave 可确保未录入字典的词也能归类。 */}
+        <NotesComposer
           lemma={query}
           requirePosOnFirstSave
           initialPos={bookEntry?.pos}
@@ -464,7 +453,6 @@ export default function WordDetailView({ slug, from }: Props) {
         {/* 词组辨析 cross-refs — shown 也在 not-found 分支，
             方便用户从任何单词页跳回已整理的辨析组。 */}
         <DistinctionRefs word={query} />
-
         {/* 首次入库强制弹窗——不选不能关。fixed 定位不影响外层 flow。 */}
         {purposePromptOpen && (
           <PurposePromptModal
@@ -567,8 +555,8 @@ export default function WordDetailView({ slug, from }: Props) {
         )}
       </header>
 
-      {/* 核心例句 / 短语 — 所有词都展示。默认从字典抽取（优先短语，
-          其次例句），用户手动编辑后优先展示自定义。 */}
+      {/* 核心例句 / 短语 — 所有词都展示。默认从字典抽取（优先
+          词义区例句，不再走常用搭配区），用户手动编辑后优先展示自定义。 */}
       {bookEntry && (
         <CoreExampleCard
           lemma={typed}
@@ -578,9 +566,9 @@ export default function WordDetailView({ slug, from }: Props) {
         />
       )}
 
-      {/* 有笔记时：笔记位于“核心例句之下、词义之上”（作为个性化主体）。
-          词义区块在后面自然接上，不重复渲染 NotesPanel。 */}
-      {hasAnyNote && <NotesPanel lemma={typed} />}
+      {/* 已有笔记（只读列表 + 内联编辑）——放在核心例句下、词义卡片上。
+          组件内部会在无笔记时直接返回 null，不需要外层 hasAnyNote 判断。 */}
+      <NotesReadOnlyList lemma={typed} />
       {/* Origin-form notice — only when the user searched an inflected form
           (e.g. "arousal" → "arouse"). We surface the canonical lemma + its
           part-of-speech + a one-line gloss so the user immediately sees the
@@ -698,16 +686,19 @@ export default function WordDetailView({ slug, from }: Props) {
       )}
 
       {/* AI 例句区（Day 4）——围绕用户搜的词（typed），不是字典原形。
-          这样 arousal 的例句不会跑到 arouse 的缓存键上去。 */}
-      <AIExamplesPanel lemma={typed} senses={entry.senses} />
+          这样 arousal 的例句不会跑到 arouse 的缓存键上去。
+          雅思批量导入的词（queryCount === 0 && ielts === true）不展示 AI 例句：
+          用户只是在背词表，不需要 AI 自动给造句 — 避免无主动意向的 token 消耗。 */}
+      {!(bookEntry && bookEntry.ielts === true && (bookEntry.queryCount ?? 0) === 0) && (
+        <AIExamplesPanel lemma={typed} senses={entry.senses} />
+      )}
 
       {/* 词组辨析 cross-refs — 自动扫描含本词的笔记本“辨析”条目。
-          放在笔记区之上，便于用户看完例句后直接回辨析页回忆对比。 */}
+          放在新增笔记 composer 之上，方便用户看完例句后直接回辨析页回忆对比。 */}
       <DistinctionRefs word={typed} />
 
-      {/* 笔记区（Day 3a）——无笔记时才在页尾展示（“无笔记→词义→笔记”的顺序）；
-          有笔记时已在上方“核心例句 → 笔记 → 词义”处展示，避免重复渲染。 */}
-      {!hasAnyNote && <NotesPanel lemma={typed} />}
+      {/* 新增笔记 composer — 始终放在页尾（需求 6）。已有笔记已在顶部 NotesReadOnlyList 展示，这里只供“写新的”。 */}
+      <NotesComposer lemma={typed} />
       {/* 首次入库强制弹窗：详情页刚把词收进单词本且未选过复习方式时弹出。
           选完才能关——不提供关闭按钮 / ESC / 遨罩关闭，避免用户遗忘分类。 */}
       {purposePromptOpen && (
@@ -1189,8 +1180,8 @@ function CoreExampleCard({
 
   return (
     <section
-      className="space-y-2 rounded-lg border border-[var(--accent)]/40 bg-[var(--accent)]/5 p-4"
-      aria-label="雅思核心例句"
+      className="space-y-2 rounded-lg border border-[var(--border)] bg-[var(--card)] p-4"
+      aria-label="核心例句"
     >
       <div className="flex items-center justify-between gap-2">
         <h2 className="text-sm font-medium uppercase tracking-wide text-[var(--accent)]">

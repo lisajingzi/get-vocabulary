@@ -3,31 +3,16 @@
 /**
  * /wordbook — personal wordbook page.
  *
- * Two top-level tabs (新朋友 / 老朋友). Below them, three filters that work
- * independently per tab:
- *   - Part-of-speech filter (verb / noun / adjective / adverb / 全部 / 其他)
- *   - Month filter — group by natural month (e.g. 2026年06月) using
- *     `lastQueriedAt`. Selecting a month restricts the list to entries whose
- *     latest search-bar lookup falls in that month.
- *   - Sort selector (recent / count / alpha).
- *
- * The right-side counter ("共 xxx 个") follows whatever filters are active.
- *
- * Each row carries a one-shot move button:
- *   - On the 新朋友 tab → ✅ moves the word to 老朋友
- *   - On the 老朋友 tab → 🧐 moves the word back to 新朋友
- * The move is immediate; a transient toast offers an undo for 5 seconds.
- *
- * Date column: shows `lastQueriedAt` (search-bar lookups only) formatted as
- * `06月11日` for current-year, `2025年06月11日` across years. We deliberately
- * do NOT use `lastSeenAt` here — clicking a word from inside the wordbook
- * list to view its detail is not a "query".
+ * Filters, tab, and page-number are ALL synchronized to the URL search
+ * params so that clicking a word → detail → back returns you to the exact
+ * same list state you left (Next's App Router only preserves scroll, not
+ * component state, so URL is the only reliable channel here).
  */
 
 import Image from "next/image";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   listEntries,
   setStatus,
@@ -39,18 +24,8 @@ import SpeakButton from "@/components/SpeakButton";
 import DefinitionModal from "@/components/DefinitionModal";
 
 type SortKey = "recent" | "count" | "alpha" | "error";
-/** “all” = 不筛选。后两项对应 WordbookPurpose。 */
 type PurposeFilter = "all" | WordbookPurpose;
-/** 雅思筛选：与 purpose 正交的独立胶囊组。
- *   - "all"    → 不筛
- *   - "ielts"  → 仅雅思（entry.ielts === true）
- *   - "nonielts" → 非雅思（entry.ielts !== true） */
 type IeltsFilter = "all" | "ielts" | "nonielts";
-
-const POS_OPTIONS_UNUSED: never[] = [];
-// 取消“词性 / 时间”两个筛选项后，POS_OPTIONS 与时间相关 helper 均不再使用。
-// 保留一个空占位避免 import/type 重命名冲突，具体实现已删除。
-void POS_OPTIONS_UNUSED;
 
 const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
   { value: "recent", label: "最近查询" },
@@ -59,20 +34,16 @@ const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
   { value: "error", label: "错误次数" },
 ];
 
-/** 单词本每页展示多少条 —— 太长会让整页滚动很累。 */
 const PAGE_SIZE = 10;
 
 interface UndoState {
   lemma: string;
   from: WordbookStatus;
   to: WordbookStatus;
-  /** epoch ms when the toast should auto-dismiss */
   expiresAt: number;
 }
 
 export default function WordbookPage() {
-  // useSearchParams 在 App Router 下必须被 Suspense 包裹，否则
-  // `next build` 预渲染阶段会报 "should be wrapped in a suspense boundary"。
   return (
     <Suspense fallback={null}>
       <WordbookPageInner />
@@ -80,34 +51,47 @@ export default function WordbookPage() {
   );
 }
 
+/** URL param helpers — keep the source of truth in the URL so back/forward
+ *  navigation restores the exact same filtered view. */
+function parseTab(v: string | null | undefined): WordbookStatus {
+  return v === "old" ? "old" : "new";
+}
+function parsePurpose(v: string | null | undefined): PurposeFilter {
+  return v === "active" || v === "passive" ? v : "all";
+}
+function parseIelts(v: string | null | undefined): IeltsFilter {
+  return v === "ielts" || v === "nonielts" ? v : "all";
+}
+function parseSort(v: string | null | undefined): SortKey {
+  return v === "count" || v === "alpha" || v === "error" || v === "recent"
+    ? v
+    : "recent";
+}
+function parsePage(v: string | null | undefined): number {
+  const n = v ? parseInt(v, 10) : 1;
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+
 function WordbookPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [entries, setEntries] = useState<WordbookEntry[]>([]);
-  const [tab, setTab] = useState<WordbookStatus>("new");
-  const [purpose, setPurpose] = useState<PurposeFilter>("all");
-  const [ielts, setIeltsFilter] = useState<IeltsFilter>("all");
-  const [sortKey, setSortKey] = useState<SortKey>("recent");
+
+  // Filter state is *derived* from the URL, not held as duplicated component
+  // state. `router.replace` updates the URL → this component re-renders with
+  // new values. That means back/forward navigation restores the view for
+  // free — no useEffect gymnastics required.
+  const tab = parseTab(searchParams?.get("tab"));
+  const purpose = parsePurpose(searchParams?.get("purpose"));
+  const ielts = parseIelts(searchParams?.get("ielts"));
+  const sortKey = parseSort(searchParams?.get("sort"));
+  const page = parsePage(searchParams?.get("page"));
+
   const [undo, setUndo] = useState<UndoState | null>(null);
-  // 当前页码（1-based）。同步到 URL 的 ?page=N，这样从详情页 back 回来时
-  // 能回到之前那一页；同时筛选/tab 切换时用 router.replace 把页码夹回 1，
-  // 不产生额外的 history 条目。
-  const [page, setPage] = useState<number>(() => {
-    // 初始化时尽量从 URL 读；SSR 下 searchParams 可能为空。
-    const raw = searchParams?.get("page");
-    const n = raw ? parseInt(raw, 10) : 1;
-    return Number.isFinite(n) && n >= 1 ? n : 1;
-  });
-  // "听力训练"模式：把 lemma 遮成 •••••，只留朗读按钮可用。
-  // A 方案 — 单词区域点击时临时揭示（onPointerDown 揭开、松手/离开恢复），
-  // 手滑不会跳转到详情页。
   const [masked, setMasked] = useState(false);
   const [revealedLemma, setRevealedLemma] = useState<string | null>(null);
-  // “释义”弹窗当前展示的 lemma；null 表示弹窗关闭。所有行共享同一个 Modal。
   const [defLemma, setDefLemma] = useState<string | null>(null);
 
-  // Seed from localStorage and live-refresh on changes from any source
-  // (detail page, sibling tab, etc).
   useEffect(() => {
     function refresh() {
       setEntries(listEntries());
@@ -121,9 +105,6 @@ function WordbookPageInner() {
     };
   }, []);
 
-  // Auto-dismiss the undo toast after its window expires. We poll once a
-  // second instead of using a single setTimeout so a fresh action that
-  // overwrites `undo` doesn't leave a dangling timer firing on the wrong row.
   useEffect(() => {
     if (!undo) return;
     const id = window.setInterval(() => {
@@ -142,10 +123,6 @@ function WordbookPageInner() {
     return { new: n, old: o };
   }, [entries]);
 
-  // Build the month dropdown options from whatever lastQueriedAt months the
-  // current tab actually contains. Without this we'd offer empty months.
-  // (Kept as unused-safe removal: month & pos filters are gone per product spec.)
-
   const visible = useMemo(() => {
     const filtered = entries
       .filter((e) => e.status === tab)
@@ -154,41 +131,60 @@ function WordbookPageInner() {
     return [...filtered].sort(buildComparator(sortKey));
   }, [entries, tab, purpose, ielts, sortKey]);
 
-  // 任何筛选/tab 切换都把页码拽回第 1 页，避免出现
-  //   “老朋友 25 条，切到只剩 3 条的 tab 后 page=3 → 空列表” 这种尴尬。
-  useEffect(() => {
-    setPage(1);
-  }, [tab, purpose, ielts, sortKey]);
-
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
-  // 若 visible 变短导致 page 超出（例如把某个词移到别的 tab 后当前页空了），
-  // 静默夹回合法区间。effect 里再修一次是为了让 UI 立刻看到新页码。
   const safePage = Math.min(page, totalPages);
-  useEffect(() => {
-    if (page !== safePage) setPage(safePage);
-  }, [page, safePage]);
-
-  // 把 safePage 同步到 URL 的 ?page=N。这样点单词进详情页 → back 回来
-  // 时，URL 仍带着正确的页码，重新初始化的 state 会从 URL 读回去，
-  // 用户看到的就是之前那一页而不是首页。用 replace 而非 push，
-  // 避免在同一页内反复翻页时往 history 里塞一堆条目。
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const current = searchParams?.get("page");
-    const desired = safePage === 1 ? null : String(safePage);
-    // 相同就不动，避免无用的 replace（并且防止 effect 无限循环）。
-    if (current === desired) return;
-    const params = new URLSearchParams(searchParams?.toString() ?? "");
-    if (desired === null) params.delete("page");
-    else params.set("page", desired);
-    const qs = params.toString();
-    router.replace(qs ? `/wordbook?${qs}` : "/wordbook", { scroll: false });
-  }, [safePage, router, searchParams]);
-
   const paginated = useMemo(
     () => visible.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
     [visible, safePage],
   );
+
+  /**
+   * Write one or more search params to the URL. Uses replace so filter
+   * flipping doesn't fill history with intermediate states — only the final
+   * "click a word → detail" navigation should push.
+   *
+   * `resetPage=true` clears ?page so switching tabs / filters returns to
+   * the first page (otherwise page=3 on old-friend list persists into the
+   * new-friend list which may only have 5 words total).
+   */
+  const setParams = useCallback(
+    (patch: Record<string, string | null>, opts?: { resetPage?: boolean }) => {
+      if (typeof window === "undefined") return;
+      const params = new URLSearchParams(searchParams?.toString() ?? "");
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === null || v === "") params.delete(k);
+        else params.set(k, v);
+      }
+      if (opts?.resetPage) params.delete("page");
+      const qs = params.toString();
+      router.replace(qs ? `/wordbook?${qs}` : "/wordbook", { scroll: false });
+    },
+    [router, searchParams],
+  );
+
+  // Snap the URL's page back into range if visible shrinks (e.g. word moved
+  // to another tab and the current page is now empty).
+  useEffect(() => {
+    if (page > totalPages) {
+      setParams({ page: totalPages === 1 ? null : String(totalPages) });
+    }
+  }, [page, totalPages, setParams]);
+
+  function setTab(next: WordbookStatus) {
+    setParams({ tab: next === "new" ? null : next }, { resetPage: true });
+  }
+  function setPurpose(next: PurposeFilter) {
+    setParams({ purpose: next === "all" ? null : next }, { resetPage: true });
+  }
+  function setIeltsFilter(next: IeltsFilter) {
+    setParams({ ielts: next === "all" ? null : next }, { resetPage: true });
+  }
+  function setSortKey(next: SortKey) {
+    setParams({ sort: next === "recent" ? null : next }, { resetPage: true });
+  }
+  function setPage(next: number) {
+    setParams({ page: next <= 1 ? null : String(next) });
+  }
 
   function handleMove(entry: WordbookEntry) {
     const to: WordbookStatus = entry.status === "new" ? "old" : "new";
@@ -269,7 +265,6 @@ function WordbookPageInner() {
             })}
           </div>
 
-          {/* 听力训练开关：遮住单词字面，只留朗读按钮。 */}
           <button
             type="button"
             onClick={() => {
@@ -292,8 +287,6 @@ function WordbookPageInner() {
 
         {/* Filters */}
         <div className="flex flex-wrap items-center gap-3 text-xs">
-          {/* 复习方式（听说写 / 阅读）— 专门拉出成一组胶囊按钮，
-              方便快速在两类词之间切换。选中项高亮；默认“全部”。 */}
           <div
             className="inline-flex rounded-md border border-[var(--border)] p-0.5"
             role="radiogroup"
@@ -326,8 +319,6 @@ function WordbookPageInner() {
               );
             })}
           </div>
-          {/* 雅思筛选 — 与 purpose 正交的独立一组胶囊。
-              一个单词可以既是雅思又是听说写，所以这里单独一组、不与上面混。 */}
           <div
             className="inline-flex rounded-md border border-[var(--border)] p-0.5"
             role="radiogroup"
@@ -392,8 +383,6 @@ function WordbookPageInner() {
               isNew ? "已掌握，移到老朋友" : "还想再看，移回新朋友";
             const isRevealed = revealedLemma === e.lemma;
             const showLemma = !masked || isRevealed;
-            // 加密态下点单词区不再跳详情页（避免手滑穿帮），
-            // 而是"按住揭示"：pointerdown 显示，抬起/离开恢复遮罩。
             const wordAreaProps = masked
               ? {
                   role: "button" as const,
@@ -412,10 +401,12 @@ function WordbookPageInner() {
                   onKeyUp: () => setRevealedLemma(null),
                 }
               : {};
+            // 卡片里只显示英文——中文放在详情页看。stripChinese 会把 "en — cn" 中的
+            // "— cn" 去掉；纯英文串保持不变。
+            const previewExample = stripChinese(e.coreExample ?? "");
             return (
               <li key={e.lemma} className="group">
                 <div className="flex items-center gap-3 px-4 py-3 transition hover:bg-[var(--bg-soft)]">
-                  {/* 朗读按钮：不管加不加密，始终可点。 */}
                   <div
                     className="shrink-0"
                     onClick={(ev) => ev.stopPropagation()}
@@ -457,14 +448,12 @@ function WordbookPageInner() {
                             </span>
                           )}
                         </div>
-                        {/* 核心例句 / 短语 — 所有词展示。听力训练模式下需隐藏（例句会直接透露单词）。
-                            未揭示时直接不渲染；揭示时才展。 */}
-                        {e.coreExample && showLemma && (
+                        {previewExample && showLemma && (
                           <div
                             className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--fg-soft)]"
-                            title={e.coreExample}
+                            title={previewExample}
                           >
-                            {e.coreExample}
+                            {previewExample}
                           </div>
                         )}
                       </div>
@@ -497,12 +486,12 @@ function WordbookPageInner() {
                             </span>
                           )}
                         </div>
-                        {e.coreExample && (
+                        {previewExample && (
                           <div
                             className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--fg-soft)]"
-                            title={e.coreExample}
+                            title={previewExample}
                           >
-                            {e.coreExample}
+                            {previewExample}
                           </div>
                         )}
                       </div>
@@ -563,13 +552,12 @@ function WordbookPageInner() {
         </ul>
       )}
 
-      {/* 分页控件 —— 只有单页时不显示，免得视觉噪音。 */}
       {visible.length > 0 && totalPages > 1 && (
         <div className="flex items-center justify-center gap-3 pt-1">
           <button
             type="button"
             disabled={safePage === 1}
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            onClick={() => setPage(Math.max(1, safePage - 1))}
             aria-label="上一页"
             className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border)] bg-transparent text-sm text-[var(--fg-soft)] transition hover:text-[var(--fg)] hover:border-[var(--fg-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -581,7 +569,7 @@ function WordbookPageInner() {
           <button
             type="button"
             disabled={safePage === totalPages}
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            onClick={() => setPage(Math.min(totalPages, safePage + 1))}
             aria-label="下一页"
             className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border)] bg-transparent text-sm text-[var(--fg-soft)] transition hover:text-[var(--fg)] hover:border-[var(--fg-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -590,7 +578,6 @@ function WordbookPageInner() {
         </div>
       )}
 
-      {/* Undo toast */}
       {undo && (
         <div
           role="status"
@@ -612,7 +599,6 @@ function WordbookPageInner() {
         </div>
       )}
 
-      {/* 释义弹窗 — 所有行共用，由 defLemma 驱动开合。 */}
       <DefinitionModal lemma={defLemma} onClose={() => setDefLemma(null)} />
     </div>
   );
@@ -622,12 +608,6 @@ function WordbookPageInner() {
 // helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Navigate to the previous page. Falls back to the home surface when there
- * is no in-app history (e.g. the user landed on /wordbook via a bookmark or
- * an external share link) — otherwise router.back() would drop them out of
- * the site entirely.
- */
 function goBack(router: ReturnType<typeof useRouter>) {
   if (typeof window !== "undefined" && window.history.length > 1) {
     router.back();
@@ -645,8 +625,6 @@ function matchPurpose(
   return actual === want;
 }
 
-/** 雅思筛选：all 全中；ielts 仅保留 flag 为 true；nonielts 仅保留 flag 不为 true。
- *  undefined 视同 false，保证历史存量自然归入“非雅思”。 */
 function matchIelts(
   stored: boolean | undefined,
   want: IeltsFilter,
@@ -659,8 +637,6 @@ function matchIelts(
 function buildComparator(key: SortKey) {
   switch (key) {
     case "recent":
-      // Sort by lastQueriedAt (the field the date column displays); fall
-      // back to lastSeenAt for legacy rows that never carried a query date.
       return (a: WordbookEntry, b: WordbookEntry) => {
         const av = a.lastQueriedAt ?? a.lastSeenAt;
         const bv = b.lastQueriedAt ?? b.lastSeenAt;
@@ -675,7 +651,6 @@ function buildComparator(key: SortKey) {
       return (a: WordbookEntry, b: WordbookEntry) =>
         a.lemma < b.lemma ? -1 : 1;
     case "error":
-      // 错误次数从高到低；次数相同时回到 lemma 字母序作为稳定 tiebreaker。
       return (a: WordbookEntry, b: WordbookEntry) => {
         const ae = a.errorCount ?? 0;
         const be = b.errorCount ?? 0;
@@ -697,11 +672,6 @@ function shortPos(pos: string): string {
   return pos.slice(0, 5);
 }
 
-/**
- * 把 lemma 遮成同长度的圆点串。保留字母数量作为微弱视觉线索，
- * 但既不透露首字母也不透露拼写。空格 / 连字符原样保留，避免
- * 词组类的条目变成一坨点看不出结构。
- */
 function maskLemma(lemma: string): string {
   return lemma
     .split("")
@@ -709,7 +679,6 @@ function maskLemma(lemma: string): string {
     .join("");
 }
 
-/** Show absolute month/day for the current year, year-prefixed otherwise. */
 function formatQueryDate(iso: string | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -720,4 +689,19 @@ function formatQueryDate(iso: string | undefined): string {
     return `${m}/${day}`;
   }
   return `${d.getFullYear()}/${m}/${day}`;
+}
+
+/**
+ * Strip the "— 中文" suffix from a coreExample. Cards should show English
+ * only; the full "en — cn" form is reserved for the detail page. Handles
+ * both em-dash "—" and en-dash "–" plus surrounding whitespace, and only
+ * trims when what follows contains any CJK character (so English-only
+ * dashes in the sentence itself aren't cut).
+ */
+function stripChinese(s: string): string {
+  const idx = s.search(/\s*[—–]\s*/);
+  if (idx < 0) return s;
+  const tail = s.slice(idx);
+  if (/[\u4e00-\u9fff]/.test(tail)) return s.slice(0, idx).trim();
+  return s;
 }

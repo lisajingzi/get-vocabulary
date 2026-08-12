@@ -28,6 +28,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  getEntry,
   listEntries,
   listNotes,
   recordReview,
@@ -38,6 +39,53 @@ import { MAX_LEVEL } from "@/lib/wordbook/scheduler";
 import { recordPunchToday } from "@/lib/wordbook/punches";
 import { recordReviewEvent } from "@/lib/wordbook/review-log";
 import SpeakButton from "@/components/SpeakButton";
+
+/**
+ * sessionStorage key for the current review session. Persists phase / queue
+ * (as lemma[]) / cursor / mode / graded / confirmed / draft / feedback so
+ * clicking a headword → detail page → back returns to the exact same
+ * card in the exact same graded state. Cleared on `done` phase.
+ */
+const SESSION_KEY = "get:review-session:v1";
+
+/** Serialisable snapshot of the review state — keep it small so we don't
+ *  bump against sessionStorage size limits. */
+type PersistedSession = {
+  phase: "review";
+  mode: ReviewMode;
+  fromWrongBook: boolean;
+  /** Lemma queue — we re-fetch entries from local storage on hydrate so
+   *  state stays consistent with any changes the user made in between. */
+  queue: string[];
+  cursor: number;
+  /** Per-card interaction snapshot for the CURRENT cursor (recognize mode). */
+  graded?: "pass" | "fail" | null;
+  confirmed?: "pass" | "fail" | null;
+  /** Per-card interaction snapshot for the CURRENT cursor (spell mode). */
+  spellDraft?: string;
+  spellFeedback?: "right" | "wrong" | "revealed" | null;
+};
+
+function readSession(): PersistedSession | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw) as PersistedSession;
+  } catch {
+    return null;
+  }
+}
+
+function writeSession(s: PersistedSession | null): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (s === null) window.sessionStorage.removeItem(SESSION_KEY);
+    else window.sessionStorage.setItem(SESSION_KEY, JSON.stringify(s));
+  } catch {
+    /* ignore */
+  }
+}
 
 /** 复习方式：识词 = 看到词判断是否认识 + 展开例句/笔记；听写 = 听音拼写。 */
 export type ReviewMode = "recognize" | "spell";
@@ -90,6 +138,60 @@ export default function ReviewView() {
   );
 
   const [phase, setPhase] = useState<Phase>({ kind: "picker" });
+
+  // On first mount, try to restore an in-progress review session from
+  // sessionStorage. This is what makes "answer page → click headword →
+  // detail → back" return you to the same card in the same graded state
+  // instead of dropping you back onto the picker (React state is lost when
+  // /review remounts on navigation, but sessionStorage survives).
+  //
+  // Guarded by a ref so the hydrate only runs once — subsequent effects
+  // (e.g. wrongBookMode changes) don't fight the hydrated state.
+  const hydratedRef = useRef(false);
+  useEffect(() => {
+    if (hydratedRef.current) return;
+    hydratedRef.current = true;
+    const s = readSession();
+    if (!s || s.phase !== "review") return;
+    // Re-fetch entries by lemma so any wordbook edits between navigations
+    // (mark 老朋友, delete, etc.) are respected. Skip missing ones.
+    const queue: WordbookEntry[] = [];
+    for (const lemma of s.queue) {
+      const e = getEntry(lemma);
+      if (e) queue.push(e);
+    }
+    if (queue.length === 0) {
+      writeSession(null);
+      return;
+    }
+    const cursor = Math.min(Math.max(0, s.cursor), queue.length - 1);
+    setPhase({
+      kind: "review",
+      queue,
+      cursor,
+      mode: s.mode,
+      fromWrongBook: s.fromWrongBook,
+    });
+  }, []);
+
+  // Persist the current phase into sessionStorage whenever it changes.
+  // Only the "review" phase carries state worth restoring; picker /
+  // mode-picker / done get wiped so a fresh visit starts clean.
+  useEffect(() => {
+    if (phase.kind === "review") {
+      writeSession({
+        phase: "review",
+        mode: phase.mode,
+        fromWrongBook: phase.fromWrongBook,
+        queue: phase.queue.map((e) => e.lemma),
+        cursor: phase.cursor,
+      });
+    } else if (phase.kind === "done") {
+      writeSession(null);
+    }
+    // picker / mode-picker — leave the previous session alone in case
+    // the user meant to return; on "done" we clear it.
+  }, [phase]);
 
   // 错词本模式：直接跳过 picker，把 inWrongBook === true 的词全部塞进去，
   // 进入方式选择。
@@ -193,9 +295,65 @@ export default function ReviewView() {
       <ReviewTopBar wrongBook={wrongBookMode} />
       <ProgressBar current={phase.cursor + 1} total={phase.queue.length} />
       {phase.mode === "recognize" ? (
-        <RecognizeCard key={item.lemma} entry={item} onAdvance={advance} />
+        <RecognizeCard
+          key={item.lemma}
+          entry={item}
+          onAdvance={advance}
+          onCardState={(gr, cf) => {
+            const s = readSession();
+            if (s && s.phase === "review") {
+              writeSession({ ...s, graded: gr, confirmed: cf });
+            }
+          }}
+          initialGraded={
+            (() => {
+              const s = readSession();
+              return s?.phase === "review" && s.cursor === phase.cursor
+                ? (s.graded ?? null)
+                : null;
+            })()
+          }
+          initialConfirmed={
+            (() => {
+              const s = readSession();
+              return s?.phase === "review" && s.cursor === phase.cursor
+                ? (s.confirmed ?? null)
+                : null;
+            })()
+          }
+        />
       ) : (
-        <SpellCard key={item.lemma} entry={item} onAdvance={advance} />
+        <SpellCard
+          key={item.lemma}
+          entry={item}
+          onAdvance={advance}
+          onCardState={(draft, feedback) => {
+            const s = readSession();
+            if (s && s.phase === "review") {
+              writeSession({
+                ...s,
+                spellDraft: draft,
+                spellFeedback: feedback,
+              });
+            }
+          }}
+          initialDraft={
+            (() => {
+              const s = readSession();
+              return s?.phase === "review" && s.cursor === phase.cursor
+                ? (s.spellDraft ?? "")
+                : "";
+            })()
+          }
+          initialFeedback={
+            (() => {
+              const s = readSession();
+              return s?.phase === "review" && s.cursor === phase.cursor
+                ? (s.spellFeedback ?? null)
+                : null;
+            })()
+          }
+        />
       )}
     </div>
   );
@@ -720,25 +878,56 @@ function useNotes(target: string): { body: string }[] {
 function RecognizeCard({
   entry,
   onAdvance,
+  onCardState,
+  initialGraded,
+  initialConfirmed,
 }: {
   entry: WordbookEntry;
   onAdvance: (result: "pass" | "fail") => void;
+  onCardState?: (
+    graded: "pass" | "fail" | null,
+    confirmed: "pass" | "fail" | null,
+  ) => void;
+  initialGraded?: "pass" | "fail" | null;
+  initialConfirmed?: "pass" | "fail" | null;
 }) {
   const target = entry.lemma;
   useAutoPlay(target);
   const senses = useGloss(target);
   const notes = useNotes(target);
   // 一级自评：认识 / 忘了；二级自评：记对了 / 记错了（仅当一级 = 认识 时启用）。
-  const [graded, setGraded] = useState<"pass" | "fail" | null>(null);
-  const [confirmed, setConfirmed] = useState<"pass" | "fail" | null>(null);
+  // 初始值从父传入（从 sessionStorage 恢复）。
+  const [graded, setGradedRaw] = useState<"pass" | "fail" | null>(
+    initialGraded ?? null,
+  );
+  const [confirmed, setConfirmedRaw] = useState<"pass" | "fail" | null>(
+    initialConfirmed ?? null,
+  );
+
+  const setGraded = useCallback(
+    (v: "pass" | "fail" | null) => {
+      setGradedRaw(v);
+      // reset confirmed 交给调用处，这里只同步 session。
+      onCardState?.(v, confirmed);
+    },
+    [onCardState, confirmed],
+  );
+  const setConfirmed = useCallback(
+    (v: "pass" | "fail" | null) => {
+      setConfirmedRaw(v);
+      onCardState?.(graded, v);
+    },
+    [onCardState, graded],
+  );
 
   const canAdvance =
     graded === "fail" || (graded === "pass" && confirmed !== null);
   const finalPass = graded === "pass" && confirmed === "pass";
 
   return (
-    <section className="space-y-4 rounded-xl border border-[var(--border)] p-4">
-      <header className="space-y-1">
+    <section className="space-y-4">
+      {/* 头部 — 词形与核心例句。 */}
+      <div className="space-y-2 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
         <div className="flex flex-wrap items-baseline gap-2">
           <Link
             href={`/word/${encodeURIComponent(target)}?from=review`}
@@ -749,13 +938,17 @@ function RecognizeCard({
           </Link>
           <SpeakButton text={target} variant="us" />
         </div>
-        {/* 核心短语 / 例句 —— 展示英文（不显示中文，避免直接暴露词义）。 */}
+        {/* 核心短语 / 例句 — 字号相比之前大一些（text-sm），目标单词加“点点下划线”以快速定位。
+            只展英文部分（stripChinese），不暴露中文释义。 */}
         {entry.coreExample && (
-          <p className="text-xs text-[var(--fg-soft)]">
-            {stripChinese(entry.coreExample)}
+          <p className="text-sm leading-relaxed text-[var(--fg)]/80">
+            <CoreExampleText
+              text={stripChinese(entry.coreExample)}
+              target={target}
+            />
           </p>
         )}
-      </header>
+      </div>
 
       {/* 一级自评 */}
       <div className="flex flex-wrap items-center gap-2">
@@ -791,85 +984,84 @@ function RecognizeCard({
         </button>
       </div>
 
-      {/* 释义 / 例句 / 笔记 —— 一级自评后展示 */}
+      {/* 释义 / 例句 / 笔记 — 一级自评后展示；拆成三个白底卡片，层次清晰。 */}
       {graded !== null && (
-        <div
-          className={[
-            "space-y-3 rounded-lg border p-3 text-sm",
-            finalPass
-              ? "border-[var(--accent)]/40 bg-[var(--accent-soft)]/40"
-              : graded === "fail" || confirmed === "fail"
-                ? "border-red-200 bg-red-50/60 dark:border-red-900/40 dark:bg-red-950/20"
-                : "border-[var(--border)] bg-[var(--bg-soft)]/40",
-          ].join(" ")}
-        >
-          {senses === null ? (
-            <p className="text-xs text-[var(--fg-soft)]">加载释义中…</p>
-          ) : senses.length === 0 ? (
-            <p className="text-xs text-[var(--fg-soft)]">
-              未找到详细释义，可
-              <Link
-                href={`/word/${encodeURIComponent(target)}?from=review`}
-                className="mx-1 text-[var(--accent)] hover:underline"
-              >
-                进入详情页
-              </Link>
-              查看。
-            </p>
-          ) : (
-            <ul className="space-y-2.5">
-              {senses.map((s, i) => (
-                <li
-                  key={i}
-                  className={
-                    i > 0
-                      ? "space-y-1 border-t border-[var(--border)]/60 pt-2"
-                      : "space-y-1"
-                  }
+        <div className="space-y-3">
+          {/* 词义卡片（白底） */}
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-4">
+            <h3 className="mb-2 text-sm font-medium uppercase tracking-wide text-[var(--accent)]">
+              释义
+            </h3>
+            {senses === null ? (
+              <p className="text-xs text-[var(--fg-soft)]">加载释义中…</p>
+            ) : senses.length === 0 ? (
+              <p className="text-xs text-[var(--fg-soft)]">
+                未找到详细释义，可
+                <Link
+                  href={`/word/${encodeURIComponent(target)}?from=review`}
+                  className="mx-1 text-[var(--accent)] hover:underline"
                 >
-                  <div className="flex items-baseline gap-2">
-                    {s.pos && (
-                      <span className="rounded bg-[var(--bg)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
-                        {s.pos}
-                      </span>
-                    )}
-                    {s.chn && (
-                      <span className="text-xs text-[var(--fg)]">{s.chn}</span>
-                    )}
-                  </div>
-                  {s.def && (
-                    <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
-                      {s.def}
-                    </p>
-                  )}
-                  {s.example && (
-                    <div className="space-y-0.5 rounded-md border border-[var(--border)]/60 bg-[var(--bg)] px-2 py-1.5">
-                      <p className="text-xs italic leading-relaxed text-[var(--fg)]">
-                        “{s.example.en}”
-                      </p>
-                      {s.example.cn && (
-                        <p className="text-[11px] leading-relaxed text-[var(--fg-soft)]">
-                          {s.example.cn}
-                        </p>
+                  进入详情页
+                </Link>
+                查看。
+              </p>
+            ) : (
+              <ul className="space-y-3">
+                {senses.map((s, i) => (
+                  <li
+                    key={i}
+                    className={
+                      i > 0
+                        ? "space-y-1 border-t border-[var(--border)] pt-3"
+                        : "space-y-1"
+                    }
+                  >
+                    <div className="flex items-baseline gap-2">
+                      {s.pos && (
+                        <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
+                          {s.pos}
+                        </span>
+                      )}
+                      {s.chn && (
+                        <span className="text-sm text-[var(--fg)]">
+                          {s.chn}
+                        </span>
                       )}
                     </div>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
+                    {s.def && (
+                      <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
+                        {s.def}
+                      </p>
+                    )}
+                    {s.example && (
+                      <div className="mt-1 space-y-0.5 border-l-2 border-[var(--border)] pl-3">
+                        <p className="text-sm italic leading-relaxed text-[var(--fg)]">
+                          “{s.example.en}”
+                        </p>
+                        {s.example.cn && (
+                          <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
+                            {s.example.cn}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
 
-          {/* 用户笔记 —— 有则展示 */}
+          {/* 笔记卡片（白底）——有笔记时才渲染，不占位。 */}
           {notes.length > 0 && (
-            <div className="space-y-1.5 border-t border-[var(--border)]/60 pt-2">
-              <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-4">
+              <h3 className="mb-2 text-sm font-medium uppercase tracking-wide text-[var(--accent)]">
                 我的笔记
-              </p>
-              <ul className="space-y-1.5">
+              </h3>
+              <ul className="space-y-2">
                 {notes.map((n, i) => (
                   <li
                     key={i}
-                    className="whitespace-pre-wrap text-xs leading-relaxed text-[var(--fg)]"
+                    className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--fg)]"
                   >
                     {n.body}
                   </li>
@@ -880,7 +1072,7 @@ function RecognizeCard({
 
           {/* 二级自评：仅在一级 = 认识 时出现 */}
           {graded === "pass" && (
-            <div className="space-y-2 border-t border-[var(--border)]/60 pt-2">
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 space-y-2">
               <p className="text-[11px] font-medium text-[var(--fg-soft)]">
                 对照释义后，你刚才想的意思——
               </p>
@@ -913,22 +1105,22 @@ function RecognizeCard({
             </div>
           )}
 
-          {/* 底部结果 + 下一题按钮 */}
-          <div className="flex items-center justify-between pt-1">
+          {/* 底部结果 + 下一题按钮——不再包卡片，保持级别清晰。 */}
+          <div className="flex items-center justify-between px-1 pt-1">
             <p className="text-[11px] text-[var(--fg-soft)]">
               {graded === "fail"
-                ? "自评忘了 —— 本题记为失败。"
+                ? "自评忘了 — 本题记为失败。"
                 : confirmed === null
                   ? "请确认你是否真的记对了。"
                   : finalPass
-                    ? "记对了 —— 本题记为通过。"
-                    : "记错了 —— 本题记为失败。"}
+                    ? "记对了 — 本题记为通过。"
+                    : "记错了 — 本题记为失败。"}
             </p>
             <button
               type="button"
               onClick={() => onAdvance(finalPass ? "pass" : "fail")}
               disabled={!canAdvance}
-              className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-3 py-1.5 text-xs text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-[var(--accent)] bg-[var(--accent)] px-4 py-1.5 text-xs text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
             >
               下一题 →
             </button>
@@ -939,6 +1131,34 @@ function RecognizeCard({
   );
 }
 
+/**
+ * <CoreExampleText /> — renders a sentence with the target word underlined
+ * with a dotted line so the user can spot it quickly in the example.
+ *
+ * Case-insensitive whole-word match. If the target appears multiple times,
+ * only the first hit is underlined — keeps the visual focused. If the
+ * target isn't found (which happens for phrase-collocations that don't
+ * literally include the lemma), we render the sentence unchanged.
+ */
+function CoreExampleText({
+  text,
+  target,
+}: {
+  text: string;
+  target: string;
+}) {
+  const idx = text.toLowerCase().indexOf(target.toLowerCase());
+  if (idx < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <span className="underline decoration-dotted decoration-2 decoration-[var(--accent)] underline-offset-4">
+        {text.slice(idx, idx + target.length)}
+      </span>
+      {text.slice(idx + target.length)}
+    </>
+  );
+}
 /** 从 "en — cn" 或 "en-cn" 类混合字符串里剥掉中文部分，只留英文。 */
 function stripChinese(s: string): string {
   // 优先切 " — "、"—"、" - "，取第一个 chunk。
@@ -957,25 +1177,58 @@ function stripChinese(s: string): string {
 function SpellCard({
   entry,
   onAdvance,
+  onCardState,
+  initialDraft,
+  initialFeedback,
 }: {
   entry: WordbookEntry;
   onAdvance: (result: "pass" | "fail") => void;
+  onCardState?: (
+    draft: string,
+    feedback: "right" | "wrong" | "revealed" | null,
+  ) => void;
+  initialDraft?: string;
+  initialFeedback?: "right" | "wrong" | "revealed" | null;
 }) {
   const target = entry.lemma;
   useAutoPlay(target);
   const senses = useGloss(target);
   const notes = useNotes(target);
 
-  const [draft, setDraft] = useState("");
-  const [feedback, setFeedback] = useState<"right" | "wrong" | "revealed" | null>(
-    null,
-  );
+  const [draft, setDraftRaw] = useState(initialDraft ?? "");
+  const [feedback, setFeedbackRaw] = useState<
+    "right" | "wrong" | "revealed" | null
+  >(initialFeedback ?? null);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const setDraft = useCallback(
+    (v: string) => {
+      setDraftRaw(v);
+      onCardState?.(v, feedback);
+    },
+    [onCardState, feedback],
+  );
+  const setFeedback = useCallback(
+    (v: "right" | "wrong" | "revealed" | null) => {
+      setFeedbackRaw(v);
+      onCardState?.(draft, v);
+    },
+    [onCardState, draft],
+  );
+
+  // Reset only when target changes AND we don't have hydrated initial state
+  // for this new target. If the parent already provided initialDraft /
+  // initialFeedback (session hydrate), respect them.
+  const didHydrateRef = useRef(false);
   useEffect(() => {
-    setDraft("");
-    setFeedback(null);
+    if (didHydrateRef.current) {
+      // subsequent target changes
+      setDraftRaw("");
+      setFeedbackRaw(null);
+    }
+    didHydrateRef.current = true;
     inputRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
 
   function submit() {

@@ -16,8 +16,8 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   listEntries,
   readStore,
@@ -41,13 +41,39 @@ const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
 
 const PAGE_SIZE = 10;
 
+function parsePurpose(v: string | null | undefined): PurposeFilter {
+  return v === "active" || v === "passive" ? v : "all";
+}
+function parseIelts(v: string | null | undefined): IeltsFilter {
+  return v === "ielts" || v === "nonielts" ? v : "all";
+}
+function parseSort(v: string | null | undefined): SortKey {
+  return v === "recent" || v === "count" || v === "alpha" || v === "error"
+    ? v
+    : "error";
+}
+function parsePage(v: string | null | undefined): number {
+  const n = v ? parseInt(v, 10) : 1;
+  return Number.isFinite(n) && n >= 1 ? n : 1;
+}
+
 export default function WrongbookPage() {
+  return (
+    <Suspense fallback={null}>
+      <WrongbookPageInner />
+    </Suspense>
+  );
+}
+
+function WrongbookPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [entries, setEntries] = useState<WordbookEntry[]>([]);
-  const [purpose, setPurpose] = useState<PurposeFilter>("all");
-  const [ielts, setIeltsFilter] = useState<IeltsFilter>("all");
-  const [sortKey, setSortKey] = useState<SortKey>("error");
-  const [page, setPage] = useState(1);
+
+  const purpose = parsePurpose(searchParams?.get("purpose"));
+  const ielts = parseIelts(searchParams?.get("ielts"));
+  const sortKey = parseSort(searchParams?.get("sort"));
+  const page = parsePage(searchParams?.get("page"));
   const [defLemma, setDefLemma] = useState<string | null>(null);
 
   useEffect(() => {
@@ -75,17 +101,46 @@ export default function WrongbookPage() {
     return [...filtered].sort(buildComparator(sortKey));
   }, [entries, purpose, ielts, sortKey]);
 
-  useEffect(() => setPage(1), [purpose, ielts, sortKey]);
-
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
-  useEffect(() => {
-    if (page !== safePage) setPage(safePage);
-  }, [page, safePage]);
   const paginated = useMemo(
     () => visible.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE),
     [visible, safePage],
   );
+
+  const setParams = useCallback(
+    (patch: Record<string, string | null>, opts?: { resetPage?: boolean }) => {
+      if (typeof window === "undefined") return;
+      const params = new URLSearchParams(searchParams?.toString() ?? "");
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === null || v === "") params.delete(k);
+        else params.set(k, v);
+      }
+      if (opts?.resetPage) params.delete("page");
+      const qs = params.toString();
+      router.replace(qs ? `/wrongbook?${qs}` : "/wrongbook", { scroll: false });
+    },
+    [router, searchParams],
+  );
+
+  useEffect(() => {
+    if (page > totalPages) {
+      setParams({ page: totalPages === 1 ? null : String(totalPages) });
+    }
+  }, [page, totalPages, setParams]);
+
+  function setPurpose(next: PurposeFilter) {
+    setParams({ purpose: next === "all" ? null : next }, { resetPage: true });
+  }
+  function setIeltsFilter(next: IeltsFilter) {
+    setParams({ ielts: next === "all" ? null : next }, { resetPage: true });
+  }
+  function setSortKey(next: SortKey) {
+    setParams({ sort: next === "error" ? null : next }, { resetPage: true });
+  }
+  function setPage(next: number) {
+    setParams({ page: next <= 1 ? null : String(next) });
+  }
 
   /**
    * 手动从错词本移除某个词：inWrongBook 置 false，errorCount 保持不变
@@ -287,14 +342,17 @@ export default function WrongbookPage() {
                         错 × {e.errorCount ?? 0}
                       </span>
                     </div>
-                    {e.coreExample && (
-                      <div
-                        className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--fg-soft)]"
-                        title={e.coreExample}
-                      >
-                        {e.coreExample}
-                      </div>
-                    )}
+                    {(() => {
+                      const preview = stripChinese(e.coreExample ?? "");
+                      return preview ? (
+                        <div
+                          className="mt-0.5 line-clamp-2 text-[11px] leading-snug text-[var(--fg-soft)]"
+                          title={preview}
+                        >
+                          {preview}
+                        </div>
+                      ) : null;
+                    })()}
                   </div>
                   <div className="shrink-0 space-x-3 text-xs text-[var(--fg-soft)]">
                     <span title="查询次数">×{e.queryCount}</span>
@@ -346,7 +404,7 @@ export default function WrongbookPage() {
           <button
             type="button"
             disabled={safePage === 1}
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            onClick={() => setPage(Math.max(1, safePage - 1))}
             aria-label="上一页"
             className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border)] bg-transparent text-sm text-[var(--fg-soft)] transition hover:text-[var(--fg)] hover:border-[var(--fg-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -358,7 +416,7 @@ export default function WrongbookPage() {
           <button
             type="button"
             disabled={safePage === totalPages}
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            onClick={() => setPage(Math.min(totalPages, safePage + 1))}
             aria-label="下一页"
             className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-[var(--border)] bg-transparent text-sm text-[var(--fg-soft)] transition hover:text-[var(--fg)] hover:border-[var(--fg-soft)] disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -447,4 +505,17 @@ function formatQueryDate(iso: string | undefined): string {
     return `${m}/${day}`;
   }
   return `${d.getFullYear()}/${m}/${day}`;
+}
+
+/**
+ * Same stripChinese as the wordbook page — kept local to avoid a
+ * cross-page helper module for one 6-line utility. Trims trailing "— 中文"
+ * so the wrongbook card only shows English.
+ */
+function stripChinese(s: string): string {
+  const idx = s.search(/\s*[—–]\s*/);
+  if (idx < 0) return s;
+  const tail = s.slice(idx);
+  if (/[\u4e00-\u9fff]/.test(tail)) return s.slice(0, idx).trim();
+  return s;
 }

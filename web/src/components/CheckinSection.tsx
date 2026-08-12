@@ -7,12 +7,9 @@ import { readReviewLog } from "@/lib/wordbook/review-log";
 
 export default function CheckinSection() {
   const [today, setToday] = useState<Date | null>(null);
-  // viewMonth 用于支持用户切换查看月份；与"今天"分开存储。
   const [viewMonth, setViewMonth] = useState<{ year: number; month: number } | null>(null);
   const [punched, setPunched] = useState<Set<number>>(new Set());
   const [streak, setStreak] = useState(0);
-  // 每一天的复习词数（同一 lemma 复习两次也算 2）——放到日期下方小灰字里。
-  // 结构：{ "YYYY-MM-DD": count }
   const [countsByDay, setCountsByDay] = useState<Record<string, number>>({});
 
   const refresh = useCallback(() => {
@@ -36,14 +33,12 @@ export default function CheckinSection() {
     };
   }, [refresh]);
 
-  // 初始化 viewMonth 为当前月份
   useEffect(() => {
     if (today && !viewMonth) {
       setViewMonth({ year: today.getFullYear(), month: today.getMonth() });
     }
   }, [today, viewMonth]);
 
-  // 当 viewMonth 或打卡数据变化时，重新加载该月份的打卡情况
   useEffect(() => {
     if (!viewMonth) return;
     setPunched(punchesInMonth(viewMonth.year, viewMonth.month));
@@ -105,9 +100,13 @@ export default function CheckinSection() {
     return `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
   }
 
+  // 今日的复习词数（用来判断"今日打卡"的实际数字）。同一 lemma 复习两次算 2。
+  const todayCount = isCurrentMonth
+    ? countsByDay[keyOf(year, month, todayDate)] ?? 0
+    : 0;
+
   return (
     <div className="relative overflow-hidden rounded-[var(--radius-lg)] border border-white/70 bg-white/40 backdrop-blur-2xl shadow-[var(--shadow-glass)] h-full flex flex-col supports-[backdrop-filter]:bg-white/32">
-      {/* Frosted-glass layer stack — kept minimal for a clean feel */}
       <div className="pointer-events-none absolute inset-0">
         <div className="absolute inset-0 bg-[linear-gradient(140deg,rgba(255,255,255,0.42),rgba(255,255,255,0.10)_55%,transparent)]" />
         <div className="absolute inset-x-0 bottom-0 h-[38%] bg-gradient-to-t from-white/25 to-transparent" />
@@ -151,7 +150,7 @@ export default function CheckinSection() {
             </div>
           ))}
         </div>
-        <div className="grid grid-cols-7 gap-y-1 text-center flex-1 min-h-0">
+        <div className="grid grid-cols-7 gap-y-1.5 text-center flex-1 min-h-0">
           {cells.map((d, i) => {
             if (d === null) {
               return <div key={i} />;
@@ -170,13 +169,21 @@ export default function CheckinSection() {
 
             const cnt = countsByDay[keyOf(year, month, d)] ?? 0;
 
+            // Cell 结构：h-13 高，日期圆位于纵向居中位置；pill 与圆同一水平中心；
+            // 复习词数数字在圆下方 6px 处，跟日期解耦（问题 8：往下一些）。
             return (
-              <div key={i} className="relative flex h-11 flex-col items-center justify-start pt-0.5">
+              <div
+                key={i}
+                className="relative flex h-13 flex-col items-center pt-[6px]"
+                style={{ height: "3.25rem" /* h-13 alias */ }}
+              >
                 {isPunched && (
                   <div
-                    className="pointer-events-none absolute top-1 h-8"
+                    className="pointer-events-none absolute"
                     style={{
                       backgroundColor: pillBg,
+                      top: "6px",
+                      height: "2rem", // 与日期圆等高
                       left: pillLeft,
                       right: pillRight,
                       borderTopLeftRadius: roundLeft ? "9999px" : 0,
@@ -198,11 +205,13 @@ export default function CheckinSection() {
                 >
                   {d}
                 </div>
-                {/* 当日复习词数 — 小字浅灰色。0 时留出等高占位，避免高度抖动。 */}
+                {/* 词数：浅蓝色小字，距离日期圆再往下 4px（mt-1） */}
                 <div
                   className={[
-                    "relative z-10 mt-0 h-3 leading-3 text-[9px] tabular-nums",
-                    cnt > 0 ? "text-[var(--fg-soft)]/70" : "text-transparent",
+                    "relative z-10 mt-1 leading-none text-[9.5px] tabular-nums",
+                    cnt > 0
+                      ? "text-[var(--accent)]/55"
+                      : "text-transparent",
                   ].join(" ")}
                   title={cnt > 0 ? `${cnt} 词` : undefined}
                 >
@@ -214,20 +223,30 @@ export default function CheckinSection() {
         </div>
       </div>
 
-      <div className="relative border-t border-white/50 bg-white/45 backdrop-blur-md px-4 py-3.5 shrink-0">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-x-3 min-w-0 flex-1 overflow-hidden">
-            <div className="text-[14px] font-semibold tracking-tight whitespace-nowrap">今日打卡</div>
-            <div className="flex items-baseline gap-1 text-[11px] text-[var(--fg-soft)] whitespace-nowrap">
+      {/* 底部条：今日打卡 / 连续 X 天 / 开始复习 —— 排布改为左右分栏 */}
+      <div className="relative border-t border-white/50 bg-white/50 backdrop-blur-md px-5 py-4 shrink-0">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-[15px] font-semibold tracking-tight text-[var(--fg)]">
+              今日打卡
+              {todayCount > 0 && (
+                <span className="ml-2 text-[13px] font-medium text-[var(--accent)] tabular-nums">
+                  · {todayCount} 词
+                </span>
+              )}
+            </div>
+            <div className="mt-0.5 text-[12px] text-[var(--fg-soft)]">
               连续
-              <span className="text-[14px] font-semibold text-[var(--accent)] tabular-nums">{streak}</span>
+              <span className="mx-1 text-[15px] font-semibold text-[var(--accent)] tabular-nums">
+                {streak}
+              </span>
               天
             </div>
           </div>
 
           <Link
             href="/review"
-            className="shrink-0 rounded-full bg-[var(--accent)] px-3 py-1.5 text-center text-xs font-semibold text-white shadow-[0_6px_14px_rgba(106,167,195,0.35)] transition whitespace-nowrap active:translate-y-[1px] hover:brightness-105"
+            className="shrink-0 rounded-full bg-[var(--accent)] px-5 py-2 text-center text-[13px] font-semibold text-white shadow-[0_6px_14px_rgba(106,167,195,0.35)] transition whitespace-nowrap active:translate-y-[1px] hover:brightness-105"
           >
             开始复习
           </Link>

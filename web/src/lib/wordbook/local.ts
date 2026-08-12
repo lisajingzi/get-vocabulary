@@ -70,10 +70,14 @@ export interface WordbookEntry {
    *  true = 已标记雅思；undefined/false = 未标记。用来在单词本、详情页和批量导入里
    *  区分“雅思专用”词。 */
   ielts?: boolean;
-  /** 核心例句 / 短语。词条创建时自动从字典抽取默认值（优先短语→例句），
+  /** 核心例句 / 短语。词条创建时自动从字典抽取默认值（词义区例句优先），
    *  用户可在详情页手动覆盖，回退到空字符串则不再有值。
    *  与 ielts 无关：所有词条统一展示。 */
   coreExample?: string;
+  /** 上一次用户手动编辑 coreExample 的时间。字段存在 = 已被人工编辑过，
+   *  自动迁移逻辑（refillCoreExampleIfDefault）遇到此字段会跳过，避免
+   *  把用户改过的默认值再冲掉。 */
+  coreExampleEditedAt?: string;
   /** 雅思分组名（导入时用户填写）。空/未定义 = 未分组。多个词可共享同一组名，
    *  同一词多次导入以最后一次为准。 */
   group?: string;
@@ -234,6 +238,30 @@ export function listEntries(opts?: { includeArchived?: boolean }): WordbookEntry
  *  example-sentence highlighter ("已查过的词高亮"). */
 export function getKnownLemmaSet(): Set<string> {
   return new Set(Object.keys(readStore()));
+}
+
+/**
+ * List the user's known lemmas sorted by MOST RECENTLY queried first.
+ * `lastQueriedAt` (search-bar lookups) is preferred over `lastSeenAt`
+ * (which also moves on reviews / status changes) so that AI example
+ * generation weaves words the user is actively looking up, not words
+ * whose Ebbinghaus level was bumped 10 minutes ago.
+ *
+ * Entries without any lastQueriedAt (batch-imported IELTS words) sort
+ * last — they were never actively "queried" and shouldn't dominate the
+ * mix used for the AI prompt.
+ */
+export function listKnownLemmasByRecency(limit: number): string[] {
+  const rows = Object.values(readStore());
+  const sorted = rows.sort((a, b) => {
+    const av = a.lastQueriedAt ?? "";
+    const bv = b.lastQueriedAt ?? "";
+    if (av && bv) return av < bv ? 1 : -1; // desc
+    if (av) return -1;
+    if (bv) return 1;
+    return 0;
+  });
+  return sorted.slice(0, Math.max(0, limit)).map((e) => e.lemma);
 }
 
 /**
@@ -429,11 +457,41 @@ export function setCoreExample(
   const existing = store[key];
   if (!existing) return null;
   const trimmed = text.trim();
+  const now = new Date().toISOString();
   const next: WordbookEntry = {
     ...existing,
     coreExample: trimmed.length > 0 ? trimmed : undefined,
-    lastSeenAt: new Date().toISOString(),
+    // Stamp "手动编辑过" so subsequent auto-refills leave this alone.
+    // Even clearing the field (trimmed empty) counts as an edit — user
+    // explicitly wanted no default.
+    coreExampleEditedAt: now,
+    lastSeenAt: now,
   };
+  store[key] = next;
+  writeStore(store);
+  return next;
+}
+
+/**
+ * Refill an entry's coreExample if the user hasn't manually edited it.
+ * Used by the one-shot v2 migration that re-derives defaults after the
+ * pick-priority changed (词义区例句 > 常用搭配区). Skips entries with
+ * `coreExampleEditedAt` set (user override). Empty defaultExample is a
+ * no-op — we never wipe an existing value with nothing.
+ */
+export function refillCoreExampleIfDefault(
+  lemma: string,
+  defaultExample: string,
+): WordbookEntry | null {
+  const trimmed = defaultExample.trim();
+  if (!trimmed) return null;
+  const key = lemma.toLowerCase().trim();
+  const store = readStore();
+  const existing = store[key];
+  if (!existing) return null;
+  if (existing.coreExampleEditedAt) return existing; // manually edited — leave alone
+  if (existing.coreExample === trimmed) return existing; // already matches
+  const next: WordbookEntry = { ...existing, coreExample: trimmed };
   store[key] = next;
   writeStore(store);
   return next;

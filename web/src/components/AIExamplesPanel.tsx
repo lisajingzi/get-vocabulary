@@ -34,7 +34,10 @@ import {
   listExamples,
   type AIExample,
 } from "@/lib/ai/example-cache";
-import { getKnownLemmaSet } from "@/lib/wordbook/local";
+import {
+  getKnownLemmaSet,
+  listKnownLemmasByRecency,
+} from "@/lib/wordbook/local";
 import type { DictSense } from "@/lib/types";
 
 interface Props {
@@ -102,12 +105,17 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
                 pos: senses[0].pos,
               }
             : undefined;
-      const known = Array.from(getKnownLemmaSet()).filter((w) => w !== lemma);
+      // 只用最近查询的 10 个词来组句。
+      // listKnownLemmasByRecency 按 lastQueriedAt 降序，雅思批量导入的词没有 lastQueriedAt
+      // 会自然排到尾部，不会占新鲜频道。回避当前词本身。
+      const recent = listKnownLemmasByRecency(20)
+        .filter((w) => w !== lemma)
+        .slice(0, 10);
       const avoid = history.slice(0, 5).map((h) => h.en);
       const res = await fetch("/api/ai/example", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lemma, sense, known: known.slice(0, 50), avoid }),
+        body: JSON.stringify({ lemma, sense, known: recent, avoid }),
       });
       if (!res.ok) {
         setAttempts(await parseAIErrorAttempts(res));
