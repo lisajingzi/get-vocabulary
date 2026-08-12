@@ -542,22 +542,40 @@ export function normalizeIeltsGroups(): number {
   let changed = 0;
   const IELTS_PREFIX = "真经-";
   // Manual alias table for cases that don't fit the "strip digits" rule.
+  // These are matched BEFORE the prefix guard so groups without the
+  // "真经-" prefix (e.g. historical import of "娱乐运动") can be lifted
+  // into the ielts namespace.
   const ALIASES: Record<string, string> = {
     "真经-历史文明": "真经-历史文化",
+    "娱乐运动": "真经-娱乐运动",
   };
   for (const key of Object.keys(store)) {
     const entry = store[key];
     const g = entry.group?.trim();
-    if (!g || !g.startsWith(IELTS_PREFIX)) continue;
+    if (!g) continue;
 
-    // Step 1: strip trailing digits (with optional separator before them).
+    // Step 1: apply explicit aliases first (bypasses the prefix guard).
+    if (ALIASES[g]) {
+      const aliased = ALIASES[g];
+      if (aliased !== g) {
+        store[key] = { ...entry, group: aliased, lastSeenAt: nowIso };
+        changed += 1;
+      }
+      continue;
+    }
+
+    // Step 2: only strip digits from ielts-prefixed groups, so hand-typed
+    // user groups stay intact.
+    if (!g.startsWith(IELTS_PREFIX)) continue;
+
     //   "真经-学校教育1"   → "真经-学校教育"
     //   "真经-学校教育 3"  → "真经-学校教育"
     //   "真经-学校教育-2"  → "真经-学校教育"
     //   "真经-学校教育"    → "真经-学校教育" (no change)
     let normalized = g.replace(/[\s\-_]*\d+$/, "").trim();
 
-    // Step 2: apply explicit aliases.
+    // Step 3: apply aliases again after digit-strip (covers cases like
+    // "真经-历史文明1" → "真经-历史文明" → "真经-历史文化").
     if (ALIASES[normalized]) normalized = ALIASES[normalized];
 
     if (normalized && normalized !== g) {

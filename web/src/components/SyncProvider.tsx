@@ -54,7 +54,7 @@ export default function SyncProvider() {
     // 一次性归一化雅思导入组名：去掉数字后缀 & 合并同主题。跑完打个
     // localStorage 标记，避免每次刷新都扫全库。若未来云端拉下来老命名，
     // 用户可以手动清 localStorage.get:group-normalize:v1 再触发。
-    const GROUP_MIGRATION_KEY = "get:group-normalize:v1";
+    const GROUP_MIGRATION_KEY = "get:group-normalize:v2";
     try {
       if (
         typeof window !== "undefined" &&
