@@ -89,6 +89,9 @@ export interface WordbookEntry {
   /** 当前是否在错词本内。首次错误 → true；错词本重温复习正确 → false。
    *  与 errorCount 分离：errorCount 是历史，inWrongBook 是当前状态。 */
   inWrongBook?: boolean;
+  /** 用户手动标星的重点词。仅用于快速筛选高优复习目标。
+   *  true = 已标星；undefined/false = 未标星。 */
+  starred?: boolean;
 }
 
 /**
@@ -513,6 +516,26 @@ export function setGroup(
   const next: WordbookEntry = {
     ...existing,
     group: trimmed.length > 0 ? trimmed : undefined,
+    lastSeenAt: new Date().toISOString(),
+  };
+  store[key] = next;
+  writeStore(store);
+  return next;
+}
+
+/**
+ * Toggle the `starred` flag on an entry. Returns the updated entry, or
+ * null if the lemma isn't in the wordbook yet. `lastSeenAt` is bumped so
+ * cloud sync's last-write-wins picks this device's state up next round.
+ */
+export function toggleStar(lemma: string): WordbookEntry | null {
+  const key = lemma.toLowerCase().trim();
+  const store = readStore();
+  const existing = store[key];
+  if (!existing) return null;
+  const next: WordbookEntry = {
+    ...existing,
+    starred: !existing.starred,
     lastSeenAt: new Date().toISOString(),
   };
   store[key] = next;

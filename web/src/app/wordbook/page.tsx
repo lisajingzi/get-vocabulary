@@ -16,6 +16,7 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   listEntries,
   setStatus,
+  toggleStar,
   type WordbookEntry,
   type WordbookPurpose,
   type WordbookStatus,
@@ -69,6 +70,9 @@ function parseGroup(v: string | null | undefined): GroupFilter {
   const s = (v ?? "").trim();
   return s === "" ? "all" : s;
 }
+function parseStarred(v: string | null | undefined): boolean {
+  return v === "1" || v === "true";
+}
 function parseSort(v: string | null | undefined): SortKey {
   return v === "count" || v === "alpha" || v === "error" || v === "recent"
     ? v
@@ -92,6 +96,7 @@ function WordbookPageInner() {
   const purpose = parsePurpose(searchParams?.get("purpose"));
   const ielts = parseIelts(searchParams?.get("ielts"));
   const group = parseGroup(searchParams?.get("group"));
+  const starredOnly = parseStarred(searchParams?.get("starred"));
   const sortKey = parseSort(searchParams?.get("sort"));
   const page = parsePage(searchParams?.get("page"));
 
@@ -138,9 +143,10 @@ function WordbookPageInner() {
       .filter((e) => e.status === tab)
       .filter((e) => matchPurpose(e.purpose, purpose))
       .filter((e) => matchIelts(e.ielts, ielts))
-      .filter((e) => matchGroup(e, group));
+      .filter((e) => matchGroup(e, group))
+      .filter((e) => (starredOnly ? e.starred === true : true));
     return [...filtered].sort(buildComparator(sortKey));
-  }, [entries, tab, purpose, ielts, group, sortKey]);
+  }, [entries, tab, purpose, ielts, group, starredOnly, sortKey]);
 
   // 雅思导入组名取自用户已有数据（去重 + 按字典序）。当列表里一个组都没时，
   // 下拉隐藏，避免无雅思导入的用户看到空控件。
@@ -218,6 +224,9 @@ function WordbookPageInner() {
   }
   function setSortKey(next: SortKey) {
     setParams({ sort: next === "recent" ? null : next }, { resetPage: true });
+  }
+  function setStarredFilter(next: boolean) {
+    setParams({ starred: next ? "1" : null }, { resetPage: true });
   }
   function setPage(next: number) {
     setParams({ page: next <= 1 ? null : String(next) });
@@ -421,6 +430,28 @@ function WordbookPageInner() {
               ))}
             </select>
           </label>
+          {/* 标星筛选开关——点击切换"只看已标星"。用实心星图标作视觉。
+              激活态用主色边框 + 浅蓝底突出，未激活时半透明淡化，方便一眼看出状态。 */}
+          <button
+            type="button"
+            onClick={() => setStarredFilter(!starredOnly)}
+            title={starredOnly ? "取消筛选：显示全部" : "只看已标星的单词"}
+            aria-pressed={starredOnly}
+            className={[
+              "inline-flex h-8 w-8 items-center justify-center rounded-md border transition",
+              starredOnly
+                ? "border-[var(--accent)] bg-[var(--accent)]/10"
+                : "border-[var(--border)] opacity-60 hover:opacity-100 hover:border-[var(--fg-soft)]",
+            ].join(" ")}
+          >
+            <Image
+              src="/icons/star-filled.png"
+              alt=""
+              width={24}
+              height={24}
+              className="h-5 w-5 object-contain"
+            />
+          </button>
         </div>
       </header>
 
@@ -562,6 +593,26 @@ function WordbookPageInner() {
                       </div>
                     </Link>
                   )}
+                  <button
+                    type="button"
+                    title={e.starred ? "取消标星" : "标星（重点复习）"}
+                    aria-label={e.starred ? `取消 ${e.lemma} 的标星` : `标星 ${e.lemma}`}
+                    aria-pressed={e.starred === true}
+                    onClick={(ev) => {
+                      ev.preventDefault();
+                      ev.stopPropagation();
+                      toggleStar(e.lemma);
+                    }}
+                    className="shrink-0 rounded-md p-1 leading-none transition hover:scale-110 active:scale-95"
+                  >
+                    <Image
+                      src={e.starred ? "/icons/star-filled.png" : "/icons/star-outline.png"}
+                      alt=""
+                      width={40}
+                      height={40}
+                      className="h-8 w-8 object-contain"
+                    />
+                  </button>
                   <button
                     type="button"
                     title="查看释义"
