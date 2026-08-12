@@ -175,7 +175,10 @@ function WordbookPageInner() {
    * new-friend list which may only have 5 words total).
    */
   const setParams = useCallback(
-    (patch: Record<string, string | null>, opts?: { resetPage?: boolean }) => {
+    (
+      patch: Record<string, string | null>,
+      opts?: { resetPage?: boolean; push?: boolean },
+    ) => {
       if (typeof window === "undefined") return;
       const params = new URLSearchParams(searchParams?.toString() ?? "");
       for (const [k, v] of Object.entries(patch)) {
@@ -184,7 +187,14 @@ function WordbookPageInner() {
       }
       if (opts?.resetPage) params.delete("page");
       const qs = params.toString();
-      router.replace(qs ? `/wordbook?${qs}` : "/wordbook", { scroll: false });
+      const url = qs ? `/wordbook?${qs}` : "/wordbook";
+      // Filter toggles use replace so we don't pollute browser history with
+      // every micro-interaction. Pagination uses push so "click word → detail
+      // → back" returns to the exact page the user was on (otherwise the
+      // browser skips past all replace()'d page transitions and lands on
+      // page 1).
+      if (opts?.push) router.push(url, { scroll: false });
+      else router.replace(url, { scroll: false });
     },
     [router, searchParams],
   );
@@ -229,7 +239,7 @@ function WordbookPageInner() {
     setParams({ starred: next ? "1" : null }, { resetPage: true });
   }
   function setPage(next: number) {
-    setParams({ page: next <= 1 ? null : String(next) });
+    setParams({ page: next <= 1 ? null : String(next) }, { push: true });
   }
 
   function handleMove(entry: WordbookEntry) {
