@@ -476,27 +476,71 @@ function FilterPicker({
   }, [allEntries]);
 
   // 应用筛选：命中的词条列表 + 总数（复习范围仅限还没毕业的 new 词）。
-  const matched = useMemo(() => {
-    return allEntries.filter((e) => {
-      if (e.status !== "new") return false;
-      if (e.level >= MAX_LEVEL) return false;
+  // 为了让 UI 能"灰化不可选"（方案 B），我们抽出一个 passOthers helper：
+  // 它跑所有筛选维度，但可以 skip 掉指定的一维，用来判断"如果只按其他条件
+  // 筛，这个词是否还在候选池里"。三个 available* 集合就是靠它派生的。
+  const passesFilter = (
+    e: WordbookEntry,
+    skip: "ielts" | "purpose" | "groups" | "reviewCounts" | "errorCounts" | "none",
+  ): boolean => {
+    if (e.status !== "new") return false;
+    if (e.level >= MAX_LEVEL) return false;
+    if (skip !== "ielts") {
       if (filter.ielts === "ielts" && e.ielts !== true) return false;
       if (filter.ielts === "nonielts" && e.ielts === true) return false;
-      if (filter.purpose !== "all") {
-        const actual = e.purpose ?? "active";
-        if (actual !== filter.purpose) return false;
-      }
-      if (filter.ielts === "ielts" && filter.groups.length > 0) {
-        if (!e.group || !filter.groups.includes(e.group)) return false;
-      }
-      if (filter.reviewCounts.length > 0) {
-        if (!filter.reviewCounts.includes(e.reviewCount ?? 0)) return false;
-      }
-      if (filter.errorCounts.length > 0) {
-        if (!filter.errorCounts.includes(e.errorCount ?? 0)) return false;
-      }
-      return true;
-    });
+    }
+    if (skip !== "purpose" && filter.purpose !== "all") {
+      const actual = e.purpose ?? "active";
+      if (actual !== filter.purpose) return false;
+    }
+    if (skip !== "groups" && filter.ielts === "ielts" && filter.groups.length > 0) {
+      if (!e.group || !filter.groups.includes(e.group)) return false;
+    }
+    if (skip !== "reviewCounts" && filter.reviewCounts.length > 0) {
+      if (!filter.reviewCounts.includes(e.reviewCount ?? 0)) return false;
+    }
+    if (skip !== "errorCounts" && filter.errorCounts.length > 0) {
+      if (!filter.errorCounts.includes(e.errorCount ?? 0)) return false;
+    }
+    return true;
+  };
+
+  const matched = useMemo(() => {
+    return allEntries.filter((e) => passesFilter(e, "none"));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEntries, filter]);
+
+  // 「组名」候选：在忽略 groups 自身的前提下、其他维度筛完剩下的雅思词里
+  // 出现过哪些 group。
+  const availableGroups = useMemo(() => {
+    const set = new Set<string>();
+    for (const e of allEntries) {
+      if (!passesFilter(e, "groups")) continue;
+      if (e.ielts !== true) continue;
+      if (e.group && e.group.trim().length > 0) set.add(e.group);
+    }
+    return set;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEntries, filter]);
+
+  const availableReviewCounts = useMemo(() => {
+    const set = new Set<number>();
+    for (const e of allEntries) {
+      if (!passesFilter(e, "reviewCounts")) continue;
+      set.add(e.reviewCount ?? 0);
+    }
+    return set;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allEntries, filter]);
+
+  const availableErrorCounts = useMemo(() => {
+    const set = new Set<number>();
+    for (const e of allEntries) {
+      if (!passesFilter(e, "errorCounts")) continue;
+      set.add(e.errorCount ?? 0);
+    }
+    return set;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allEntries, filter]);
 
   function toggle<T>(arr: T[], v: T): T[] {
@@ -595,19 +639,21 @@ function FilterPicker({
         </div>
       </div>
 
-      {/* 雅思组名 —— 仅在 ielts === "ielts" 时展示；多选 */}
+      {/* 雅思组名 —— 仅在 ielts === "ielts" 时展示；可多选 */}
       {filter.ielts === "ielts" && allGroups.length > 0 && (
         <div className="space-y-1.5">
           <p className="text-[11px] font-medium text-[var(--fg-soft)]">
-            雅思组名（多选，留空 = 全部组）
+            雅思组名 <span className="text-[var(--fg)]">（可多选）</span>，留空 = 全部组
           </p>
           <div className="flex flex-wrap gap-1.5">
             {allGroups.map((g) => {
               const active = filter.groups.includes(g);
+              const disabled = !active && !availableGroups.has(g);
               return (
                 <button
                   key={g}
                   type="button"
+                  disabled={disabled}
                   onClick={() =>
                     setFilter((f) => ({ ...f, groups: toggle(f.groups, g) }))
                   }
@@ -615,7 +661,9 @@ function FilterPicker({
                     "rounded-full border px-2.5 py-0.5 text-[11px] transition",
                     active
                       ? "border-[var(--accent)] bg-[var(--accent)] text-white"
-                      : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--fg-soft)] hover:text-[var(--fg)]",
+                      : disabled
+                        ? "border-[var(--border)]/50 text-[var(--fg-soft)]/40 cursor-not-allowed"
+                        : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--fg-soft)] hover:text-[var(--fg)]",
                   ].join(" ")}
                 >
                   {g}
@@ -630,15 +678,17 @@ function FilterPicker({
       {allReviewCounts.length > 0 && (
         <div className="space-y-1.5">
           <p className="text-[11px] font-medium text-[var(--fg-soft)]">
-            已复习次数（多选，留空 = 不限）
+            已复习次数 <span className="text-[var(--fg)]">（可多选）</span>，留空 = 不限
           </p>
           <div className="flex flex-wrap gap-1.5">
             {allReviewCounts.map((n) => {
               const active = filter.reviewCounts.includes(n);
+              const disabled = !active && !availableReviewCounts.has(n);
               return (
                 <button
                   key={n}
                   type="button"
+                  disabled={disabled}
                   onClick={() =>
                     setFilter((f) => ({
                       ...f,
@@ -649,7 +699,9 @@ function FilterPicker({
                     "rounded-full border px-2.5 py-0.5 text-[11px] tabular-nums transition",
                     active
                       ? "border-[var(--accent)] bg-[var(--accent)] text-white"
-                      : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--fg-soft)] hover:text-[var(--fg)]",
+                      : disabled
+                        ? "border-[var(--border)]/50 text-[var(--fg-soft)]/40 cursor-not-allowed"
+                        : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--fg-soft)] hover:text-[var(--fg)]",
                   ].join(" ")}
                 >
                   {n}
@@ -664,15 +716,17 @@ function FilterPicker({
       {allErrorCounts.length > 0 && (
         <div className="space-y-1.5">
           <p className="text-[11px] font-medium text-[var(--fg-soft)]">
-            错误次数（多选，留空 = 不限）
+            错误次数 <span className="text-[var(--fg)]">（可多选）</span>，留空 = 不限
           </p>
           <div className="flex flex-wrap gap-1.5">
             {allErrorCounts.map((n) => {
               const active = filter.errorCounts.includes(n);
+              const disabled = !active && !availableErrorCounts.has(n);
               return (
                 <button
                   key={n}
                   type="button"
+                  disabled={disabled}
                   onClick={() =>
                     setFilter((f) => ({
                       ...f,
@@ -683,7 +737,9 @@ function FilterPicker({
                     "rounded-full border px-2.5 py-0.5 text-[11px] tabular-nums transition",
                     active
                       ? "border-[var(--accent)] bg-[var(--accent)] text-white"
-                      : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--fg-soft)] hover:text-[var(--fg)]",
+                      : disabled
+                        ? "border-[var(--border)]/50 text-[var(--fg-soft)]/40 cursor-not-allowed"
+                        : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--fg-soft)] hover:text-[var(--fg)]",
                   ].join(" ")}
                 >
                   {n}
