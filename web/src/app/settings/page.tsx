@@ -19,8 +19,8 @@ import {
   DAILY_CAP_CHOICES,
 } from "@/lib/wordbook/preferences";
 import {
+  ensureEntry,
   getEntry,
-  recordLookup,
   setGroup,
   setIelts,
   setPurpose,
@@ -193,8 +193,10 @@ export default function SettingsPage() {
         if (groupName) setGroup(lemma, groupName);
         existed += 1;
       } else {
-        // 不存在 → 新建条目（默认 status="new" / level=0 / queryCount=1）
-        recordLookup(lemma);
+        // 不存在 → 建一条“未查询”的空条目（queryCount=0、lastQueriedAt 未设），
+        // 导入本身不算用户查询；后续用户在搜索栏手动查时 recordLookup 才会把
+        // queryCount 拉到 1。
+        ensureEntry(lemma);
         setIelts(lemma, true);
         setPurpose(lemma, "active");
         if (groupName) setGroup(lemma, groupName);

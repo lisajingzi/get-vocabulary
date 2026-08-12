@@ -152,6 +152,20 @@ function buildSnapshot(): SyncSnapshot {
 // ---------------------------------------------------------------------------
 // Merge helpers — last-write-wins by timestamp
 // ---------------------------------------------------------------------------
+
+/**
+ * Old bug: the IELTS batch importer used to call `recordLookup` which sets
+ * queryCount=1 even though the user never actually looked the word up. We've
+ * fixed the writer, but stale remote snapshots may still carry those bogus
+ * 1's. Treat any entry that satisfies `queryCount===1 && !lastQueriedAt`
+ * as effectively unqueried during merging so the client-side backfill
+ * doesn't get resurrected by an old cloud snapshot.
+ */
+function effectiveQueryCount(e: WordbookEntry): number {
+  if (e.queryCount === 1 && !e.lastQueriedAt) return 0;
+  return e.queryCount;
+}
+
 function mergeWordbook(
   local: Record<string, WordbookEntry>,
   remote: Record<string, WordbookEntry>,
@@ -160,12 +174,21 @@ function mergeWordbook(
   for (const [lemma, remoteEntry] of Object.entries(remote)) {
     const localEntry = merged[lemma];
     if (!localEntry || remoteEntry.lastSeenAt > localEntry.lastSeenAt) {
-      merged[lemma] = remoteEntry;
+      // Even when remote wins by timestamp, sanitize the import-residue
+      // queryCount so a fresh device pulling from cloud doesn't inherit
+      // the pre-fix "已查过一次" artifact.
+      merged[lemma] = {
+        ...remoteEntry,
+        queryCount: effectiveQueryCount(remoteEntry),
+      };
     } else {
       // Preserve the higher queryCount even if local is "newer"
       merged[lemma] = {
         ...localEntry,
-        queryCount: Math.max(localEntry.queryCount, remoteEntry.queryCount),
+        queryCount: Math.max(
+          effectiveQueryCount(localEntry),
+          effectiveQueryCount(remoteEntry),
+        ),
       };
     }
   }

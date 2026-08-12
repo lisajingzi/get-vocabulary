@@ -228,6 +228,40 @@ export function getEntry(lemma: string): WordbookEntry | null {
   return readStore()[lemma.toLowerCase().trim()] ?? null;
 }
 
+/**
+ * Create a wordbook entry WITHOUT counting it as a lookup.
+ *
+ * Used by batch-import flows (e.g. IELTS 词组导入) where the entry should
+ * exist so it can be tagged / grouped, but the user hasn't actually looked
+ * the word up yet. Contrast with `recordLookup` which bumps queryCount.
+ *
+ * - Already exists → returns it untouched (caller can then apply
+ *   setIelts / setPurpose / setGroup as needed).
+ * - Doesn't exist → creates with `queryCount: 0`, `lastQueriedAt` unset.
+ *   Downstream code (WordDetailView 的“不展示 AI 例句”分支、
+ *   listKnownLemmasByRecency 的“没查过的沉底”）已经按这个约定处理。
+ */
+export function ensureEntry(lemma: string): WordbookEntry {
+  const key = lemma.toLowerCase().trim();
+  const store = readStore();
+  const existing = store[key];
+  if (existing) return existing;
+
+  const now = new Date().toISOString();
+  const created: WordbookEntry = {
+    lemma: key,
+    status: "new",
+    queryCount: 0,
+    level: 0,
+    firstSeenAt: now,
+    lastSeenAt: now,
+    // 故意不设 lastQueriedAt——用户从未真正查询过。
+  };
+  store[key] = created;
+  writeStore(store);
+  return created;
+}
+
 /** All wordbook entries — useful for the wordbook page on Day 3.
  *  By default omits `archived` so the new/old friend lists stay clean;
  *  pass `{ includeArchived: true }` for the full set. */
@@ -609,6 +643,31 @@ export function normalizeIeltsGroups(): number {
   if (changed > 0) writeStore(store);
   return changed;
 }
+
+/**
+ * One-time backfill: 老版本导入雅思词组时会误把 `queryCount` 设为 1（走了
+ * recordLookup 通道），导致这些词看起来"已查过一次"。修正逻辑：把满足
+ * `ielts === true && queryCount === 1 && !lastQueriedAt` 的词的 queryCount
+ * 归零。`!lastQueriedAt` 是关键判据——真正被用户在搜索栏查过一次的词一
+ * 定有 lastQueriedAt，不会被误伤。
+ *
+ * Returns the number of entries whose `queryCount` was reset.
+ */
+export function resetIeltsImportedQueryCount(): number {
+  const store = readStore();
+  let changed = 0;
+  for (const key of Object.keys(store)) {
+    const entry = store[key];
+    if (!entry.ielts) continue;
+    if (entry.queryCount !== 1) continue;
+    if (entry.lastQueriedAt) continue;
+    store[key] = { ...entry, queryCount: 0 };
+    changed += 1;
+  }
+  if (changed > 0) writeStore(store);
+  return changed;
+}
+
 /**
  * Record the outcome of a review attempt on stats (reviewCount / errorCount /
  * inWrongBook), independent from `recordReview()` which handles the

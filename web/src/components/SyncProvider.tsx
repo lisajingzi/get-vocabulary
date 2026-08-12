@@ -16,7 +16,7 @@
 
 import { useEffect } from "react";
 import { pull, schedulePush, flushPush } from "@/lib/sync/cloud";
-import { migrateEntries, normalizeIeltsGroups } from "@/lib/wordbook/local";
+import { migrateEntries, normalizeIeltsGroups, resetIeltsImportedQueryCount } from "@/lib/wordbook/local";
 import { migrateCoreExamples } from "@/lib/wordbook/core-example";
 
 const CHANGE_EVENTS = [
@@ -68,7 +68,26 @@ export default function SyncProvider() {
         }
       }
     } catch {
-      // localStorage \u53ef\u80fd\u4e0d\u53ef\u7528\uff0c\u5931\u8d25\u65f6\u5219\u4e0d\u9605\u53d1\u8fc1\u79fb\u3002
+      // localStorage 可能不可用，失败时则不阅发迁移。
+    }
+
+    // 一次性回填：老版本雅思词组导入误把 queryCount 设为 1（走了 recordLookup
+    // 通道），使这些词看起来"已查过一次"。修完代码后需要给存量数据重置。判据
+    // `!lastQueriedAt` 保证真被查过一次的词不会被误伤。
+    const IMPORT_COUNT_FIX_KEY = "get:ielts-import-count-fix:v1";
+    try {
+      if (
+        typeof window !== "undefined" &&
+        !window.localStorage.getItem(IMPORT_COUNT_FIX_KEY)
+      ) {
+        const changed = resetIeltsImportedQueryCount();
+        window.localStorage.setItem(IMPORT_COUNT_FIX_KEY, String(Date.now()));
+        if (changed > 0) {
+          window.dispatchEvent(new Event("get:wordbook-change"));
+        }
+      }
+    } catch {
+      // localStorage 不可用，跳过。
     }
 
     let lastPullAt = 0;
