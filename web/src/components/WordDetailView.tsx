@@ -140,7 +140,6 @@ export default function WordDetailView({ slug, from }: Props) {
         if (created) {
           const defaultExample = pickDefaultCoreExample(
             result.entry.senses,
-            result.entry.phrases,
           );
           if (defaultExample) {
             backfillCoreExample(result.query, defaultExample);
@@ -561,7 +560,7 @@ export default function WordDetailView({ slug, from }: Props) {
         <CoreExampleCard
           lemma={typed}
           value={bookEntry.coreExample ?? ""}
-          defaultExample={pickDefaultCoreExample(entry.senses, entry.phrases)}
+defaultExample={pickDefaultCoreExample(entry.senses)}
           onSave={handleSaveCoreExample}
         />
       )}

@@ -22,7 +22,7 @@ import {
   listEntries,
   refillCoreExampleIfDefault,
 } from "@/lib/wordbook/local";
-import type { DictEntry, DictPhrase, DictSense } from "@/lib/types";
+import type { DictEntry, DictSense } from "@/lib/types";
 
 /** v2 migration flag — bumped when the pick-priority changes so we can
  *  re-derive defaults for entries that haven't been manually edited. */
@@ -32,10 +32,7 @@ const MIGRATION_FLAG_KEY = "get:core-example:migration:v2";
  * Compute a default coreExample string from a fully-loaded dictionary entry.
  * Priority: first sense-example > first sense chn/def gloss.
  */
-export function pickDefaultCoreExample(
-  senses: DictSense[],
-  _phrases: DictPhrase[] | undefined,
-): string {
+export function pickDefaultCoreExample(senses: DictSense[]): string {
   // Walk senses in order and grab the first one that carries a usable
   // English example. This handles the case where sense #0 has no examples
   // but sense #1 does (common on shorter entries).
@@ -55,7 +52,7 @@ export function pickDefaultCoreExample(
  * Same as pickDefaultCoreExample but takes a full DictEntry.
  */
 export function coreExampleFromEntry(entry: DictEntry): string {
-  return pickDefaultCoreExample(entry.senses, entry.phrases);
+  return pickDefaultCoreExample(entry.senses);
 }
 
 /**
