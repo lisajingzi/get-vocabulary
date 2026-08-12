@@ -2,12 +2,12 @@
  * Helper for picking a "core example" (short representative sentence or
  * phrase) from a dictionary entry to seed `WordbookEntry.coreExample`.
  *
- * Priority (v2 — per product spec, "从释义里挑，不用常用搭配区")：
+ * Priority (v3 — 核心例句只放英文；没例句时用英文释义兜底)：
  *   1. First sense whose `ex[0]` has usable English (walks all senses).
- *      Chinese translation is appended after " — " when available so the
- *      wordbook list can strip it back off client-side (`stripChinese`).
- *   2. Fall back to first sense's Chinese gloss (chn).
- *   3. Fall back to first sense's English def.
+ *      仅使用 `ex.en`，不再拼接中文翻译。
+ *   2. Fall back to first sense's English def.
+ *   3. Fall back to first sense's Chinese gloss (chn) — 极少数条目
+ *      连英文 def 都没有时的最后一招。
  *
  * Note: we intentionally do NOT use `entry.phrases[*]` — that block is
  * the Oxford 9 "common collocation" strip (<cf-blk>), which produces
@@ -24,9 +24,10 @@ import {
 } from "@/lib/wordbook/local";
 import type { DictEntry, DictSense } from "@/lib/types";
 
-/** v2 migration flag — bumped when the pick-priority changes so we can
- *  re-derive defaults for entries that haven't been manually edited. */
-const MIGRATION_FLAG_KEY = "get:core-example:migration:v2";
+/** Migration flag — bumped when the pick-priority changes so we can
+ *  re-derive defaults for entries that haven't been manually edited.
+ *  v3: 例句只保留英文，去掉中文；无例句时用英文 def 兜底。 */
+const MIGRATION_FLAG_KEY = "get:core-example:migration:v3";
 
 /**
  * Compute a default coreExample string from a fully-loaded dictionary entry.
@@ -38,13 +39,14 @@ export function pickDefaultCoreExample(senses: DictSense[]): string {
   // but sense #1 does (common on shorter entries).
   for (const s of senses ?? []) {
     const ex = s.ex?.[0];
-    if (ex?.en) return ex.cn ? `${ex.en} — ${ex.cn}` : ex.en;
+    if (ex?.en) return ex.en;
   }
-  // Fall back to the first sense's gloss — rare but keeps the field non-empty
-  // for entries where the dictionary omits examples entirely.
+  // Fall back to the first sense's English def — 保证展示的是英文，
+  // 避免把中文翻译当例句塞进核心例句字段。
   const s0 = senses?.[0];
-  if (s0?.chn) return s0.chn;
   if (s0?.def) return s0.def;
+  // Extremely rare last resort: 连英文 def 都没有时才用中文 gloss。
+  if (s0?.chn) return s0.chn;
   return "";
 }
 
