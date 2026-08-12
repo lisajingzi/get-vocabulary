@@ -120,6 +120,53 @@ function WordbookPageInner() {
     };
   }, []);
 
+  // ─────────────────────────────────────────────────────────────────
+  // Back-to-list state preservation (SESSION-SCOPED)
+  //
+  // Problem: Next.js App Router's Router Cache can serve a stale RSC payload
+  // for /wordbook on router.back(), which strips the search params we set
+  // via router.replace(). Result: user paginates to page 3, opens a word,
+  // hits back — and lands on page 1 with filters cleared.
+  //
+  // Fix: mirror the URL's querystring into sessionStorage on every change.
+  // On mount, if the URL is "bare" (no querystring) but we have a saved one
+  // from this tab session, immediately router.replace() it back. This is a
+  // last-line-of-defense that works regardless of Next's internal caching.
+  //
+  // Scope: sessionStorage → dies with the tab, so a fresh window still opens
+  // the default (new-friend, page 1) view. ✅
+  // ─────────────────────────────────────────────────────────────────
+  const KEY_LAST_QS = "wordbook:last-qs";
+
+  // Save current URL state on every change.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const qs = searchParams?.toString() ?? "";
+    try {
+      window.sessionStorage.setItem(KEY_LAST_QS, qs);
+    } catch {
+      // Storage might be full / disabled in private mode — silently ignore;
+      // worst case we just lose the "return to previous filter" enhancement.
+    }
+  }, [searchParams]);
+
+  // On first mount, if URL is bare but we have a saved qs, restore it.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const currentQs = searchParams?.toString() ?? "";
+    if (currentQs) return; // URL already carries state — nothing to do.
+    let saved = "";
+    try {
+      saved = window.sessionStorage.getItem(KEY_LAST_QS) ?? "";
+    } catch {
+      return;
+    }
+    if (!saved) return;
+    // Use replace so the "bare" entry doesn't linger in history.
+    router.replace(`/wordbook?${saved}`, { scroll: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   useEffect(() => {
     if (!undo) return;
     const id = window.setInterval(() => {
