@@ -26,6 +26,8 @@ import DefinitionModal from "@/components/DefinitionModal";
 type SortKey = "recent" | "count" | "alpha" | "error";
 type PurposeFilter = "all" | WordbookPurpose;
 type IeltsFilter = "all" | "ielts" | "nonielts";
+/** "all" = 不按雅思组名筛；具体字符串代表一个已存在的雅思导入组名。 */
+type GroupFilter = "all" | string;
 
 const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
   { value: "recent", label: "最近查询" },
@@ -62,6 +64,10 @@ function parsePurpose(v: string | null | undefined): PurposeFilter {
 function parseIelts(v: string | null | undefined): IeltsFilter {
   return v === "ielts" || v === "nonielts" ? v : "all";
 }
+function parseGroup(v: string | null | undefined): GroupFilter {
+  const s = (v ?? "").trim();
+  return s === "" ? "all" : s;
+}
 function parseSort(v: string | null | undefined): SortKey {
   return v === "count" || v === "alpha" || v === "error" || v === "recent"
     ? v
@@ -84,6 +90,7 @@ function WordbookPageInner() {
   const tab = parseTab(searchParams?.get("tab"));
   const purpose = parsePurpose(searchParams?.get("purpose"));
   const ielts = parseIelts(searchParams?.get("ielts"));
+  const group = parseGroup(searchParams?.get("group"));
   const sortKey = parseSort(searchParams?.get("sort"));
   const page = parsePage(searchParams?.get("page"));
 
@@ -127,9 +134,20 @@ function WordbookPageInner() {
     const filtered = entries
       .filter((e) => e.status === tab)
       .filter((e) => matchPurpose(e.purpose, purpose))
-      .filter((e) => matchIelts(e.ielts, ielts));
+      .filter((e) => matchIelts(e.ielts, ielts))
+      .filter((e) => matchGroup(e, group));
     return [...filtered].sort(buildComparator(sortKey));
-  }, [entries, tab, purpose, ielts, sortKey]);
+  }, [entries, tab, purpose, ielts, group, sortKey]);
+
+  // 雅思导入组名取自用户已有数据（去重 + 按字典序）。当列表里一个组都没时，
+  // 下拉隐藏，避免无雅思导入的用户看到空控件。
+  const groupOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const e of entries) {
+      if (e.ielts && e.group && e.group.trim()) names.add(e.group.trim());
+    }
+    return Array.from(names).sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+  }, [entries]);
 
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -177,7 +195,23 @@ function WordbookPageInner() {
     setParams({ purpose: next === "all" ? null : next }, { resetPage: true });
   }
   function setIeltsFilter(next: IeltsFilter) {
-    setParams({ ielts: next === "all" ? null : next }, { resetPage: true });
+    // 切换雅思筛选时组名筛选失效（非雅思本就无组归属），直接清掉 group 参数，
+    // 避免用户看到“筛了组但一条没”的困惑现象。
+    setParams(
+      { ielts: next === "all" ? null : next, group: null },
+      { resetPage: true },
+    );
+  }
+  function setGroupFilter(next: GroupFilter) {
+    // 选了具体组名隐含“只看雅思”；切回 all 保留当前 ielts 的选择。
+    if (next === "all") {
+      setParams({ group: null }, { resetPage: true });
+    } else {
+      setParams(
+        { group: next, ielts: ielts === "nonielts" ? "ielts" : ielts === "all" ? "ielts" : ielts },
+        { resetPage: true },
+      );
+    }
   }
   function setSortKey(next: SortKey) {
     setParams({ sort: next === "recent" ? null : next }, { resetPage: true });
@@ -351,6 +385,25 @@ function WordbookPageInner() {
               );
             })}
           </div>
+          {/* 雅思词组下拉——仅当用户有过雅思导入组时才展示，避免非雅思用户看到空控件。
+              选中具体组名隐含“只看雅思”（setGroupFilter 里已处理）。 */}
+          {groupOptions.length > 0 && (
+            <label className="inline-flex items-center gap-1.5 text-[var(--fg-soft)]">
+              雅思词组
+              <select
+                value={group}
+                onChange={(e) => setGroupFilter(e.target.value)}
+                className="rounded-md border border-[var(--border)] bg-transparent px-2 py-1 text-[var(--fg)] outline-none"
+              >
+                <option value="all">全部组</option>
+                {groupOptions.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <label className="inline-flex items-center gap-1.5 text-[var(--fg-soft)]">
             排序
             <select
@@ -632,6 +685,17 @@ function matchIelts(
   if (want === "all") return true;
   const isIelts = stored === true;
   return want === "ielts" ? isIelts : !isIelts;
+}
+
+/**
+ * 雅思词组名匹配。`want = "all"` 不筛；否则只保留 group 字段完全相等的条目。
+ * 非雅思词天然没 group，会被直接过滤掉——这与“选了具体组名隐含只看雅思”
+ * 的 UI 预期一致。
+ */
+function matchGroup(entry: WordbookEntry, want: GroupFilter): boolean {
+  if (want === "all") return true;
+  const g = (entry.group ?? "").trim();
+  return g === want;
 }
 
 function buildComparator(key: SortKey) {
