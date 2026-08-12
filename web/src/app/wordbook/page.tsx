@@ -22,6 +22,7 @@ import {
 } from "@/lib/wordbook/local";
 import SpeakButton from "@/components/SpeakButton";
 import DefinitionModal from "@/components/DefinitionModal";
+import WordAutoPlayer from "@/components/WordAutoPlayer";
 
 type SortKey = "recent" | "count" | "alpha" | "error";
 type PurposeFilter = "all" | WordbookPurpose;
@@ -98,6 +99,8 @@ function WordbookPageInner() {
   const [masked, setMasked] = useState(false);
   const [revealedLemma, setRevealedLemma] = useState<string | null>(null);
   const [defLemma, setDefLemma] = useState<string | null>(null);
+  // 自动连播当前高亮的单词——仅为行背景色标识，不干预其它交互。
+  const [playingLemma, setPlayingLemma] = useState<string | null>(null);
 
   useEffect(() => {
     function refresh() {
@@ -421,6 +424,15 @@ function WordbookPageInner() {
         </div>
       </header>
 
+      {/* 自动连播工具栏——馈入当前可见页 paginated 的 lemma 列表。
+          翻页 / 换筛选造成列表变化时，AutoPlayer 会自动停止。 */}
+      {visible.length > 0 && (
+        <WordAutoPlayer
+          words={paginated.map((e) => e.lemma)}
+          onCurrentChange={setPlayingLemma}
+        />
+      )}
+
       {/* List */}
       {visible.length === 0 ? (
         <p className="text-sm text-[var(--fg-soft)]">
@@ -429,7 +441,7 @@ function WordbookPageInner() {
             : "还没有老朋友。完成复习的单词会自动来到这里。"}
         </p>
       ) : (
-        <ul className="divide-y divide-[var(--border)] rounded-lg border border-[var(--border)]">
+        <ul className="rounded-lg border border-[var(--border)]">
           {paginated.map((e) => {
             const isNew = e.status === "new";
             const moveTitle =
@@ -457,9 +469,15 @@ function WordbookPageInner() {
             // 卡片里只显示英文——中文放在详情页看。stripChinese 会把 "en — cn" 中的
             // "— cn" 去掉；纯英文串保持不变。
             const previewExample = stripChinese(e.coreExample ?? "");
+            const isPlaying = playingLemma === e.lemma;
             return (
               <li key={e.lemma} className="group">
-                <div className="flex items-center gap-3 px-4 py-3 transition hover:bg-[var(--bg-soft)]">
+                <div
+                  className={[
+                    "flex items-center gap-3 px-4 py-3 transition hover:bg-[var(--bg-soft)]",
+                    isPlaying ? "bg-[var(--accent)]/10" : "",
+                  ].join(" ")}
+                >
                   <div
                     className="shrink-0"
                     onClick={(ev) => ev.stopPropagation()}
@@ -510,12 +528,6 @@ function WordbookPageInner() {
                           </div>
                         )}
                       </div>
-                      <div className="shrink-0 space-x-3 text-xs text-[var(--fg-soft)]">
-                        <span title="查询次数">×{e.queryCount}</span>
-                        <span title="最近查询日期">
-                          {formatQueryDate(e.lastQueriedAt ?? e.lastSeenAt)}
-                        </span>
-                      </div>
                     </div>
                   ) : (
                     <Link
@@ -547,12 +559,6 @@ function WordbookPageInner() {
                             {previewExample}
                           </div>
                         )}
-                      </div>
-                      <div className="shrink-0 space-x-3 text-xs text-[var(--fg-soft)]">
-                        <span title="查询次数">×{e.queryCount}</span>
-                        <span title="最近查询日期">
-                          {formatQueryDate(e.lastQueriedAt ?? e.lastSeenAt)}
-                        </span>
                       </div>
                     </Link>
                   )}
@@ -741,18 +747,6 @@ function maskLemma(lemma: string): string {
     .split("")
     .map((ch) => (/[a-zA-Z]/.test(ch) ? "•" : ch))
     .join("");
-}
-
-function formatQueryDate(iso: string | undefined): string {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "—";
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  if (d.getFullYear() === new Date().getFullYear()) {
-    return `${m}/${day}`;
-  }
-  return `${d.getFullYear()}/${m}/${day}`;
 }
 
 /**
