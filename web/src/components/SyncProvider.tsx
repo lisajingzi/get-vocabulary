@@ -16,7 +16,7 @@
 
 import { useEffect } from "react";
 import { pull, schedulePush, flushPush } from "@/lib/sync/cloud";
-import { migrateEntries, normalizeIeltsGroups, resetIeltsImportedQueryCount } from "@/lib/wordbook/local";
+import { migrateEntries, normalizeIeltsGroups, resetImportedQueryCount } from "@/lib/wordbook/local";
 import { migrateCoreExamples } from "@/lib/wordbook/core-example";
 
 const CHANGE_EVENTS = [
@@ -71,16 +71,19 @@ export default function SyncProvider() {
       // localStorage 可能不可用，失败时则不阅发迁移。
     }
 
-    // 一次性回填：老版本雅思词组导入误把 queryCount 设为 1（走了 recordLookup
-    // 通道），使这些词看起来"已查过一次"。修完代码后需要给存量数据重置。判据
-    // `!lastQueriedAt` 保证真被查过一次的词不会被误伤。
-    const IMPORT_COUNT_FIX_KEY = "get:ielts-import-count-fix:v1";
+    // 一次性回填：老版本（及任何走 recordLookup 通道的）批量导入会误把
+    // queryCount 设为 1，使这些词看起来"已查过一次"。修完代码后给存量数据
+    // 重置。判据 `!lastQueriedAt` 保证真被查过一次的词不会被误伤。
+    // v2：把回填范围从「仅雅思词」放宽到「所有 queryCount===1 && !lastQueriedAt
+    // 的词」，覆盖早期普通导入同样误触的情况（与 cloud.ts 的 effectiveQueryCount
+    // 判据对齐）。版本号 bump 让已跑过 v1 的老用户也会重新执行一次。
+    const IMPORT_COUNT_FIX_KEY = "get:ielts-import-count-fix:v2";
     try {
       if (
         typeof window !== "undefined" &&
         !window.localStorage.getItem(IMPORT_COUNT_FIX_KEY)
       ) {
-        const changed = resetIeltsImportedQueryCount();
+        const changed = resetImportedQueryCount();
         window.localStorage.setItem(IMPORT_COUNT_FIX_KEY, String(Date.now()));
         if (changed > 0) {
           window.dispatchEvent(new Event("get:wordbook-change"));

@@ -645,20 +645,22 @@ export function normalizeIeltsGroups(): number {
 }
 
 /**
- * One-time backfill: 老版本导入雅思词组时会误把 `queryCount` 设为 1（走了
- * recordLookup 通道），导致这些词看起来"已查过一次"。修正逻辑：把满足
- * `ielts === true && queryCount === 1 && !lastQueriedAt` 的词的 queryCount
- * 归零。`!lastQueriedAt` 是关键判据——真正被用户在搜索栏查过一次的词一
- * 定有 lastQueriedAt，不会被误伤。
+ * One-time backfill: 老版本（以及任何走 recordLookup 通道）的批量导入会误把
+ * `queryCount` 设为 1，导致这些词看起来"已查过一次"。修正逻辑：把满足
+ * `queryCount === 1 && !lastQueriedAt` 的词的 queryCount 归零。
+ *
+ * 判据与 `lib/sync/cloud.ts` 的 `effectiveQueryCount` 保持一致——不限 ielts，
+ * 因为普通导入（非雅思）的早期版本同样会误触。关键判据是 `!lastQueriedAt`：
+ * 真正被用户在搜索栏 / 例句超链接查过一次的词一定有 lastQueriedAt，绝不会被
+ * 误伤；只有"纯导入、从未真查过"的词才会被归零。
  *
  * Returns the number of entries whose `queryCount` was reset.
  */
-export function resetIeltsImportedQueryCount(): number {
+export function resetImportedQueryCount(): number {
   const store = readStore();
   let changed = 0;
   for (const key of Object.keys(store)) {
     const entry = store[key];
-    if (!entry.ielts) continue;
     if (entry.queryCount !== 1) continue;
     if (entry.lastQueriedAt) continue;
     store[key] = { ...entry, queryCount: 0 };
