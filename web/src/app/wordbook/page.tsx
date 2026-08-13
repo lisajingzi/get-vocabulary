@@ -10,7 +10,6 @@
  */
 
 import Image from "next/image";
-import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -107,16 +106,33 @@ function WordbookPageInner() {
   // 自动连播当前高亮的单词——仅为行背景色标识，不干预其它交互。
   const [playingLemma, setPlayingLemma] = useState<string | null>(null);
 
+  // Seed from IndexedDB and live-refresh on changes from any source
+  // (detail page, sibling tab, etc).
+  //
+  // 数据源是 IndexedDB，不是 localStorage，所以跨标签页的写入不会
+  // 自动触发 "storage" 事件。为了配合"详情页在新标签页打开"的交互
+  // （点单词 → 新标签页看/改 → 切回列表），我们额外监听 focus 和
+  // visibilitychange：只要这个标签页重新可见/得到焦点，就重跑
+  // listEntries()。注意这里只替换 entries state，组件不会重挂载，
+  // page / tab / 筛选 / 滚动位置全部原样保留——用户只会看到 star、
+  // 是否被删除、分组计数悄悄同步，不会被踢回第一页。
   useEffect(() => {
     function refresh() {
       setEntries(listEntries());
     }
+    function refreshIfVisible() {
+      if (document.visibilityState === "visible") refresh();
+    }
     refresh();
     window.addEventListener("get:wordbook-change", refresh);
     window.addEventListener("storage", refresh);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refreshIfVisible);
     return () => {
       window.removeEventListener("get:wordbook-change", refresh);
       window.removeEventListener("storage", refresh);
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
     };
   }, []);
 
@@ -629,8 +645,15 @@ function WordbookPageInner() {
                       </div>
                     </div>
                   ) : (
-                    <Link
+                    // 详情页在新标签页打开：这样点单词绝不会破坏当前列表
+                    // 的 tab / 筛选 / 页码 / 滚动位置。之前尝试用 ?page=N +
+                    // 浏览器 back 恢复页码，遇到 bfcache / RSC 缓存 / effect
+                    // 时序等场景仍会偶发跳回第一页，索性用新窗口彻底绕开。
+                    // 用普通 <a> 而非 next/link — 我们本来就不想要软导航。
+                    <a
                       href={`/word/${encodeURIComponent(e.lemma)}?from=wordbook`}
+                      target="_blank"
+                      rel="noopener noreferrer"
                       className="flex min-w-0 flex-1 items-baseline justify-between gap-3"
                     >
                       <div className="min-w-0 flex-1">
@@ -659,7 +682,7 @@ function WordbookPageInner() {
                           </div>
                         )}
                       </div>
-                    </Link>
+                    </a>
                   )}
                   <button
                     type="button"
