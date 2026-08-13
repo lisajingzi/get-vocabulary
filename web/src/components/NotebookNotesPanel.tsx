@@ -96,28 +96,6 @@ export default function NotebookNotesPanel({
         {title}
       </h2>
 
-      <form
-        onSubmit={handleSubmit}
-        className="space-y-2 rounded-lg border border-[var(--border)] p-3"
-      >
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          placeholder={placeholder}
-          rows={3}
-          className="w-full resize-none appearance-none bg-transparent text-base leading-9 caret-[var(--accent)] outline-none ring-0 focus:outline-none focus:ring-0 focus:border-transparent placeholder:text-[var(--fg-soft)]"
-        />
-        <div className="flex justify-end">
-          <button
-            type="submit"
-            disabled={!draft.trim()}
-            className="rounded-md border border-[var(--border)] px-3 py-1 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            保存
-          </button>
-        </div>
-      </form>
-
       {notes.length === 0 ? (
         <p className="text-xs text-[var(--fg-soft)]">
           还没有笔记，写下你的第一条想法吧。
@@ -191,6 +169,28 @@ export default function NotebookNotesPanel({
           })}
         </ul>
       )}
+
+      <form
+        onSubmit={handleSubmit}
+        className="space-y-2 rounded-lg border border-[var(--border)] p-3"
+      >
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          placeholder={placeholder}
+          rows={3}
+          className="w-full resize-none appearance-none bg-transparent text-base leading-9 caret-[var(--accent)] outline-none ring-0 focus:outline-none focus:ring-0 focus:border-transparent placeholder:text-[var(--fg-soft)]"
+        />
+        <div className="flex justify-end">
+          <button
+            type="submit"
+            disabled={!draft.trim()}
+            className="rounded-md border border-[var(--border)] px-3 py-1 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            保存
+          </button>
+        </div>
+      </form>
     </section>
   );
 }
