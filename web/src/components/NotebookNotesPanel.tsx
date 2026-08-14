@@ -5,15 +5,22 @@
  *
  * Simpler than the wordbook <NotesPanel />:
  *   - No pos picker (notebook entries don't carry a part of speech).
- *   - Text-only for now (image support can be revived later; the storage
- *     layer already keeps the field so nothing needs to migrate).
- *   - Newest first, edit-in-place, delete with confirm.
+ *   - Text + optional image attachment (parity with the wordbook notes UX).
+ *     Images are downscaled to <=1200px and JPEG-encoded at 0.85 before
+ *     being stored as data URLs, keeping localStorage from ballooning.
+ *   - Newest first, edit-in-place (body + image), delete with confirm.
  *
  * Consumed by both /notebook/phrase/[slug] and /notebook/sentence/[id] so
  * the two detail pages don't drift apart.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import {
+  type ChangeEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   addNote,
   deleteNote,
@@ -30,6 +37,44 @@ interface Props {
   placeholder?: string;
 }
 
+/**
+ * Read a user-picked image, downscale it to <=1200px on the longer edge,
+ * and re-encode as JPEG at quality 0.85. Returns a data URL suitable for
+ * dropping straight into localStorage / an <img src>. Matches the exact
+ * pipeline used by WordDetailView's notes so images round-trip identically
+ * across the two feature areas.
+ */
+async function fileToCompressedDataUrl(file: File): Promise<string> {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("仅支持图片文件");
+  }
+  const objectUrl = URL.createObjectURL(file);
+  try {
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const i = new Image();
+      i.onload = () => resolve(i);
+      i.onerror = reject;
+      i.src = objectUrl;
+    });
+    const MAX = 1200;
+    let { width, height } = img;
+    if (width > MAX || height > MAX) {
+      const ratio = Math.min(MAX / width, MAX / height);
+      width = Math.round(width * ratio);
+      height = Math.round(height * ratio);
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("canvas 2d context unavailable");
+    ctx.drawImage(img, 0, 0, width, height);
+    return canvas.toDataURL("image/jpeg", 0.85);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 export default function NotebookNotesPanel({
   entryId,
   title = "笔记",
@@ -37,8 +82,12 @@ export default function NotebookNotesPanel({
 }: Props) {
   const [notes, setNotes] = useState<NotebookNote[]>([]);
   const [draft, setDraft] = useState("");
+  const [draftImage, setDraftImage] = useState<string | undefined>(undefined);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editBody, setEditBody] = useState("");
+  const [editImage, setEditImage] = useState<string | undefined>(undefined);
+  const composerFileRef = useRef<HTMLInputElement>(null);
+  const editFileRef = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(() => {
     setNotes(listNotes(entryId));
@@ -54,30 +103,62 @@ export default function NotebookNotesPanel({
       window.removeEventListener("get:notebook-notes-change", onChange);
   }, [refresh]);
 
+  async function handlePickDraftImage(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const url = await fileToCompressedDataUrl(file);
+      setDraftImage(url);
+    } catch (err) {
+      // eslint-disable-next-line no-alert
+      alert((err as Error).message);
+    }
+  }
+
+  async function handlePickEditImage(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const url = await fileToCompressedDataUrl(file);
+      setEditImage(url);
+    } catch (err) {
+      // eslint-disable-next-line no-alert
+      alert((err as Error).message);
+    }
+  }
+
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const body = draft.trim();
-    if (!body) return;
-    addNote(entryId, body);
+    if (!body && !draftImage) return;
+    addNote(entryId, body, draftImage);
     setDraft("");
+    setDraftImage(undefined);
+    if (composerFileRef.current) composerFileRef.current.value = "";
   }
 
   function startEdit(note: NotebookNote) {
     setEditingId(note.id);
     setEditBody(note.body);
+    setEditImage(note.image);
   }
 
   function commitEdit(id: string) {
     const body = editBody.trim();
-    if (!body) return;
-    updateNote(entryId, id, { body });
+    // Allow image-only notes: pass image explicitly (null clears, undefined keeps).
+    if (!body && !editImage) return;
+    updateNote(entryId, id, { body, image: editImage ?? null });
     setEditingId(null);
     setEditBody("");
+    setEditImage(undefined);
+    if (editFileRef.current) editFileRef.current.value = "";
   }
 
   function cancelEdit() {
     setEditingId(null);
     setEditBody("");
+    setEditImage(undefined);
+    if (editFileRef.current) editFileRef.current.value = "";
   }
 
   function handleDelete(id: string) {
@@ -90,6 +171,7 @@ export default function NotebookNotesPanel({
     deleteNote(entryId, id);
   }
 
+  const canSubmit = draft.trim().length > 0 || Boolean(draftImage);
   return (
     <section className="space-y-3">
       <h2 className="text-sm font-medium uppercase tracking-wide text-[var(--accent)]">
@@ -118,27 +200,67 @@ export default function NotebookNotesPanel({
                       className="w-full resize-none bg-transparent text-sm outline-none"
                       autoFocus
                     />
-                    <div className="flex justify-end gap-2 text-xs">
-                      <button
-                        type="button"
-                        onClick={cancelEdit}
-                        className="text-[var(--fg-soft)] hover:text-[var(--fg)]"
-                      >
-                        取消
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => commitEdit(note.id)}
-                        disabled={!editBody.trim()}
-                        className="rounded-md border border-[var(--border)] px-2.5 py-0.5 transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        保存
-                      </button>
+                    {editImage && (
+                      <div className="relative inline-block">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={editImage}
+                          alt=""
+                          className="max-h-40 rounded border border-[var(--border)]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setEditImage(undefined)}
+                          className="absolute -right-2 -top-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[var(--bg)] text-xs shadow ring-1 ring-[var(--border)]"
+                          aria-label="移除图片"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between text-xs">
+                      <label className="cursor-pointer text-[var(--fg-soft)] hover:text-[var(--accent)]">
+                        <input
+                          ref={editFileRef}
+                          type="file"
+                          accept="image/*"
+                          className="hidden"
+                          onChange={handlePickEditImage}
+                        />
+                        📎 {editImage ? "替换图片" : "添加图片"}
+                      </label>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={cancelEdit}
+                          className="text-[var(--fg-soft)] hover:text-[var(--fg)]"
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => commitEdit(note.id)}
+                          disabled={!editBody.trim() && !editImage}
+                          className="rounded-md border border-[var(--border)] px-2.5 py-0.5 transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          保存
+                        </button>
+                      </div>
                     </div>
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    <p className="whitespace-pre-wrap text-sm">{note.body}</p>
+                    {note.body && (
+                      <p className="whitespace-pre-wrap text-sm">{note.body}</p>
+                    )}
+                    {note.image && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img
+                        src={note.image}
+                        alt=""
+                        className="max-h-72 rounded border border-[var(--border)]"
+                      />
+                    )}
                     <div className="flex items-center justify-between text-[11px] text-[var(--fg-soft)]">
                       <span>
                         {new Date(note.updatedAt).toLocaleString("zh-CN", {
@@ -181,10 +303,41 @@ export default function NotebookNotesPanel({
           rows={3}
           className="w-full resize-none appearance-none bg-transparent text-base leading-9 caret-[var(--accent)] outline-none ring-0 focus:outline-none focus:ring-0 focus:border-transparent placeholder:text-[var(--fg-soft)]"
         />
-        <div className="flex justify-end">
+        {draftImage && (
+          <div className="relative inline-block">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={draftImage}
+              alt="待保存的笔记图片"
+              className="max-h-40 rounded border border-[var(--border)]"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                setDraftImage(undefined);
+                if (composerFileRef.current) composerFileRef.current.value = "";
+              }}
+              className="absolute -right-2 -top-2 inline-flex h-5 w-5 items-center justify-center rounded-full bg-[var(--bg)] text-xs shadow ring-1 ring-[var(--border)]"
+              aria-label="移除图片"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        <div className="flex items-center justify-between">
+          <label className="cursor-pointer text-xs text-[var(--fg-soft)] hover:text-[var(--accent)]">
+            <input
+              ref={composerFileRef}
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handlePickDraftImage}
+            />
+            📎 {draftImage ? "替换图片" : "添加图片"}
+          </label>
           <button
             type="submit"
-            disabled={!draft.trim()}
+            disabled={!canSubmit}
             className="rounded-md border border-[var(--border)] px-3 py-1 text-xs transition hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-50"
           >
             保存
