@@ -856,29 +856,119 @@ interface Gloss {
 }
 
 function useAutoPlay(target: string) {
-  // 每次 target 变化时自动播放一次单词朗读。使用 Web Speech API 兜底；
-  // 若 SpeakButton 使用自定义音频（如 COS），这里的自动播放依然生效因为
-  // 全站朗读走同一套 lib/tts。
+  // 每次 target 变化时自动播放一次单词朗读。
+  //
+  // 历史坑：这里原本用 window.speechSynthesis。桌面 Chrome/Edge 对
+  // speechSynthesis 的用户激活策略非常严 —— 必须紧接用户交互事件
+  // 触发才行，setTimeout 或稍晚的 useEffect 都会被静默拒绝，导致
+  // 电脑端进入卡片后不发声；移动端策略宽松些能出声，但发的是系统
+  // 自带 TTS（机械音），跟点击 SpeakButton 出的 YouDao / Edge Neural
+  // 真人声完全不是一条路径，声音风格割裂。
+  //
+  // 修复：改走 SpeakButton 同一套链路 —— YouDao MP3（真人录音） →
+  // Edge Neural TTS（神经网络人声，带 IndexedDB 缓存）。用普通的
+  // <audio>.play() 播放 MP3，桌面浏览器的 autoplay 策略对 <audio>
+  // 宽松得多，只要用户在本次会话内交互过就允许播放（进入复习页
+  // 本身就是一次点击）。全站朗读体验因此统一。
   useEffect(() => {
     if (typeof window === "undefined") return;
-    // 惯例：项目内使用 window.speechSynthesis，SpeakButton 也走同一套。
-    try {
-      const utter = new SpeechSynthesisUtterance(target);
-      utter.lang = "en-US";
-      utter.rate = 0.95;
-      // 稍后一点播放，避免 UI 未挂载时被忽略。
-      const id = window.setTimeout(() => {
-        try {
-          window.speechSynthesis.cancel();
-          window.speechSynthesis.speak(utter);
-        } catch {
-          /* noop */
-        }
-      }, 200);
-      return () => window.clearTimeout(id);
-    } catch {
-      return;
+    if (!target) return;
+
+    // 主动取消上一轮任何残留的 speechSynthesis（老版本可能留下），
+    // 顺便让新的 <audio> 覆盖旧的。
+    if ("speechSynthesis" in window) {
+      try {
+        window.speechSynthesis.cancel();
+      } catch {
+        /* noop */
+      }
     }
+
+    let cancelled = false;
+    const audio = new Audio();
+    audio.preload = "auto";
+    let blobUrl: string | null = null;
+
+    const releaseBlob = () => {
+      if (blobUrl) {
+        URL.revokeObjectURL(blobUrl);
+        blobUrl = null;
+      }
+    };
+
+    /** Play an MP3 URL. Resolves on ended, rejects on error/load-fail. */
+    const playUrl = (url: string): Promise<void> =>
+      new Promise((resolve, reject) => {
+        audio.onended = () => resolve();
+        audio.onerror = () =>
+          reject(new Error(`audio error (code=${audio.error?.code ?? "?"})`));
+        audio.src = url;
+        const p = audio.play();
+        if (p && typeof p.catch === "function") p.catch(reject);
+      });
+
+    const playBlob = (blob: Blob): Promise<void> => {
+      releaseBlob();
+      blobUrl = URL.createObjectURL(blob);
+      return playUrl(blobUrl);
+    };
+
+    const NEURAL_VOICE_US = "en-US-JennyNeural";
+    const youdaoUrl = `https://dict.youdao.com/dictvoice?audio=${encodeURIComponent(target)}&type=2`;
+
+    void (async () => {
+      // 1) YouDao 真人录音，命中率高。
+      try {
+        await playUrl(youdaoUrl);
+        return;
+      } catch {
+        /* fall through to Neural */
+      }
+      if (cancelled) return;
+
+      // 2) Neural 本地缓存。
+      try {
+        const { getCachedTTS, putCachedTTS } = await import("@/lib/tts/cache");
+        const cached = await getCachedTTS(NEURAL_VOICE_US, target);
+        if (cancelled) return;
+        if (cached) {
+          try {
+            await playBlob(cached);
+            return;
+          } catch {
+            /* fall through */
+          }
+        }
+        if (cancelled) return;
+
+        // 3) /api/tts 拉 Neural MP3，缓存后播放。
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: target, voice: NEURAL_VOICE_US }),
+        });
+        if (cancelled) return;
+        if (!res.ok) return;
+        const bytes = await res.arrayBuffer();
+        if (cancelled || !bytes || bytes.byteLength === 0) return;
+        void putCachedTTS(NEURAL_VOICE_US, target, bytes.slice(0));
+        await playBlob(new Blob([bytes], { type: "audio/mpeg" }));
+      } catch {
+        // 静默失败：这是"进入卡片时自动播一次"，不应打扰用户。
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      audio.onended = null;
+      audio.onerror = null;
+      try {
+        audio.pause();
+      } catch {
+        /* noop */
+      }
+      releaseBlob();
+    };
   }, [target]);
 }
 
