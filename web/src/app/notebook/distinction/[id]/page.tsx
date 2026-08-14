@@ -35,6 +35,7 @@
 import Link from "next/link";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import NotebookNotesPanel from "@/components/NotebookNotesPanel";
 import { toast } from "@/components/Toast";
 import {
   deleteEntry,
@@ -521,6 +522,14 @@ function DistinctionDetailInner() {
           <p className="text-sm text-[var(--fg-soft)]">（暂无通用笔记）</p>
         )}
       </section>
+
+      {/* Free-form note list — same UI as phrase / sentence pages, supports
+          multiple notes and image attachments. Lives alongside the legacy
+          `freeform` block above so existing text notes keep rendering. */}
+      <NotebookNotesPanel
+        entryId={entry.id}
+        placeholder={`关于 "${title || "这组词"}" 的笔记…`}
+      />
 
       {isEditing && (
         <div className="flex justify-end">
