@@ -10,6 +10,7 @@ import {
   type WordbookStatus,
 } from "@/lib/wordbook/local";
 import DefinitionModal from "@/components/DefinitionModal";
+import PageJumper from "@/components/PageJumper";
 
 type SortKey = "recent" | "count" | "alpha";
 
@@ -314,9 +315,12 @@ export default function WordbookSection() {
               >
                 ‹
               </button>
-              <span className="text-[11px] text-[var(--fg-soft)] tabular-nums">
-                {page}/{totalPages}
-              </span>
+              <PageJumper
+                page={page}
+                totalPages={totalPages}
+                onJump={(n) => setPage(n)}
+                className="text-[11px] text-[var(--fg-soft)]"
+              />
               <button
                 type="button"
                 disabled={page === totalPages}

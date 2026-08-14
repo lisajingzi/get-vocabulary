@@ -27,6 +27,7 @@ import {
 } from "@/lib/wordbook/local";
 import SpeakButton from "@/components/SpeakButton";
 import DefinitionModal from "@/components/DefinitionModal";
+import PageJumper from "@/components/PageJumper";
 
 type SortKey = "error" | "recent" | "count" | "alpha";
 type PurposeFilter = "all" | WordbookPurpose;
@@ -410,9 +411,12 @@ function WrongbookPageInner() {
           >
             ‹
           </button>
-          <span className="text-xs text-[var(--fg-soft)] tabular-nums">
-            {safePage} / {totalPages}
-          </span>
+          <PageJumper
+            page={safePage}
+            totalPages={totalPages}
+            onJump={setPage}
+            className="text-xs text-[var(--fg-soft)]"
+          />
           <button
             type="button"
             disabled={safePage === totalPages}
