@@ -11,6 +11,10 @@
  *                              runtime (they're rebuilt only when we re-run
  *                              parse_mdx.py and ship a new dict-version).
  *       * /_next/static/*    → cache-first. Hashed filenames make this safe.
+ *       * HTML navigations    → network-first. Avoids the "stale HTML points at
+ *                              a chunk hash that no longer exists" white-screen
+ *                              after a fresh deploy (esp. in WeChat WebView).
+ *                              Falls back to cache when offline.
  *       * Everything else GET → stale-while-revalidate so the app shell loads
  *                              offline once it's been visited online once.
  *   - POST / API calls are passed through untouched. The AI routes need a
@@ -20,10 +24,11 @@
  * upgrades to worry about.
  */
 
-const VERSION = "v1";
+const VERSION = "v2";
 const RUNTIME = `get-runtime-${VERSION}`;
 const DICT = `get-dict-${VERSION}`;
 const STATIC = `get-static-${VERSION}`;
+const HTML = `get-html-${VERSION}`;
 
 self.addEventListener("install", (event) => {
   // Activate immediately on first install.
@@ -67,7 +72,19 @@ self.addEventListener("fetch", (event) => {
   // 3) API routes — never cache, just network.
   if (url.pathname.startsWith("/api/")) return;
 
-  // 4) Default: stale-while-revalidate.
+  // 4) HTML navigations — network-first. Prevents stale HTML from referencing
+  //    chunk hashes that no longer exist on the server (classic WeChat WebView
+  //    white-screen after a fresh Vercel deploy). Falls back to cache when
+  //    offline so the app shell still opens.
+  const isHTML =
+    req.mode === "navigate" ||
+    (req.headers.get("accept") || "").includes("text/html");
+  if (isHTML) {
+    event.respondWith(networkFirst(req, HTML));
+    return;
+  }
+
+  // 5) Default: stale-while-revalidate.
   event.respondWith(staleWhileRevalidate(req, RUNTIME));
 });
 
@@ -95,4 +112,21 @@ async function staleWhileRevalidate(request, cacheName) {
     })
     .catch(() => hit);
   return hit || fetchPromise;
+}
+
+async function networkFirst(request, cacheName) {
+  const cache = await caches.open(cacheName);
+  try {
+    const fresh = await fetch(request);
+    if (fresh && fresh.ok) cache.put(request, fresh.clone());
+    return fresh;
+  } catch (err) {
+    const hit = await cache.match(request);
+    if (hit) return hit;
+    // Nothing cached and no network — return a minimal offline page.
+    return new Response(
+      "<!doctype html><meta charset=utf-8><title>offline</title><p>offline",
+      { status: 504, headers: { "content-type": "text/html; charset=utf-8" } },
+    );
+  }
 }
