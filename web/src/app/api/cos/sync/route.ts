@@ -97,25 +97,60 @@ export async function GET(req: NextRequest) {
   }
 
   const path = `/sync/${syncId}.json`;
-  const auth = cosSign("get", path);
-  const url = cosUrl(path);
 
-  const res = await fetch(url, {
-    headers: { Authorization: auth },
-  });
+  try {
+    const auth = cosSign("get", path);
+    const url = cosUrl(path);
 
-  if (res.status === 404) {
-    return NextResponse.json(null, { status: 200 }); // no remote snapshot yet
-  }
-  if (!res.ok) {
+    const res = await fetch(url, {
+      headers: { Authorization: auth },
+    });
+
+    if (res.status === 404) {
+      return NextResponse.json(null, { status: 200 }); // no remote snapshot yet
+    }
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.error("[cos/sync GET] cos error", res.status, errText);
+      return NextResponse.json(
+        { error: `COS error ${res.status}`, detail: errText.slice(0, 500) },
+        { status: 502 },
+      );
+    }
+
+    // Read as text first so we can log the raw body if JSON.parse fails.
+    // Previously `await res.json()` throwing would crash the handler and
+    // Next.js returned a plain 500 with no body, making it impossible to
+    // tell whether COS was down, response was truncated, etc.
+    const text = await res.text();
+    let data: unknown;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch (e) {
+      console.error(
+        "[cos/sync GET] failed to parse COS response as JSON",
+        "len=" + text.length,
+        "head=" + text.slice(0, 200),
+        e,
+      );
+      return NextResponse.json(
+        {
+          error: "COS returned non-JSON response",
+          length: text.length,
+          head: text.slice(0, 200),
+        },
+        { status: 502 },
+      );
+    }
+    return NextResponse.json(data);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[cos/sync GET] handler crashed", msg, e);
     return NextResponse.json(
-      { error: `COS error ${res.status}` },
-      { status: 502 },
+      { error: "handler crashed", detail: msg },
+      { status: 500 },
     );
   }
-
-  const data = await res.json();
-  return NextResponse.json(data);
 }
 
 export async function PUT(req: NextRequest) {
@@ -128,36 +163,45 @@ export async function PUT(req: NextRequest) {
     return NextResponse.json({ error: "invalid syncId" }, { status: 400 });
   }
 
-  const body = await req.text();
-  // Sanity-check: must be valid JSON
   try {
-    JSON.parse(body);
-  } catch {
-    return NextResponse.json({ error: "body must be JSON" }, { status: 400 });
-  }
+    const body = await req.text();
+    // Sanity-check: must be valid JSON
+    try {
+      JSON.parse(body);
+    } catch {
+      return NextResponse.json({ error: "body must be JSON" }, { status: 400 });
+    }
 
-  const path = `/sync/${syncId}.json`;
-  const auth = cosSign("put", path);
-  const url = cosUrl(path);
+    const path = `/sync/${syncId}.json`;
+    const auth = cosSign("put", path);
+    const url = cosUrl(path);
 
-  const res = await fetch(url, {
-    method: "PUT",
-    headers: {
-      Authorization: auth,
-      "Content-Type": "application/json",
-      "Content-Length": String(Buffer.byteLength(body, "utf8")),
-    },
-    body,
-  });
+    const res = await fetch(url, {
+      method: "PUT",
+      headers: {
+        Authorization: auth,
+        "Content-Type": "application/json",
+        "Content-Length": String(Buffer.byteLength(body, "utf8")),
+      },
+      body,
+    });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    console.error("[cos/sync PUT]", res.status, errText);
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.error("[cos/sync PUT] cos error", res.status, errText);
+      return NextResponse.json(
+        { error: `COS error ${res.status}`, detail: errText.slice(0, 500) },
+        { status: 502 },
+      );
+    }
+
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error("[cos/sync PUT] handler crashed", msg, e);
     return NextResponse.json(
-      { error: `COS error ${res.status}` },
-      { status: 502 },
+      { error: "handler crashed", detail: msg },
+      { status: 500 },
     );
   }
-
-  return NextResponse.json({ ok: true });
 }
