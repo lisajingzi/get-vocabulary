@@ -24,7 +24,13 @@ import {
   setGroup,
   setIelts,
   setPurpose,
+  readNotes as readWordNotes,
+  hydrateNotesFromIdb,
 } from "@/lib/wordbook/local";
+import {
+  readNotesStore as readNotebookNotes,
+  hydrateNotebookNotesFromIdb,
+} from "@/lib/notebook/local";
 
 type Status = "idle" | "loading" | "ok" | "error";
 
@@ -585,12 +591,12 @@ function readLocalCounts(): LocalCounts {
     }
   };
   const wordbook = safeParse<Record<string, unknown>>("get:wordbook:v1", {});
-  const wordNotes = safeParse<Record<string, unknown[]>>("get:notes:v1", {});
+  // wordNotes / notebookNotes moved to IndexedDB. Read them from the
+  // in-memory cache maintained by the store modules — the caller is
+  // responsible for having awaited the hydrate promise first.
+  const wordNotes = readWordNotes();
   const notebook = safeParse<Record<string, unknown>>("get:notebook:v1", {});
-  const notebookNotes = safeParse<Record<string, unknown[]>>(
-    "get:notebook-notes:v1",
-    {},
-  );
+  const notebookNotes = readNotebookNotes();
   const punches = safeParse<string[]>("get:punches:v1", []);
   const reviewLog = safeParse<Record<string, unknown>>(
     "get:review-log:v1",
@@ -635,7 +641,20 @@ function DiagnosticsCard() {
   const [cloudErr, setCloudErr] = useState("");
 
   useEffect(() => {
-    setLocal(readLocalCounts());
+    // Ensure the IndexedDB-backed note caches are hydrated before we
+    // read local counts, so wordNotes / notebookNotes reflect the true
+    // on-device state instead of an empty pre-hydration cache.
+    void (async () => {
+      try {
+        await Promise.all([
+          hydrateNotesFromIdb(),
+          hydrateNotebookNotesFromIdb(),
+        ]);
+      } catch {
+        /* hydrators log their own errors */
+      }
+      setLocal(readLocalCounts());
+    })();
   }, []);
 
   function refresh() {

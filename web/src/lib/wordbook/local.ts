@@ -11,8 +11,16 @@
  * works for the unauthenticated dev session too.
  */
 
+import { idbGet, idbSet } from "@/lib/storage/idb";
+
 const STORAGE_KEY = "get:wordbook:v1";
-const NOTES_KEY = "get:notes:v1";
+// LEGACY_NOTES_KEY is the localStorage key we used to persist wordNotes in
+// before v2. On mobile it started tripping QuotaExceededError once users
+// attached a handful of base64 images (localStorage cap is ~2-5 MB in
+// WeChat WebView). We now keep wordNotes in IndexedDB under IDB_NOTES_KEY,
+// and the LS key is only read once, at startup, to migrate old data.
+const LEGACY_NOTES_KEY = "get:notes:v1";
+const IDB_NOTES_KEY = "get:notes:v2";
 
 /**
  * Wordbook membership states:
@@ -143,25 +151,123 @@ export function writeStore(store: Store): void {
   window.dispatchEvent(new CustomEvent("get:wordbook-change"));
 }
 
-export function readNotes(): NotesStore {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(NOTES_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw) as NotesStore;
-  } catch {
-    return {};
+// ---------------------------------------------------------------------------
+// wordNotes storage — IndexedDB + in-memory cache
+// ---------------------------------------------------------------------------
+//
+// Why not localStorage anymore?
+//   Wordnotes can hold base64 images (spec: local-first note-taking).
+//   Once the payload passes ~1.5 MB, mobile browsers reject setItem with
+//   QuotaExceededError, which broke the cloud sync layer's per-shard
+//   write (it correctly threw, but the app looked "empty" on that
+//   device). IndexedDB has plenty of room for this.
+//
+// Why keep the sync API surface (readNotes / writeNotes)?
+//   IndexedDB is inherently async. Making these functions async would
+//   ripple through every note-consuming component (NotesPanel,
+//   NotesReadOnlyList, ...). Instead we keep them sync-shaped by backing
+//   them with a module-level in-memory cache; the cache is hydrated from
+//   IndexedDB once at app boot via `hydrateNotesFromIdb()`, and each
+//   write is mirrored to IndexedDB in the background (fire-and-forget).
+//   The tradeoff — pre-hydration reads see an empty store — is handled
+//   by SyncProvider awaiting the hydrate promise before running pull()
+//   or any user-facing UI mounts.
+
+let notesCache: NotesStore = {};
+let notesHydrated = false;
+let hydratePromise: Promise<void> | null = null;
+
+/**
+ * Load wordNotes from IndexedDB into the in-memory cache. Idempotent —
+ * subsequent calls return the same promise. Also handles a one-time
+ * migration: if IndexedDB has nothing yet but the old localStorage key
+ * has data, we adopt it and clear the localStorage entry to reclaim
+ * quota. SSR-safe (returns immediately with an empty cache).
+ */
+export async function hydrateNotesFromIdb(): Promise<void> {
+  if (typeof window === "undefined") {
+    notesHydrated = true;
+    return;
   }
+  if (notesHydrated) return;
+  if (hydratePromise) return hydratePromise;
+
+  hydratePromise = (async () => {
+    let fromIdb: NotesStore | null = null;
+    try {
+      fromIdb = await idbGet<NotesStore>(IDB_NOTES_KEY);
+    } catch (e) {
+      console.error("[wordbook/local] hydrate: idbGet failed", e);
+    }
+
+    if (fromIdb && typeof fromIdb === "object") {
+      notesCache = fromIdb;
+    } else {
+      // Migration path: pull whatever is still in localStorage and adopt it.
+      // We KEEP the localStorage row until IndexedDB confirms the write,
+      // then clear LS to free quota.
+      try {
+        const raw = window.localStorage.getItem(LEGACY_NOTES_KEY);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw) as NotesStore;
+            if (parsed && typeof parsed === "object") {
+              notesCache = parsed;
+              // Persist to IDB, then clear LS. If IDB write fails, LS is
+              // preserved so a later boot can retry the migration.
+              try {
+                await idbSet(IDB_NOTES_KEY, parsed);
+                try {
+                  window.localStorage.removeItem(LEGACY_NOTES_KEY);
+                } catch {
+                  /* ignore */
+                }
+              } catch (e) {
+                console.error("[wordbook/local] migrate idbSet failed", e);
+              }
+            }
+          } catch (e) {
+            console.error("[wordbook/local] migrate parse failed", e);
+          }
+        }
+      } catch {
+        /* localStorage unavailable — nothing to migrate */
+      }
+    }
+    notesHydrated = true;
+  })();
+  return hydratePromise;
 }
 
+/**
+ * Synchronous read of the in-memory wordNotes cache.
+ *
+ * Callers (UI components, cloud-sync merge) get whatever is currently
+ * hydrated. If called before `hydrateNotesFromIdb()` resolves, returns
+ * `{}` — SyncProvider is responsible for awaiting hydration before it
+ * runs pull(), so the cloud-sync path will always see the true local
+ * state.
+ */
+export function readNotes(): NotesStore {
+  return notesCache;
+}
+
+/**
+ * Synchronous write to the in-memory cache. Persists to IndexedDB in the
+ * background (fire-and-forget) — errors are logged, not thrown, because
+ * every UI writer treats writeNotes as sync.
+ *
+ * The custom event is dispatched immediately so the UI re-renders from
+ * the freshly-updated cache even if the IDB flush is still pending.
+ */
 export function writeNotes(notes: NotesStore): void {
+  notesCache = notes;
   if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
-  } catch (e) {
-    console.error("[wordbook/local] writeNotes failed", e);
-    throw e;
-  }
+  // Fire-and-forget persistence. IndexedDB errors are extremely rare and
+  // not actionable from UI code; we surface them to the console.
+  void idbSet(IDB_NOTES_KEY, notes).catch((e) => {
+    console.error("[wordbook/local] writeNotes idbSet failed", e);
+  });
   window.dispatchEvent(new CustomEvent("get:notes-change"));
 }
 

@@ -25,7 +25,9 @@ import {
   migrateEntries,
   normalizeIeltsGroups,
   resetImportedQueryCount,
+  hydrateNotesFromIdb,
 } from "@/lib/wordbook/local";
+import { hydrateNotebookNotesFromIdb } from "@/lib/notebook/local";
 import { migrateCoreExamples } from "@/lib/wordbook/core-example";
 
 // Events that must be flushed to the cloud immediately (no 3 s debounce),
@@ -101,20 +103,33 @@ export default function SyncProvider() {
     }
 
     let lastPullAt = 0;
-    const doPull = () => {
+    // hydrateNotesFromIdb / hydrateNotebookNotesFromIdb are idempotent
+    // and return the same promise on repeat calls, so awaiting them from
+    // doPull() is cheap after the first mount (a resolved promise). This
+    // covers the case where visibility flips before the initial hydrate
+    // finished.
+    const doPull = async () => {
+      try {
+        await Promise.all([
+          hydrateNotesFromIdb(),
+          hydrateNotebookNotesFromIdb(),
+        ]);
+      } catch {
+        /* hydrators log their own errors */
+      }
       lastPullAt = Date.now();
       pull().catch(() => {});
     };
 
-    // Pull on mount (quietly — errors are swallowed here; the Settings
-    // page's manual "download" button surfaces errors to the user).
-    doPull();
+    // Kick off the initial hydrate + pull sequence. useEffect can't be
+    // async itself, hence the void wrapper.
+    void doPull();
 
     // Pull whenever the tab becomes visible again (throttled).
     const onVisibility = () => {
       if (document.visibilityState !== "visible") return;
       if (Date.now() - lastPullAt < VISIBILITY_PULL_THROTTLE_MS) return;
-      doPull();
+      void doPull();
     };
     document.addEventListener("visibilitychange", onVisibility);
 

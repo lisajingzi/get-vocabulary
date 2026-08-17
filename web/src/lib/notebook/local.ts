@@ -29,8 +29,15 @@
  *   - Sentences of arbitrary length don't blow up the URL.
  */
 
+import { idbGet, idbSet } from "@/lib/storage/idb";
+
 const ENTRIES_KEY = "get:notebook:v1";
-const NOTES_KEY = "get:notebook-notes:v1";
+// LEGACY_NOTES_KEY: notebook notes used to live in localStorage. Same
+// QuotaExceededError story as wordbook — we now persist to IndexedDB
+// under IDB_NOTES_KEY and only read the LS key once at boot for the
+// one-time migration.
+const LEGACY_NOTES_KEY = "get:notebook-notes:v1";
+const IDB_NOTES_KEY = "get:notebook-notes:v2";
 
 export type NotebookKind = "phrase" | "sentence" | "distinction";
 export type NotebookSource = "manual" | "ai";
@@ -137,25 +144,83 @@ export function writeEntries(store: EntryStore): void {
   window.dispatchEvent(new CustomEvent("get:notebook-change"));
 }
 
-export function readNotesStore(): NotesStore {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(NOTES_KEY);
-    if (!raw) return {};
-    return JSON.parse(raw) as NotesStore;
-  } catch {
-    return {};
+// ---------------------------------------------------------------------------
+// notebook notes storage — IndexedDB + in-memory cache
+// ---------------------------------------------------------------------------
+// See wordbook/local.ts for the full rationale. Same pattern:
+//   - sync readNotesStore/writeNotesStore backed by an in-memory cache
+//   - IndexedDB is the source of truth on disk, hydrated once at boot
+//   - one-time migration lifts any legacy localStorage payload into IDB
+
+let notesCache: NotesStore = {};
+let notesHydrated = false;
+let hydratePromise: Promise<void> | null = null;
+
+/**
+ * Load notebook notes from IndexedDB into the in-memory cache.
+ * Idempotent; SSR-safe. Also performs a one-time localStorage → IDB
+ * migration when IDB is empty but the legacy LS row still has data.
+ */
+export async function hydrateNotebookNotesFromIdb(): Promise<void> {
+  if (typeof window === "undefined") {
+    notesHydrated = true;
+    return;
   }
+  if (notesHydrated) return;
+  if (hydratePromise) return hydratePromise;
+
+  hydratePromise = (async () => {
+    let fromIdb: NotesStore | null = null;
+    try {
+      fromIdb = await idbGet<NotesStore>(IDB_NOTES_KEY);
+    } catch (e) {
+      console.error("[notebook/local] hydrate: idbGet failed", e);
+    }
+
+    if (fromIdb && typeof fromIdb === "object") {
+      notesCache = fromIdb;
+    } else {
+      try {
+        const raw = window.localStorage.getItem(LEGACY_NOTES_KEY);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw) as NotesStore;
+            if (parsed && typeof parsed === "object") {
+              notesCache = parsed;
+              try {
+                await idbSet(IDB_NOTES_KEY, parsed);
+                try {
+                  window.localStorage.removeItem(LEGACY_NOTES_KEY);
+                } catch {
+                  /* ignore */
+                }
+              } catch (e) {
+                console.error("[notebook/local] migrate idbSet failed", e);
+              }
+            }
+          } catch (e) {
+            console.error("[notebook/local] migrate parse failed", e);
+          }
+        }
+      } catch {
+        /* localStorage unavailable */
+      }
+    }
+    notesHydrated = true;
+  })();
+  return hydratePromise;
+}
+
+export function readNotesStore(): NotesStore {
+  return notesCache;
 }
 
 export function writeNotesStore(store: NotesStore): void {
+  notesCache = store;
   if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(NOTES_KEY, JSON.stringify(store));
-  } catch (e) {
-    console.error("[notebook/local] writeNotesStore failed", e);
-    throw e;
-  }
+  void idbSet(IDB_NOTES_KEY, store).catch((e) => {
+    console.error("[notebook/local] writeNotesStore idbSet failed", e);
+  });
   window.dispatchEvent(new CustomEvent("get:notebook-notes-change"));
 }
 
