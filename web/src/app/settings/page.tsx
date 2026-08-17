@@ -221,6 +221,13 @@ export default function SettingsPage() {
         </p>
       </div>
 
+      {/* ── Diagnostics (temporary) ─────────────────────
+          Shows raw localStorage counts on this device. Added to debug a
+          case where WeChat WebView pull() returned success but notebook /
+          punches surfaces were empty; we needed a way to inspect device
+          state without DevTools. Safe to delete once resolved. */}
+      <DiagnosticsCard />
+
       {/* ── Daily review pace ──────────────────────────── */}
       <section className="rounded-xl border border-[var(--border)] p-5 space-y-4">
         <div className="space-y-1.5">
@@ -475,4 +482,247 @@ export default function SettingsPage() {
 function countLines(raw: string): number {
   if (!raw) return 0;
   return raw.split(/\r?\n/).filter((l) => l.trim().length > 0).length;
+}
+
+// ---------------------------------------------------------------------------
+// DiagnosticsCard — WeChat-friendly localStorage inspector.
+//
+// Purpose: in WeChat WebView we have no DevTools, so when data appears to
+// be "missing" on that surface we can't tell whether:
+//   (a) pull() failed silently and localStorage really is empty here, or
+//   (b) localStorage is fine and it's a rendering / event-wiring bug.
+//
+// This card reads every sync-relevant key directly out of localStorage and
+// prints the counts on-screen, plus a button that fetches the cloud
+// snapshot for the current syncId and prints those counts side-by-side.
+// The two columns together pin down exactly where the data got lost.
+//
+// Intentionally minimal deps: no imports from wordbook/notebook helpers so
+// nothing can accidentally trigger a write / dispatch / push while we're
+// diagnosing an already-fragile sync state.
+// ---------------------------------------------------------------------------
+
+type LocalCounts = {
+  wordbook: number;
+  wordNotes: number;
+  notebook: number;
+  notebookNotes: number;
+  punches: number;
+  reviewLog: number;
+  dailySnapshot: string;
+  syncIdShort: string;
+};
+
+type CloudCounts = {
+  wordbook: number;
+  wordNotes: number;
+  notebook: number;
+  notebookNotes: number;
+  punches: number;
+  savedAt: string;
+} | null;
+
+function readLocalCounts(): LocalCounts {
+  const safeParse = <T,>(key: string, fallback: T): T => {
+    try {
+      const raw =
+        typeof window === "undefined"
+          ? null
+          : window.localStorage.getItem(key);
+      if (!raw) return fallback;
+      return JSON.parse(raw) as T;
+    } catch {
+      return fallback;
+    }
+  };
+  const wordbook = safeParse<Record<string, unknown>>("get:wordbook:v1", {});
+  const wordNotes = safeParse<Record<string, unknown[]>>("get:notes:v1", {});
+  const notebook = safeParse<Record<string, unknown>>("get:notebook:v1", {});
+  const notebookNotes = safeParse<Record<string, unknown[]>>(
+    "get:notebook-notes:v1",
+    {},
+  );
+  const punches = safeParse<string[]>("get:punches:v1", []);
+  const reviewLog = safeParse<Record<string, unknown>>(
+    "get:review-log:v1",
+    {},
+  );
+  const dailySnapshot = safeParse<{ date?: string; lemmas?: unknown[] } | null>(
+    "get:daily-snapshot:v1",
+    null,
+  );
+  const syncIdRaw =
+    (typeof window !== "undefined"
+      ? window.localStorage.getItem("get:syncId:v1")
+      : "") || "";
+  const fixed = process.env.NEXT_PUBLIC_SYNC_ID ?? "";
+  const activeSyncId = fixed || syncIdRaw || "(none)";
+  return {
+    wordbook: Object.keys(wordbook).length,
+    wordNotes: Object.keys(wordNotes).length,
+    notebook: Object.keys(notebook).length,
+    notebookNotes: Object.keys(notebookNotes).length,
+    punches: Array.isArray(punches) ? punches.length : 0,
+    reviewLog: Object.keys(reviewLog).length,
+    dailySnapshot:
+      dailySnapshot && dailySnapshot.date
+        ? `${dailySnapshot.date} · ${
+            Array.isArray(dailySnapshot.lemmas) ? dailySnapshot.lemmas.length : 0
+          } 词`
+        : "(空)",
+    syncIdShort:
+      activeSyncId.length > 12
+        ? `${activeSyncId.slice(0, 6)}…${activeSyncId.slice(-4)}`
+        : activeSyncId,
+  };
+}
+
+function DiagnosticsCard() {
+  const [local, setLocal] = useState<LocalCounts | null>(null);
+  const [cloud, setCloud] = useState<CloudCounts>(null);
+  const [cloudStatus, setCloudStatus] = useState<
+    "idle" | "loading" | "ok" | "error"
+  >("idle");
+  const [cloudErr, setCloudErr] = useState("");
+
+  useEffect(() => {
+    setLocal(readLocalCounts());
+  }, []);
+
+  function refresh() {
+    setLocal(readLocalCounts());
+  }
+
+  async function fetchCloud() {
+    setCloudStatus("loading");
+    setCloudErr("");
+    try {
+      const id = getSyncId();
+      const res = await fetch(`/api/cos/sync?syncId=${id}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) {
+        setCloudStatus("error");
+        setCloudErr(`HTTP ${res.status}`);
+        return;
+      }
+      const snap = await res.json();
+      if (!snap) {
+        setCloudStatus("error");
+        setCloudErr("云端无快照");
+        return;
+      }
+      setCloud({
+        wordbook: Object.keys(snap.wordbook ?? {}).length,
+        wordNotes: Object.keys(snap.wordNotes ?? {}).length,
+        notebook: Object.keys(snap.notebook ?? {}).length,
+        notebookNotes: Object.keys(snap.notebookNotes ?? {}).length,
+        punches: Array.isArray(snap.punches) ? snap.punches.length : 0,
+        savedAt: snap.savedAt ?? "(未知)",
+      });
+      setCloudStatus("ok");
+    } catch (e) {
+      setCloudStatus("error");
+      setCloudErr(String(e));
+    }
+  }
+
+  if (!local) return null;
+
+  const rows: Array<{ label: string; local: number | string; cloud?: number | string }> = [
+    { label: "单词本 wordbook", local: local.wordbook, cloud: cloud?.wordbook },
+    { label: "词笔记 wordNotes", local: local.wordNotes, cloud: cloud?.wordNotes },
+    { label: "笔记本 notebook", local: local.notebook, cloud: cloud?.notebook },
+    {
+      label: "笔记本笔记 notebookNotes",
+      local: local.notebookNotes,
+      cloud: cloud?.notebookNotes,
+    },
+    { label: "打卡 punches", local: local.punches, cloud: cloud?.punches },
+    { label: "复习日志 reviewLog", local: local.reviewLog },
+    { label: "今日快照 dailySnapshot", local: local.dailySnapshot },
+  ];
+
+  return (
+    <section className="rounded-xl border-2 border-dashed border-amber-400 bg-amber-50/40 p-4 space-y-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <h2 className="text-sm font-semibold text-amber-900">
+          🔧 同步诊断（临时）
+        </h2>
+        <span className="text-[11px] text-amber-800/70">
+          syncId: {local.syncIdShort}
+        </span>
+      </div>
+      <p className="text-[11px] text-amber-800/80 leading-relaxed">
+        显示本设备 localStorage 与云端快照的条数对比。若「本地 = 0 云端 &gt; 0」
+        说明拉取没写入本机；若两侧都有但页面显示空，则是渲染 bug。
+      </p>
+
+      <div className="rounded-md bg-white/70 border border-amber-200 overflow-hidden">
+        <div className="grid grid-cols-3 gap-2 border-b border-amber-200 bg-amber-100/50 px-3 py-1.5 text-[11px] font-medium text-amber-900">
+          <span>数据</span>
+          <span className="text-right">本地</span>
+          <span className="text-right">云端</span>
+        </div>
+        {rows.map((r) => (
+          <div
+            key={r.label}
+            className="grid grid-cols-3 gap-2 border-b border-amber-100 px-3 py-1.5 text-xs last:border-b-0"
+          >
+            <span className="text-[var(--fg)] truncate">{r.label}</span>
+            <span
+              className={`text-right font-mono ${
+                typeof r.local === "number" && r.local === 0
+                  ? "text-red-600 font-bold"
+                  : "text-[var(--fg)]"
+              }`}
+            >
+              {r.local}
+            </span>
+            <span
+              className={`text-right font-mono ${
+                r.cloud === undefined
+                  ? "text-[var(--fg-soft)]"
+                  : typeof r.cloud === "number" &&
+                    typeof r.local === "number" &&
+                    r.cloud !== r.local
+                  ? "text-orange-600 font-bold"
+                  : "text-[var(--fg)]"
+              }`}
+            >
+              {r.cloud ?? "—"}
+            </span>
+          </div>
+        ))}
+        {cloud && (
+          <div className="border-t border-amber-200 bg-amber-100/30 px-3 py-1.5 text-[11px] text-amber-800">
+            云端 savedAt: {cloud.savedAt}
+          </div>
+        )}
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={refresh}
+          className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-50"
+        >
+          ↻ 重新读本地
+        </button>
+        <button
+          type="button"
+          onClick={fetchCloud}
+          disabled={cloudStatus === "loading"}
+          className="rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-50 disabled:opacity-50"
+        >
+          {cloudStatus === "loading" ? "查询中…" : "☁ 查询云端"}
+        </button>
+        {cloudStatus === "error" && (
+          <span className="self-center text-[11px] text-red-600">
+            云端查询失败：{cloudErr}
+          </span>
+        )}
+      </div>
+    </section>
+  );
 }
