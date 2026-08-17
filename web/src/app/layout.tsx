@@ -1,6 +1,5 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
-import Script from "next/script";
 import SearchBox from "@/components/SearchBox";
 import ToastHost from "@/components/Toast";
 import SyncProvider from "@/components/SyncProvider";
@@ -86,17 +85,29 @@ export default function RootLayout({
         <ToastHost />
         <SyncProvider />
         {/*
-          Service-worker registration. We only register in production so dev
-          mode HMR isn't disrupted by stale cached chunks. The script is
-          tagged afterInteractive so it doesn't block first paint.
+          We intentionally do NOT register a Service Worker anymore.
+
+          A previous version of this layout registered /sw.js on load, and
+          that SW served the HTML shell stale-while-revalidate. On Vercel
+          this caused hard-to-reproduce white screens after every deploy:
+          the SW would keep handing users an old HTML document whose
+          referenced JS chunk hashes had already been replaced on the CDN,
+          so the browser would try to load chunks that returned 404 and
+          the app would fail to boot — particularly stubborn inside the
+          WeChat WebView and iOS Safari, where users can't easily clear
+          site data.
+
+          /public/sw.js is now a self-destructing SW: any client that
+          still has the old registration will fetch it on next visit,
+          run its `activate` handler, wipe all caches and unregister
+          itself, and reload — restoring the app to a plain HTTP-cache
+          setup that Vercel already tunes correctly (immutable +
+          content-hashed /_next/static/*, ETag'd HTML).
+
+          Do not re-add SW registration here without a rock-solid
+          network-first HTML strategy that guarantees old shells can
+          never outlive their chunk hashes.
         */}
-        <Script id="sw-register" strategy="afterInteractive">{`
-          if ('serviceWorker' in navigator && location.hostname !== 'localhost') {
-            window.addEventListener('load', () => {
-              navigator.serviceWorker.register('/sw.js').catch(() => {});
-            });
-          }
-        `}</Script>
       </body>
     </html>
   );
