@@ -256,13 +256,6 @@ export default function SettingsPage() {
         </p>
       </div>
 
-      {/* ── Diagnostics (temporary) ─────────────────────
-          Shows raw localStorage counts on this device. Added to debug a
-          case where WeChat WebView pull() returned success but notebook /
-          punches surfaces were empty; we needed a way to inspect device
-          state without DevTools. Safe to delete once resolved. */}
-      <DiagnosticsCard />
-
       {/* ── Daily review pace ──────────────────────────── */}
       <section className="rounded-xl border border-[var(--border)] p-5 space-y-4">
         <div className="space-y-1.5">
@@ -512,6 +505,13 @@ export default function SettingsPage() {
                 />
       </section>
 
+      {/* ── Sync diagnostics ─────────────────────────────────
+          Shows this device's localStorage counts side-by-side with the
+          cloud shard counts. Handy on WeChat WebView / mobile Safari
+          where DevTools isn't available and you need to tell
+          "pull didn't write" apart from "UI didn't render". */}
+      <DiagnosticsCard />
+
       {/* ── How it works ─────────────────────────────────────── */}
       <section className="rounded-xl bg-[var(--surface)] p-5 space-y-2 text-sm text-[var(--fg-soft)]">
         <h2 className="font-medium text-[var(--fg)]">工作原理</h2>
@@ -643,36 +643,99 @@ function DiagnosticsCard() {
   }
 
   async function fetchCloud() {
+    // The cloud snapshot is now split into per-store shards
+    // (see /api/cos/sync route). Ask for each shard in parallel; a 404
+    // means "nothing on cloud for this store yet" and is shown as 0, not
+    // as an error. Any real error (network / 5xx / bad JSON) is surfaced.
     setCloudStatus("loading");
     setCloudErr("");
-    try {
-      const id = getSyncId();
-      const res = await fetch(`/api/cos/sync?syncId=${id}`, {
-        cache: "no-store",
-      });
+    const id = getSyncId();
+    if (!id) {
+      setCloudStatus("error");
+      setCloudErr("未配置 syncId");
+      return;
+    }
+
+    async function fetchShard(shard: string): Promise<unknown> {
+      const res = await fetch(
+        `/api/cos/sync?syncId=${encodeURIComponent(id)}&shard=${shard}`,
+        { cache: "no-store" },
+      );
       if (!res.ok) {
-        setCloudStatus("error");
-        setCloudErr(`HTTP ${res.status}`);
-        return;
+        throw new Error(`${shard}: HTTP ${res.status}`);
       }
-      const snap = await res.json();
-      if (!snap) {
-        setCloudStatus("error");
-        setCloudErr("云端无快照");
-        return;
-      }
+      // Server returns `null` (200) when the shard object doesn't exist.
+      return await res.json();
+    }
+
+    try {
+      const [
+        wordbookRaw,
+        wordNotesRaw,
+        notebookRaw,
+        notebookNotesRaw,
+        punchesRaw,
+      ] = await Promise.all([
+        fetchShard("wordbook"),
+        fetchShard("wordNotes"),
+        fetchShard("notebook"),
+        fetchShard("notebookNotes"),
+        fetchShard("punches"),
+      ]);
+
+      const asObj = (v: unknown): Record<string, unknown> =>
+        v && typeof v === "object" && !Array.isArray(v)
+          ? (v as Record<string, unknown>)
+          : {};
+      const asArr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+
+      // Each shard is stored as { version, savedAt, data }. Older / bare
+      // shards without an envelope are tolerated by falling back to the
+      // raw value.
+      const unwrap = (raw: unknown): unknown => {
+        if (raw == null) return null;
+        if (
+          typeof raw === "object" &&
+          raw !== null &&
+          "data" in (raw as Record<string, unknown>)
+        ) {
+          return (raw as { data: unknown }).data;
+        }
+        return raw;
+      };
+      const savedAtOf = (raw: unknown): string => {
+        const v = asObj(raw).savedAt;
+        return typeof v === "string" ? v : "";
+      };
+
+      // Report the freshest savedAt across the five fetched shards.
+      const savedAtCandidates = [
+        wordbookRaw,
+        wordNotesRaw,
+        notebookRaw,
+        notebookNotesRaw,
+        punchesRaw,
+      ]
+        .map(savedAtOf)
+        .filter(Boolean)
+        .sort();
+      const savedAt =
+        savedAtCandidates.length > 0
+          ? savedAtCandidates[savedAtCandidates.length - 1]
+          : "(未知)";
+
       setCloud({
-        wordbook: Object.keys(snap.wordbook ?? {}).length,
-        wordNotes: Object.keys(snap.wordNotes ?? {}).length,
-        notebook: Object.keys(snap.notebook ?? {}).length,
-        notebookNotes: Object.keys(snap.notebookNotes ?? {}).length,
-        punches: Array.isArray(snap.punches) ? snap.punches.length : 0,
-        savedAt: snap.savedAt ?? "(未知)",
+        wordbook: Object.keys(asObj(unwrap(wordbookRaw))).length,
+        wordNotes: Object.keys(asObj(unwrap(wordNotesRaw))).length,
+        notebook: Object.keys(asObj(unwrap(notebookRaw))).length,
+        notebookNotes: Object.keys(asObj(unwrap(notebookNotesRaw))).length,
+        punches: asArr(unwrap(punchesRaw)).length,
+        savedAt,
       });
       setCloudStatus("ok");
     } catch (e) {
       setCloudStatus("error");
-      setCloudErr(String(e));
+      setCloudErr(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -696,7 +759,7 @@ function DiagnosticsCard() {
     <section className="rounded-xl border-2 border-dashed border-amber-400 bg-amber-50/40 p-4 space-y-3">
       <div className="flex items-baseline justify-between gap-2">
         <h2 className="text-sm font-semibold text-amber-900">
-          🔧 同步诊断（临时）
+          🔧 同步诊断
         </h2>
         <span className="text-[11px] text-amber-800/70">
           syncId: {local.syncIdShort}
