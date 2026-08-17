@@ -43,7 +43,9 @@ export default function SettingsPage() {
   const [copied, setCopied] = useState(false);
   const [inputCode, setInputCode] = useState("");
   const [pushStatus, setPushStatus] = useState<Status>("idle");
+  const [pushMsg, setPushMsg] = useState("");
   const [pullStatus, setPullStatus] = useState<Status>("idle");
+  const [pullMsg, setPullMsg] = useState("");
   const [importStatus, setImportStatus] = useState<Status>("idle");
   const [importMsg, setImportMsg] = useState("");
   // 雅思批量导入 — 与上方的 sync-code import 完全无关，只是因为拼写接近，
@@ -99,6 +101,7 @@ export default function SettingsPage() {
 
   async function handlePush() {
     setPushStatus("loading");
+    setPushMsg("");
     try {
       await pushManual();
       setPushStatus("ok");
@@ -114,8 +117,11 @@ export default function SettingsPage() {
           try {
             await pushManual(true);
             setPushStatus("ok");
-          } catch {
+          } catch (e2) {
             setPushStatus("error");
+            setPushMsg(
+              e2 instanceof Error ? e2.message : String(e2) || "上传失败",
+            );
           }
         } else {
           setPushStatus("idle");
@@ -124,6 +130,7 @@ export default function SettingsPage() {
         }
       } else {
         setPushStatus("error");
+        setPushMsg(err.message || String(err) || "上传失败");
       }
     }
     setTimeout(() => setPushStatus("idle"), 3000);
@@ -131,11 +138,18 @@ export default function SettingsPage() {
 
   async function handlePull() {
     setPullStatus("loading");
+    setPullMsg("");
     try {
       const result = await pull();
-      setPullStatus(result.error ? "error" : "ok");
-    } catch {
+      if (result.error) {
+        setPullStatus("error");
+        setPullMsg(result.error);
+      } else {
+        setPullStatus("ok");
+      }
+    } catch (e) {
       setPullStatus("error");
+      setPullMsg(e instanceof Error ? e.message : String(e) || "拉取失败");
     }
     setTimeout(() => setPullStatus("idle"), 3000);
   }
@@ -480,8 +494,22 @@ export default function SettingsPage() {
             {pullStatus === "loading" ? "下载中…" : "↓ 从云端拉取"}
           </button>
         </div>
-        <StatusBadge status={pushStatus} msg="上传成功" />
-        <StatusBadge status={pullStatus} msg="拉取并合并成功" />
+                <StatusBadge
+                  status={pushStatus}
+                  msg={
+                    pushStatus === "error"
+                      ? pushMsg || "上传失败"
+                      : "上传成功"
+                  }
+                />
+                <StatusBadge
+                  status={pullStatus}
+                  msg={
+                    pullStatus === "error"
+                      ? pullMsg || "拉取失败"
+                      : "拉取并合并成功"
+                  }
+                />
       </section>
 
       {/* ── How it works ─────────────────────────────────────── */}
