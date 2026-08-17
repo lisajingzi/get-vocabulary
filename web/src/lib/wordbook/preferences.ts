@@ -82,7 +82,12 @@ function readRaw(): Preferences {
 
 function writeRaw(prefs: Preferences): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(prefs));
+  } catch (e) {
+    console.error("[wordbook/preferences] writeRaw failed", e);
+    throw e;
+  }
   window.dispatchEvent(new CustomEvent("get:preferences-change"));
 }
 

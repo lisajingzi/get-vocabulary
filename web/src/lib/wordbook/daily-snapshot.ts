@@ -63,7 +63,12 @@ function readRaw(): SnapshotPayload | null {
 
 function writeRaw(payload: SnapshotPayload): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    console.error("[wordbook/daily-snapshot] writeRaw failed", e);
+    throw e;
+  }
   window.dispatchEvent(new CustomEvent("get:daily-snapshot-change"));
   // Extra event fired ONLY when the local device freezes its own snapshot
   // (as opposed to receiving one from the cloud via `applyRemoteSnapshot`).
@@ -90,7 +95,12 @@ export function readSnapshotPayload(): SnapshotPayload | null {
  */
 export function applyRemoteSnapshot(payload: SnapshotPayload): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    console.error("[wordbook/daily-snapshot] applyRemoteSnapshot failed", e);
+    throw e;
+  }
   window.dispatchEvent(new CustomEvent("get:daily-snapshot-change"));
 }
 

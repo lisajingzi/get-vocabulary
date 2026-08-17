@@ -128,7 +128,12 @@ export function readEntries(): EntryStore {
 
 export function writeEntries(store: EntryStore): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(ENTRIES_KEY, JSON.stringify(store));
+  try {
+    window.localStorage.setItem(ENTRIES_KEY, JSON.stringify(store));
+  } catch (e) {
+    console.error("[notebook/local] writeEntries failed", e);
+    throw e;
+  }
   window.dispatchEvent(new CustomEvent("get:notebook-change"));
 }
 
@@ -145,7 +150,12 @@ export function readNotesStore(): NotesStore {
 
 export function writeNotesStore(store: NotesStore): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(NOTES_KEY, JSON.stringify(store));
+  try {
+    window.localStorage.setItem(NOTES_KEY, JSON.stringify(store));
+  } catch (e) {
+    console.error("[notebook/local] writeNotesStore failed", e);
+    throw e;
+  }
   window.dispatchEvent(new CustomEvent("get:notebook-notes-change"));
 }
 

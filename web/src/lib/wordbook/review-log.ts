@@ -39,7 +39,12 @@ export function readReviewLog(): ReviewLog {
 
 export function writeReviewLog(log: ReviewLog): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(log));
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(log));
+  } catch (e) {
+    console.error("[wordbook/review-log] writeReviewLog failed", e);
+    throw e;
+  }
   window.dispatchEvent(new CustomEvent("get:review-log-change"));
 }
 

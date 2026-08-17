@@ -130,7 +130,15 @@ export function readStore(): Store {
 
 export function writeStore(store: Store): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  } catch (e) {
+    // Quota exhausted or storage disabled. Surface to the developer console
+    // and re-throw so callers (esp. the sync layer) can react instead of
+    // silently losing writes.
+    console.error("[wordbook/local] writeStore failed", e);
+    throw e;
+  }
   // Notify same-tab listeners; the native `storage` event only fires across tabs.
   window.dispatchEvent(new CustomEvent("get:wordbook-change"));
 }
@@ -148,7 +156,12 @@ export function readNotes(): NotesStore {
 
 export function writeNotes(notes: NotesStore): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
+  try {
+    window.localStorage.setItem(NOTES_KEY, JSON.stringify(notes));
+  } catch (e) {
+    console.error("[wordbook/local] writeNotes failed", e);
+    throw e;
+  }
   window.dispatchEvent(new CustomEvent("get:notes-change"));
 }
 

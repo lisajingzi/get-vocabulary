@@ -39,7 +39,12 @@ function readPunches(): string[] {
 
 export function writePunches(list: string[]): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+  } catch (e) {
+    console.error("[wordbook/punches] writePunches failed", e);
+    throw e;
+  }
   window.dispatchEvent(new CustomEvent("get:punch-change"));
 }
 
