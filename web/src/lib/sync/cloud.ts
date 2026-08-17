@@ -102,6 +102,40 @@ export function isSyncIdLocked(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Safety gate — has this session ever pulled successfully?
+// ---------------------------------------------------------------------------
+// Root cause of an earlier data-loss incident: on cold start, migration
+// helpers in SyncProvider dispatch `get:wordbook-change`, which schedules
+// a push in 3 s. On slow networks (WeChat WebView) the initial pull hadn't
+// finished yet, so buildSnapshot() read an *empty* notebook/punches (they
+// hadn't been merged from remote yet) and PUT overwrote the cloud copy
+// with blanks. This flag gates all automatic pushes until at least one
+// pull has completed, so we never blindly upload a partially-hydrated
+// local state. Manual pushes (from the Settings page "Upload" button) go
+// through `pushManual()` which explicitly bypasses this gate — the user
+// asked for it, they know what they're doing.
+let hasPulledOnce = false;
+/** For diagnostics only — exposes whether the safety gate is currently open. */
+export function isPullGateOpen(): boolean {
+  return hasPulledOnce;
+}
+
+// Network timeout for sync fetches. Requests that hang past this get
+// aborted so callers see a real error instead of a UI stuck on "Syncing…".
+const SYNC_FETCH_TIMEOUT_MS = 30_000;
+function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = SYNC_FETCH_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(input, { ...init, signal: controller.signal }).finally(() =>
+    clearTimeout(timer),
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Snapshot shape
 // ---------------------------------------------------------------------------
 export interface SyncSnapshot {
@@ -240,11 +274,44 @@ function mergePunches(local: string[], remote: string[]): string[] {
 // ---------------------------------------------------------------------------
 // Push (upload local → remote)
 // ---------------------------------------------------------------------------
-export async function push(): Promise<void> {
+
+/**
+ * How many entries are in each non-wordbook store right now. Used by the
+ * safety gate to detect "the local state looks suspiciously empty relative
+ * to what the cloud already has" and refuse to overwrite the cloud.
+ */
+function countLocalNonWordbook(snapshot: SyncSnapshot): {
+  notebook: number;
+  notebookNotes: number;
+  wordNotes: number;
+  punches: number;
+} {
+  const nn = Object.values(snapshot.notebookNotes ?? {}).reduce(
+    (s, arr) => s + arr.length,
+    0,
+  );
+  const wn = Object.values(snapshot.wordNotes ?? {}).reduce(
+    (s, arr) => s + arr.length,
+    0,
+  );
+  return {
+    notebook: Object.keys(snapshot.notebook ?? {}).length,
+    notebookNotes: nn,
+    wordNotes: wn,
+    punches: (snapshot.punches ?? []).length,
+  };
+}
+
+/**
+ * Internal core push. Uploads the current localStorage snapshot to COS.
+ * Callers should prefer `push()` (auto, gated) or `pushManual()` (user
+ * initiated, bypasses the gate but still runs the safety net).
+ */
+async function pushCore(): Promise<void> {
   const syncId = getSyncId();
   if (!syncId) return;
   const snapshot = buildSnapshot();
-  const res = await fetch(`/api/cos/sync?syncId=${syncId}`, {
+  const res = await fetchWithTimeout(`/api/cos/sync?syncId=${syncId}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(snapshot),
@@ -253,6 +320,100 @@ export async function push(): Promise<void> {
     const err = await res.json().catch(() => ({}));
     throw new Error(err?.error ?? `HTTP ${res.status}`);
   }
+}
+
+/**
+ * Compares the built local snapshot against the current cloud snapshot.
+ * Returns a reason string if the push should be refused (because local
+ * looks catastrophically emptier than remote), or null if it's safe.
+ *
+ * Only guards the *automatic* push path. Manual push from Settings shows
+ * a confirm dialog to the user instead.
+ */
+async function detectSuspiciousEmptyPush(
+  local: SyncSnapshot,
+): Promise<string | null> {
+  const syncId = getSyncId();
+  if (!syncId) return null;
+  let remote: SyncSnapshot | null = null;
+  try {
+    const res = await fetchWithTimeout(`/api/cos/sync?syncId=${syncId}`);
+    if (res.ok) remote = await res.json();
+  } catch {
+    // Network hiccup on the HEAD check — don't block push over that.
+    return null;
+  }
+  if (!remote) return null; // no cloud snapshot yet, nothing to protect
+
+  const localCounts = countLocalNonWordbook(local);
+  const remoteCounts = countLocalNonWordbook(remote);
+
+  // Danger sign: for every non-wordbook store, remote has data and local
+  // has none. Almost certainly a bug (partial hydration, race condition,
+  // wrong syncId, etc), not a legitimate reset.
+  const emptied =
+    remoteCounts.notebook > 0 &&
+    localCounts.notebook === 0 &&
+    remoteCounts.punches > 0 &&
+    localCounts.punches === 0;
+  if (emptied) {
+    return (
+      `Refusing to push: local looks empty vs cloud ` +
+      `(local notebook=${localCounts.notebook}, punches=${localCounts.punches}; ` +
+      `cloud notebook=${remoteCounts.notebook}, punches=${remoteCounts.punches}). ` +
+      `This usually means the initial pull hasn't finished yet.`
+    );
+  }
+  return null;
+}
+
+/**
+ * Auto push (called by the debounced scheduler on data changes). Skips
+ * the network entirely if:
+ *   - No pull has ever succeeded this session (initial hydration might
+ *     still be in flight — pushing now risks blanking the cloud).
+ *   - The safety net thinks local is catastrophically emptier than cloud.
+ */
+export async function push(): Promise<void> {
+  if (!hasPulledOnce) {
+    console.warn(
+      "[sync] auto-push skipped: initial pull hasn't completed yet",
+    );
+    return;
+  }
+  const syncId = getSyncId();
+  if (!syncId) return;
+  const snapshot = buildSnapshot();
+  const reason = await detectSuspiciousEmptyPush(snapshot);
+  if (reason) {
+    console.error(`[sync] auto-push refused. ${reason}`);
+    return;
+  }
+  await pushCore();
+}
+
+/**
+ * Manual push initiated from the Settings page. Bypasses the pull gate
+ * (the user explicitly clicked Upload) but still runs the emptiness
+ * safety net and throws with a descriptive message so the UI can surface
+ * a confirm-to-override dialog.
+ *
+ * If `force` is true the safety net is also skipped — reserved for the
+ * "Yes, I really do want to overwrite" path in the confirm dialog.
+ */
+export async function pushManual(force = false): Promise<void> {
+  const syncId = getSyncId();
+  if (!syncId) throw new Error("no syncId");
+  const snapshot = buildSnapshot();
+  if (!force) {
+    const reason = await detectSuspiciousEmptyPush(snapshot);
+    if (reason) {
+      const err = new Error(reason);
+      (err as Error & { code?: string }).code = "SUSPICIOUS_EMPTY_PUSH";
+      throw err;
+    }
+  }
+  await pushCore();
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +428,7 @@ export async function pull(overrideSyncId?: string): Promise<{
 
   let res: Response;
   try {
-    res = await fetch(`/api/cos/sync?syncId=${syncId}`);
+    res = await fetchWithTimeout(`/api/cos/sync?syncId=${syncId}`);
   } catch (e) {
     return { merged: false, error: String(e) };
   }
@@ -302,6 +463,10 @@ export async function pull(overrideSyncId?: string): Promise<{
   writeNotebookRaw(mergedNotebook);
   writeNotebookNotesRaw(mergedNotebookNotes);
   writePunchesRaw(mergedPunches);
+
+  // Open the auto-push safety gate: the initial hydration completed, so
+  // any subsequent local writes are now safe to schedule pushes for.
+  hasPulledOnce = true;
   // Preferences: no timestamp on either side, so just take the remote value
   // if present. Small blob, low stakes; last-write-wins is fine.
   if (remote.preferences) replacePreferences(remote.preferences);

@@ -10,7 +10,7 @@
  */
 
 import { useState, useEffect } from "react";
-import { getSyncId, setSyncId, push, pull, isSyncIdLocked } from "@/lib/sync/cloud";
+import { getSyncId, setSyncId, pushManual, pull, isSyncIdLocked } from "@/lib/sync/cloud";
 import {
   getDailyCapActive,
   getDailyCapPassive,
@@ -100,10 +100,31 @@ export default function SettingsPage() {
   async function handlePush() {
     setPushStatus("loading");
     try {
-      await push();
+      await pushManual();
       setPushStatus("ok");
-    } catch {
-      setPushStatus("error");
+    } catch (e) {
+      const err = e as Error & { code?: string };
+      if (err.code === "SUSPICIOUS_EMPTY_PUSH") {
+        // Safety-net: local looks catastrophically emptier than cloud.
+        // Ask the user to confirm before overwriting.
+        const ok = window.confirm(
+          `⚠️ 本地数据比云端少很多，很可能是同步还没完成。\n\n確定要用本地数据覆盖云端吗？覆盖后云端原有的竈记本、打卡等数据将丢失！\n\n（建议先点取消，进 → 开发者工具 Network 面板确认云端实际数据后再决定）`,
+        );
+        if (ok) {
+          try {
+            await pushManual(true);
+            setPushStatus("ok");
+          } catch {
+            setPushStatus("error");
+          }
+        } else {
+          setPushStatus("idle");
+          setTimeout(() => setPushStatus("idle"), 0);
+          return;
+        }
+      } else {
+        setPushStatus("error");
+      }
     }
     setTimeout(() => setPushStatus("idle"), 3000);
   }
