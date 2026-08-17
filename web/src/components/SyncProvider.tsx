@@ -28,6 +28,7 @@ import {
   hydrateNotesFromIdb,
 } from "@/lib/wordbook/local";
 import { hydrateNotebookNotesFromIdb } from "@/lib/notebook/local";
+import { hydrateStringNotesFromIdb } from "@/lib/wordbook/string-notes";
 import { migrateCoreExamples } from "@/lib/wordbook/core-example";
 
 // Events that must be flushed to the cloud immediately (no 3 s debounce),
@@ -113,6 +114,7 @@ export default function SyncProvider() {
         await Promise.all([
           hydrateNotesFromIdb(),
           hydrateNotebookNotesFromIdb(),
+          hydrateStringNotesFromIdb(),
         ]);
       } catch {
         /* hydrators log their own errors */

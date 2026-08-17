@@ -24,6 +24,7 @@ import SpeakButton from "@/components/SpeakButton";
 import DefinitionModal from "@/components/DefinitionModal";
 import WordAutoPlayer from "@/components/WordAutoPlayer";
 import PageJumper from "@/components/PageJumper";
+import StringNotesSection from "@/components/StringNotesSection";
 
 type SortKey = "recent" | "count" | "alpha" | "error";
 type PurposeFilter = "all" | WordbookPurpose;
@@ -539,6 +540,15 @@ function WordbookPageInner() {
           </button>
         </div>
       </header>
+
+      {/* 串词笔记 — 仅在“只看已标星”轻量态下展示。无论标星后列表是否为空都展示，
+          这样才不会因为“标星后筛不出单词”而直接隐藏串词入口。 */}
+      {starredOnly && (
+        <StringNotesSection
+          groupOptions={groupOptions.filter((g) => g !== "__none__")}
+          groupFilter={group}
+        />
+      )}
 
       {/* 自动连播工具栏——馈入当前可见页 paginated 的 lemma 列表。
           翻页 / 换筛选造成列表变化时，AutoPlayer 会自动停止。 */}
