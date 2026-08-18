@@ -28,6 +28,10 @@ import {
 import SpeakButton from "@/components/SpeakButton";
 import DefinitionModal from "@/components/DefinitionModal";
 import PageJumper from "@/components/PageJumper";
+import {
+  findWrongBookSession,
+  type ReviewSessionRecord,
+} from "@/lib/wordbook/review-sessions";
 
 type SortKey = "error" | "recent" | "count" | "alpha";
 type PurposeFilter = "all" | WordbookPurpose;
@@ -130,6 +134,19 @@ function WrongbookPageInner() {
     }
   }, [page, totalPages, setParams]);
 
+  // 错词重温未完成进度——若存在，按钮文案改为“继续重温 (剩 N/M)”。
+  // 监听 get:review-sessions-change 以便完成 / 云同步后 UI 及时刷新。
+  const [wrongResume, setWrongResume] =
+    useState<ReviewSessionRecord | null>(null);
+  useEffect(() => {
+    const refresh = () => setWrongResume(findWrongBookSession());
+    refresh();
+    if (typeof window === "undefined") return;
+    window.addEventListener("get:review-sessions-change", refresh);
+    return () =>
+      window.removeEventListener("get:review-sessions-change", refresh);
+  }, []);
+
   function setPurpose(next: PurposeFilter) {
     setParams({ purpose: next === "all" ? null : next }, { resetPage: true });
   }
@@ -209,7 +226,12 @@ function WrongbookPageInner() {
               if (entries.length === 0) e.preventDefault();
             }}
           >
-            重温错词
+            {wrongResume
+              ? `继续重温（剩 ${Math.max(
+                  0,
+                  wrongResume.queue.length - wrongResume.cursor,
+                )} / ${wrongResume.queue.length}）`
+              : "重温错词"}
           </Link>
         </div>
 

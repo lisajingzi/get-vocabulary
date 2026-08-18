@@ -38,6 +38,15 @@ import {
 import { MAX_LEVEL } from "@/lib/wordbook/scheduler";
 import { recordPunchToday } from "@/lib/wordbook/punches";
 import { recordReviewEvent } from "@/lib/wordbook/review-log";
+import {
+  createSession,
+  findWrongBookSession,
+  getSession,
+  listSessions,
+  removeSession as removeSessionRecord,
+  updateSessionProgress,
+  type ReviewSessionRecord,
+} from "@/lib/wordbook/review-sessions";
 import SpeakButton from "@/components/SpeakButton";
 
 /**
@@ -58,6 +67,9 @@ type PersistedSession = {
    *  state stays consistent with any changes the user made in between. */
   queue: string[];
   cursor: number;
+  /** Cross-device record id so we can keep pushing progress after a
+   *  detail-page round-trip re-hydrates state from sessionStorage. */
+  sessionId?: string;
   /** Per-card interaction snapshot for the CURRENT cursor (recognize mode). */
   graded?: "pass" | "fail" | null;
   confirmed?: "pass" | "fail" | null;
@@ -123,6 +135,14 @@ type Phase =
       cursor: number;
       mode: ReviewMode;
       fromWrongBook: boolean;
+      /** id of the persistent cross-device record backing this pass; used
+       *  so advance() and completion can update / delete the record. Not
+       *  set for legacy transient passes that predate the record store. */
+      sessionId?: string;
+      /** Lemmas already graded (pass or fail) inside this pass. Kept in
+       *  React state so it can be flushed to the record on every advance;
+       *  the source of truth is the record itself. */
+      finishedLemmas?: string[];
     }
   | { kind: "done"; finished: number; total: number };
 
@@ -138,6 +158,13 @@ export default function ReviewView() {
   );
 
   const [phase, setPhase] = useState<Phase>({ kind: "picker" });
+
+  // Snapshot of the FilterPicker's selection at confirm time. Ferried
+  // through mode-picker into the persistent session record so we can show
+  // "you were reviewing 雅思·5A·听说写" on the resume card. A ref (not
+  // state) is enough because it's read exactly once when the user picks a
+  // mode; re-renders don't need to observe it.
+  const pendingFilterRef = useRef<FilterState | null>(null);
 
   // On first mount, try to restore an in-progress review session from
   // sessionStorage. This is what makes "answer page → click headword →
@@ -171,6 +198,7 @@ export default function ReviewView() {
       cursor,
       mode: s.mode,
       fromWrongBook: s.fromWrongBook,
+      sessionId: s.sessionId,
     });
   }, []);
 
@@ -185,6 +213,7 @@ export default function ReviewView() {
         fromWrongBook: phase.fromWrongBook,
         queue: phase.queue.map((e) => e.lemma),
         cursor: phase.cursor,
+        sessionId: phase.sessionId,
       });
     } else if (phase.kind === "done") {
       writeSession(null);
@@ -193,10 +222,49 @@ export default function ReviewView() {
     // the user meant to return; on "done" we clear it.
   }, [phase]);
 
-  // 错词本模式：直接跳过 picker，把 inWrongBook === true 的词全部塞进去，
-  // 进入方式选择。
+  // 错词本模式：先尝试恢复上一轮未完成的错词本进度（可能来自另一台设备）；
+  // 若无，则按原逻辑抓当前所有 inWrongBook=true 的词进入方式选择。
   useEffect(() => {
     if (!wrongBookMode) return;
+    // If hydrate above already restored a wrong-book review from
+    // sessionStorage, don't overwrite it — the user is mid-card.
+    if (hydratedRef.current) {
+      // ok — hydrate may or may not have restored; only skip if it did.
+      const s = readSession();
+      if (s && s.phase === "review" && s.fromWrongBook) return;
+    }
+    const existing = findWrongBookSession();
+    if (existing) {
+      const queue: WordbookEntry[] = [];
+      for (const lemma of existing.queue) {
+        const e = getEntry(lemma);
+        // Skip words that no longer exist or were removed from the wrong
+        // book from another device (already reviewed correctly there).
+        if (!e || e.inWrongBook !== true) continue;
+        queue.push(e);
+      }
+      if (queue.length === 0) {
+        // Everything in the record is already resolved elsewhere — clear
+        // the record and fall back to the standard "pick all wrong words"
+        // path below.
+        removeSessionRecord(existing.id);
+      } else {
+        const cursor = Math.min(
+          Math.max(0, existing.cursor),
+          queue.length - 1,
+        );
+        setPhase({
+          kind: "review",
+          queue,
+          cursor,
+          mode: existing.mode,
+          fromWrongBook: true,
+          sessionId: existing.id,
+          finishedLemmas: [...existing.finishedLemmas],
+        });
+        return;
+      }
+    }
     const wrong = listEntries().filter((e) => e.inWrongBook === true);
     setPhase({ kind: "mode-picker", entries: wrong });
   }, [wrongBookMode]);
@@ -218,10 +286,25 @@ export default function ReviewView() {
           recordPunchToday();
         }
         const nextCursor = prev.cursor + 1;
+        const nextFinished = item
+          ? [...(prev.finishedLemmas ?? []), item.lemma]
+          : (prev.finishedLemmas ?? []);
+        // Push progress to the persistent record so it survives tab close
+        // / device switch. Completion writes a tombstone.
+        if (prev.sessionId) {
+          if (nextCursor >= prev.queue.length) {
+            removeSessionRecord(prev.sessionId);
+          } else {
+            updateSessionProgress(prev.sessionId, {
+              cursor: nextCursor,
+              finishedLemmas: nextFinished,
+            });
+          }
+        }
         if (nextCursor >= prev.queue.length) {
           return { kind: "done", finished: prev.queue.length, total: prev.queue.length };
         }
-        return { ...prev, cursor: nextCursor };
+        return { ...prev, cursor: nextCursor, finishedLemmas: nextFinished };
       });
     },
     [],
@@ -231,12 +314,42 @@ export default function ReviewView() {
     return (
       <div className="space-y-4">
         <ReviewTopBar wrongBook={wrongBookMode} />
+        <ContinueSessionsPanel
+          onResume={(rec) => {
+            const queue: WordbookEntry[] = [];
+            for (const lemma of rec.queue) {
+              const e = getEntry(lemma);
+              if (e) queue.push(e);
+            }
+            if (queue.length === 0) {
+              removeSessionRecord(rec.id);
+              return;
+            }
+            const cursor = Math.min(
+              Math.max(0, rec.cursor),
+              queue.length - 1,
+            );
+            setPhase({
+              kind: "review",
+              queue,
+              cursor,
+              mode: rec.mode,
+              fromWrongBook: false,
+              sessionId: rec.id,
+              finishedLemmas: [...rec.finishedLemmas],
+            });
+          }}
+          onAbandon={(id) => removeSessionRecord(id)}
+        />
         <FilterPicker
-          onConfirm={(entries) =>
-            entries.length === 0
-              ? setPhase({ kind: "done", finished: 0, total: 0 })
-              : setPhase({ kind: "mode-picker", entries })
-          }
+          onConfirm={(entries, filterSnapshot) => {
+            if (entries.length === 0) {
+              setPhase({ kind: "done", finished: 0, total: 0 });
+              return;
+            }
+            pendingFilterRef.current = filterSnapshot;
+            setPhase({ kind: "mode-picker", entries });
+          }}
         />
       </div>
     );
@@ -249,17 +362,29 @@ export default function ReviewView() {
         <ModePicker
           total={phase.entries.length}
           wrongBook={wrongBookMode}
-          onPick={(mode) =>
-            phase.entries.length === 0
-              ? setPhase({ kind: "done", finished: 0, total: 0 })
-              : setPhase({
-                  kind: "review",
-                  queue: phase.entries,
-                  cursor: 0,
-                  mode,
-                  fromWrongBook: wrongBookMode,
-                })
-          }
+          onPick={(mode) => {
+            if (phase.entries.length === 0) {
+              setPhase({ kind: "done", finished: 0, total: 0 });
+              return;
+            }
+            // Create the persistent record now that we know queue + mode.
+            const rec = createSession({
+              filter: wrongBookMode ? null : pendingFilterRef.current,
+              mode,
+              fromWrongBook: wrongBookMode,
+              queue: phase.entries.map((e) => e.lemma),
+            });
+            pendingFilterRef.current = null;
+            setPhase({
+              kind: "review",
+              queue: phase.entries,
+              cursor: 0,
+              mode,
+              fromWrongBook: wrongBookMode,
+              sessionId: rec.id,
+              finishedLemmas: [],
+            });
+          }}
           onBack={() =>
             wrongBookMode
               ? setPhase({ kind: "done", finished: 0, total: 0 })
@@ -438,13 +563,153 @@ function DoneState({
 }
 
 // ===========================================================================
+// Continue Sessions Panel — 顶部展示"继续上次复习"卡片列表
+// ===========================================================================
+
+/**
+ * Panel shown above the FilterPicker. Reads unfinished, non-wrongbook
+ * session records from the cross-device store and offers a "继续"/"放弃"
+ * action on each. Auto-refreshes on `get:review-sessions-change` so that
+ * a completion elsewhere (or a cloud pull) immediately removes the card.
+ *
+ * Ordering: createdAt ASC — oldest first — so users work through pending
+ * passes from old to new.
+ */
+function ContinueSessionsPanel({
+  onResume,
+  onAbandon,
+}: {
+  onResume: (rec: ReviewSessionRecord) => void;
+  onAbandon: (id: string) => void;
+}) {
+  const [records, setRecords] = useState<ReviewSessionRecord[]>([]);
+
+  useEffect(() => {
+    const refresh = () => {
+      // Only show non-wrongbook records here — wrongbook progress lives on
+      // /wrongbook per product decision (打卡复习 与 错词重温 分开)。
+      setRecords(listSessions().filter((r) => !r.fromWrongBook));
+    };
+    refresh();
+    if (typeof window === "undefined") return;
+    window.addEventListener("get:review-sessions-change", refresh);
+    return () =>
+      window.removeEventListener("get:review-sessions-change", refresh);
+  }, []);
+
+  if (records.length === 0) return null;
+
+  return (
+    <section className="space-y-3 rounded-xl border border-[var(--border)] p-5">
+      <header className="space-y-1">
+        <h2 className="text-base font-semibold tracking-tight">
+          继续上次复习
+        </h2>
+        <p className="text-xs text-[var(--fg-soft)]">
+          从最早的一组开始继续，也可以放弃后重新选组。
+        </p>
+      </header>
+      <ul className="space-y-2">
+        {records.map((rec) => (
+          <ContinueSessionCard
+            key={rec.id}
+            record={rec}
+            onResume={() => onResume(rec)}
+            onAbandon={() => onAbandon(rec.id)}
+          />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function ContinueSessionCard({
+  record,
+  onResume,
+  onAbandon,
+}: {
+  record: ReviewSessionRecord;
+  onResume: () => void;
+  onAbandon: () => void;
+}) {
+  const total = record.queue.length;
+  const remaining = Math.max(0, total - record.cursor);
+  const summary = describeFilter(record.filter, record.mode);
+  return (
+    <li className="flex items-center justify-between gap-3 rounded-lg border border-[var(--border)] bg-white/40 px-3 py-2">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium text-[var(--fg)]">
+          {summary}
+        </p>
+        <p className="mt-0.5 text-[11px] tabular-nums text-[var(--fg-soft)]">
+          剩 {remaining} / 共 {total}
+        </p>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <button
+          type="button"
+          onClick={onResume}
+          className="rounded-full bg-[var(--accent)] px-3 py-1 text-xs font-medium text-white transition hover:brightness-105"
+        >
+          继续
+        </button>
+        <button
+          type="button"
+          onClick={onAbandon}
+          aria-label="放弃这条进度"
+          title="放弃这条进度"
+          className="rounded-full border border-[var(--border)] px-2 py-1 text-xs text-[var(--fg-soft)] transition hover:border-red-400 hover:text-red-500"
+        >
+          ✕
+        </button>
+      </div>
+    </li>
+  );
+}
+
+/** Human-friendly one-line description of the picker filter + review mode. */
+function describeFilter(
+  filter: ReviewSessionRecord["filter"],
+  mode: ReviewMode,
+): string {
+  const modeLabel = mode === "recognize" ? "识词" : "听写";
+  if (!filter) return `错词重温 · ${modeLabel}`;
+  const parts: string[] = [];
+  parts.push(
+    filter.ielts === "ielts"
+      ? "雅思"
+      : filter.ielts === "nonielts"
+        ? "非雅思"
+        : "全部",
+  );
+  parts.push(
+    filter.purpose === "active"
+      ? "听说写"
+      : filter.purpose === "passive"
+        ? "阅读"
+        : "全部方式",
+  );
+  if (filter.groups.length > 0) {
+    parts.push(`组:${filter.groups.join("/")}`);
+  }
+  if (filter.reviewCounts.length > 0) {
+    parts.push(`复习×${filter.reviewCounts.join(",")}`);
+  }
+  if (filter.errorCounts.length > 0) {
+    parts.push(`错×${filter.errorCounts.join(",")}`);
+  }
+  parts.push(modeLabel);
+  return parts.join(" · ");
+}
+
+// ===========================================================================
 // Filter Picker
 // ===========================================================================
 
 function FilterPicker({
   onConfirm,
 }: {
-  onConfirm: (entries: WordbookEntry[]) => void;
+  onConfirm: (entries: WordbookEntry[], filter: FilterState) => void;
 }) {
   const [allEntries, setAllEntries] = useState<WordbookEntry[]>([]);
   const [filter, setFilter] = useState<FilterState>(emptyFilter);
@@ -761,7 +1026,7 @@ function FilterPicker({
         </p>
         <button
           type="button"
-          onClick={() => onConfirm(matched)}
+          onClick={() => onConfirm(matched, filter)}
           disabled={matched.length === 0}
           className="rounded-md bg-[var(--accent)] px-4 py-1.5 text-sm font-medium text-white transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-40"
         >
