@@ -41,7 +41,6 @@ import { recordReviewEvent } from "@/lib/wordbook/review-log";
 import {
   createSession,
   findWrongBookSession,
-  getSession,
   listSessions,
   removeSession as removeSessionRecord,
   updateSessionProgress,
