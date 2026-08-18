@@ -644,6 +644,14 @@ function WordbookPageInner() {
                               雅思
                             </span>
                           )}
+                          {showLemma && (e.errorCount ?? 0) > 0 && (
+                            <span
+                              title="累计错误次数"
+                              className="rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-red-500"
+                            >
+                              错 × {e.errorCount ?? 0}
+                            </span>
+                          )}
                         </div>
                         {previewExample && showLemma && (
                           <div
@@ -681,6 +689,14 @@ function WordbookPageInner() {
                               className="rounded bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--accent)]"
                             >
                               雅思
+                            </span>
+                          )}
+                          {(e.errorCount ?? 0) > 0 && (
+                            <span
+                              title="累计错误次数"
+                              className="rounded bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-red-500"
+                            >
+                              错 × {e.errorCount ?? 0}
                             </span>
                           )}
                         </div>
