@@ -57,6 +57,7 @@ const SHARDS = new Set([
   "reviewLog",
   "dailySnapshot",
   "stringNotes",
+  "reviewSessions",
 ]);
 // Special marker for the pre-shard monolithic snapshot; supported on GET
 // only, purely for one-time client-side migration.

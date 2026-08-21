@@ -41,6 +41,7 @@ import { recordReviewEvent } from "@/lib/wordbook/review-log";
 import {
   createSession,
   findWrongBookSession,
+  getSession,
   listSessions,
   removeSession as removeSessionRecord,
   updateSessionProgress,
@@ -179,6 +180,17 @@ export default function ReviewView() {
     hydratedRef.current = true;
     const s = readSession();
     if (!s || s.phase !== "review") return;
+    // Cross-device safety: only hydrate if the sessionId is still alive in
+    // the (cloud-synced) records store. Otherwise this device is holding
+    // a stale sessionStorage snapshot (e.g. browser "restore last session"
+    // resurrected it, or another device already finished / abandoned this
+    // pass and the tombstone has since been pulled). Legacy snapshots
+    // without a sessionId can't be verified — drop them too so users
+    // always land on the picker with an accurate "continue" panel.
+    if (!s.sessionId || !getSession(s.sessionId)) {
+      writeSession(null);
+      return;
+    }
     // Re-fetch entries by lemma so any wordbook edits between navigations
     // (mark 老朋友, delete, etc.) are respected. Skip missing ones.
     const queue: WordbookEntry[] = [];
