@@ -36,6 +36,10 @@ export interface ReviewSessionFilter {
   groups: string[];
   reviewCounts: number[];
   errorCounts: number[];
+  /** 查询日期筛选（YYYY-MM-DD，本地日期）。空 = 不限；
+   *  非空 = 仅命中 lastQueriedAt 落在该自然日的词条。可选字段，
+   *  历史记录里没有它。 */
+  queryDate?: string;
 }
 
 export type ReviewSessionMode = "recognize" | "spell";

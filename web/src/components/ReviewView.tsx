@@ -117,6 +117,10 @@ interface FilterState {
   reviewCounts: number[];
   /** 错误次数（可多选具体数值）。空数组 = 不限。 */
   errorCounts: number[];
+  /** 查询日期（YYYY-MM-DD，本地日期）。空串 = 不限；
+   *  非空 = 仅保留 lastQueriedAt 落在该自然日的词条。
+   *  用于"复习当天在搜索栏查过的词"。 */
+  queryDate: string;
 }
 
 const emptyFilter: FilterState = {
@@ -125,7 +129,27 @@ const emptyFilter: FilterState = {
   groups: [],
   reviewCounts: [],
   errorCounts: [],
+  queryDate: "",
 };
+
+/** 把 ISO 字符串按 **本地时区** 转成 YYYY-MM-DD。
+ *  用户想的是"今天查过的"——按本地日历切分，不是 UTC。 */
+function toLocalDateKey(iso: string | undefined | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** 返回相对今天偏移 offset 天的本地日期 key。offset=0 今天，-1 昨天。 */
+function localDateKeyOffset(offset: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + offset);
+  return toLocalDateKey(d.toISOString());
+}
 
 type Phase =
   | { kind: "picker" }
@@ -710,6 +734,9 @@ function describeFilter(
   if (filter.errorCounts.length > 0) {
     parts.push(`错×${filter.errorCounts.join(",")}`);
   }
+  if (filter.queryDate) {
+    parts.push(`查询日:${filter.queryDate}`);
+  }
   parts.push(modeLabel);
   return parts.join(" · ");
 }
@@ -758,7 +785,14 @@ function FilterPicker({
   // 筛，这个词是否还在候选池里"。三个 available* 集合就是靠它派生的。
   const passesFilter = (
     e: WordbookEntry,
-    skip: "ielts" | "purpose" | "groups" | "reviewCounts" | "errorCounts" | "none",
+    skip:
+      | "ielts"
+      | "purpose"
+      | "groups"
+      | "reviewCounts"
+      | "errorCounts"
+      | "queryDate"
+      | "none",
   ): boolean => {
     if (e.status !== "new") return false;
     if (e.level >= MAX_LEVEL) return false;
@@ -778,6 +812,13 @@ function FilterPicker({
     }
     if (skip !== "errorCounts" && filter.errorCounts.length > 0) {
       if (!filter.errorCounts.includes(e.errorCount ?? 0)) return false;
+    }
+    if (skip !== "queryDate" && filter.queryDate) {
+      // 用户指定了查询日期：只保留 lastQueriedAt 落在该自然日的词。
+      // 注意 lastQueriedAt 只记录"最近一次搜索栏查询"——如果同一个词
+      // 后来又被查过，会被覆盖，历史查询日就此丢失。想按更完整的
+      // 查询历史筛选，后续要落一份 query-log。
+      if (toLocalDateKey(e.lastQueriedAt) !== filter.queryDate) return false;
     }
     return true;
   };
@@ -988,6 +1029,65 @@ function FilterPicker({
           </div>
         </div>
       )}
+
+      {/* 查询日期 —— 快捷选择：今天 / 昨天 / 前天。
+          按 entry.lastQueriedAt 的本地日期匹配；再点一次已选中的按钮即清除。
+          说明：lastQueriedAt 只保留"最近一次搜索栏查询"的时间戳，所以
+          同一个词若后来又查过，它只会命中最近那一天，不会同时出现在更
+          早的日期里。 */}
+      <div className="space-y-1.5">
+        <p className="text-[11px] font-medium text-[var(--fg-soft)]">
+          查询日期 <span className="text-[var(--fg)]">（可选）</span>，仅保留当天在搜索栏查过的词
+        </p>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {(
+            [
+              { key: localDateKeyOffset(0), label: "今天" },
+              { key: localDateKeyOffset(-1), label: "昨天" },
+              { key: localDateKeyOffset(-2), label: "前天" },
+            ] as const
+          ).map((it) => {
+            const active = filter.queryDate === it.key;
+            return (
+              <button
+                key={it.key}
+                type="button"
+                onClick={() =>
+                  setFilter((f) => ({
+                    ...f,
+                    // 再点一次已选中的 → 清除。
+                    queryDate: f.queryDate === it.key ? "" : it.key,
+                  }))
+                }
+                className={[
+                  "rounded-full border px-2.5 py-0.5 text-[11px] tabular-nums transition",
+                  active
+                    ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                    : "border-[var(--border)] text-[var(--fg-soft)] hover:border-[var(--fg-soft)] hover:text-[var(--fg)]",
+                ].join(" ")}
+                title={it.key}
+              >
+                {it.label}
+              </button>
+            );
+          })}
+          {filter.queryDate && (
+            <>
+              <span className="text-[11px] tabular-nums text-[var(--fg-soft)]">
+                {filter.queryDate}
+              </span>
+              <button
+                type="button"
+                onClick={() => setFilter((f) => ({ ...f, queryDate: "" }))}
+                className="rounded-full border border-[var(--border)] px-2 py-0.5 text-[11px] text-[var(--fg-soft)] transition hover:border-red-400 hover:text-red-500"
+                aria-label="清除查询日期筛选"
+              >
+                ✕ 清除
+              </button>
+            </>
+          )}
+        </div>
+      </div>
 
       {/* 错误次数（可多选具体值）*/}
       {allErrorCounts.length > 0 && (
