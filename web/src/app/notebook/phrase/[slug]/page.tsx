@@ -39,6 +39,7 @@ import {
   type PhraseAIResult,
   upsertPhrase,
 } from "@/lib/notebook/local";
+import { useHideChinese } from "@/lib/ui/hide-chinese";
 
 interface FreshUsage {
   model: string;
@@ -272,6 +273,7 @@ function PhraseDetailInner() {
 
 /** Presentation-only card for the AI payload. */
 function PhraseAICard({ ai }: { ai: PhraseAIResult }) {
+  const hideChinese = useHideChinese();
   return (
     <section className="space-y-4 rounded-lg border border-[var(--accent)]/40 bg-[var(--accent-soft)]/40 p-4">
       <div className="flex flex-wrap items-center gap-2">
@@ -283,7 +285,7 @@ function PhraseAICard({ ai }: { ai: PhraseAIResult }) {
       </div>
 
       <div className="space-y-1">
-        <p className="text-lg font-medium">{ai.chn}</p>
+        {!hideChinese && <p className="text-lg font-medium">{ai.chn}</p>}
         <p className="text-sm text-[var(--fg-soft)]">{ai.def}</p>
       </div>
 
@@ -299,7 +301,7 @@ function PhraseAICard({ ai }: { ai: PhraseAIResult }) {
                   <p className="flex-1 text-sm">{ex.en}</p>
                   <SpeakButton text={ex.en} variant="us" />
                 </div>
-                {ex.cn && (
+                {ex.cn && !hideChinese && (
                   <p className="text-xs text-[var(--fg-soft)]">{ex.cn}</p>
                 )}
               </li>

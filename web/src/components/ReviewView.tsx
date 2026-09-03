@@ -48,6 +48,7 @@ import {
   type ReviewSessionRecord,
 } from "@/lib/wordbook/review-sessions";
 import SpeakButton from "@/components/SpeakButton";
+import { useHideChinese } from "@/lib/ui/hide-chinese";
 
 /**
  * sessionStorage key for the current review session. Persists phase / queue
@@ -1317,6 +1318,7 @@ function RecognizeCard({
   useAutoPlay(target);
   const senses = useGloss(target);
   const notes = useNotes(target);
+  const hideChinese = useHideChinese();
   // 一级自评：认识 / 忘了；二级自评：记对了 / 记错了（仅当一级 = 认识 时启用）。
   // 初始值从父传入（从 sessionStorage 恢复）。
   const [graded, setGradedRaw] = useState<"pass" | "fail" | null>(
@@ -1442,7 +1444,7 @@ function RecognizeCard({
                           {s.pos}
                         </span>
                       )}
-                      {s.chn && (
+                      {s.chn && !hideChinese && (
                         <span className="text-sm text-[var(--fg)]">
                           {s.chn}
                         </span>
@@ -1458,7 +1460,7 @@ function RecognizeCard({
                         <p className="text-sm italic leading-relaxed text-[var(--fg)]">
                           “{s.example.en}”
                         </p>
-                        {s.example.cn && (
+                        {s.example.cn && !hideChinese && (
                           <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
                             {s.example.cn}
                           </p>
@@ -1606,6 +1608,7 @@ function SpellCard({
   useAutoPlay(target);
   const senses = useGloss(target);
   const notes = useNotes(target);
+  const hideChinese = useHideChinese();
 
   const [draft, setDraftRaw] = useState(initialDraft ?? "");
   const [feedback, setFeedbackRaw] = useState<
@@ -1768,7 +1771,7 @@ function SpellCard({
             {senses?.[0]?.def && (
               <p className="text-xs text-[var(--fg)]">{senses[0].def}</p>
             )}
-            {senses?.[0]?.chn && (
+            {senses?.[0]?.chn && !hideChinese && (
               <p className="text-xs text-[var(--fg-soft)]">{senses[0].chn}</p>
             )}
           </div>
@@ -1778,7 +1781,7 @@ function SpellCard({
               <p className="text-xs italic leading-relaxed text-[var(--fg)]">
                 “{senses[0].example.en}”
               </p>
-              {senses[0].example.cn && (
+              {senses[0].example.cn && !hideChinese && (
                 <p className="text-[11px] leading-relaxed text-[var(--fg-soft)]">
                   {senses[0].example.cn}
                 </p>

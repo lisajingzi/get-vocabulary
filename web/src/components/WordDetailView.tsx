@@ -34,6 +34,7 @@ import SpeakButton from "@/components/SpeakButton";
 import { toast } from "@/components/Toast";
 import { lookup, type LookupResult } from "@/lib/dict";
 import type { DictPhrase } from "@/lib/types";
+import { useHideChinese } from "@/lib/ui/hide-chinese";
 import {
   backfillCoreExample,
   getEntry,
@@ -63,6 +64,7 @@ type State =
 
 export default function WordDetailView({ slug, from }: Props) {
   const router = useRouter();
+  const hideChinese = useHideChinese();
   const [state, setState] = useState<State>({ kind: "loading" });
   const [bookEntry, setBookEntry] = useState<WordbookEntry | null>(null);
   // “第一次查这个词、还没选过复习方式”的强制弹窗。true = 需要弹出，用户
@@ -478,7 +480,11 @@ export default function WordDetailView({ slug, from }: Props) {
   // Tiny lead-in shown on the canonical block so the user understands why
   // the senses below are listed under a different headword.
   const firstPos = entry.senses[0]?.pos;
-  const firstChn = entry.senses[0]?.chn;
+  // When "hide Chinese" is on, fall back to the English definition for
+  // the redirect summary line — otherwise the lead-in for an alias like
+  // "arousal → arouse" would leak the Chinese gloss the user asked us to
+  // blank out.
+  const firstChn = hideChinese ? undefined : entry.senses[0]?.chn;
   const firstDef = entry.senses[0]?.def;
   const lemmaSummary = firstChn || firstDef || "";
 
@@ -637,7 +643,7 @@ defaultExample={pickDefaultCoreExample(entry.senses)}
                     {sense.def && (
                       <p className="text-sm leading-relaxed">{sense.def}</p>
                     )}
-                    {sense.chn && (
+                    {!hideChinese && sense.chn && (
                       <p className="text-sm leading-relaxed text-[var(--fg-soft)]">
                         {sense.chn}
                       </p>
@@ -662,7 +668,7 @@ defaultExample={pickDefaultCoreExample(entry.senses)}
                               </p>
                               <SpeakButton text={ex.en} variant="us" />
                             </div>
-                            {ex.cn && (
+                            {!hideChinese && ex.cn && (
                               <p className="text-xs text-[var(--fg-soft)]">
                                 {ex.cn}
                               </p>
@@ -964,6 +970,7 @@ const DEFAULT_VISIBLE = 6;
 
 function PhrasesSection({ phrases }: { phrases: DictPhrase[] }) {
   const [expanded, setExpanded] = useState(false);
+  const hideChinese = useHideChinese();
   const hasMore = phrases.length > DEFAULT_VISIBLE;
   const visible = expanded ? phrases : phrases.slice(0, DEFAULT_VISIBLE);
 
@@ -985,7 +992,7 @@ function PhrasesSection({ phrases }: { phrases: DictPhrase[] }) {
                   <p className="flex-1 text-sm">{p.example.en}</p>
                   <SpeakButton text={p.example.en} variant="us" />
                 </div>
-                {p.example.cn && (
+                {p.example.cn && !hideChinese && (
                   <p className="text-xs text-[var(--fg-soft)]">
                     {p.example.cn}
                   </p>

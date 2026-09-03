@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import SearchBox from "@/components/SearchBox";
+import HideChineseToggle from "@/components/HideChineseToggle";
 import ToastHost from "@/components/Toast";
 import SyncProvider from "@/components/SyncProvider";
 import "./globals.css";
@@ -53,6 +54,11 @@ export default function RootLayout({
             <div className="min-w-0 flex-1">
               <SearchBox size="sm" />
             </div>
+            {/* 🙈 toggle — sits right next to the search box (which is
+                intentionally kept slightly shorter so this pill fits
+                without wrapping) and blanks out every Chinese gloss /
+                translation across the app when active. */}
+            <HideChineseToggle />
             <nav className="shrink-0 text-sm">
               <Link
                 href="/wordbook"

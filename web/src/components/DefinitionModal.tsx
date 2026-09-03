@@ -26,6 +26,7 @@ import { useEffect, useState } from "react";
 import SpeakButton from "@/components/SpeakButton";
 import { lookup } from "@/lib/dict";
 import type { DictSense } from "@/lib/types";
+import { useHideChinese } from "@/lib/ui/hide-chinese";
 
 interface Props {
   /** Which lemma to show. `null` → modal is closed. */
@@ -43,6 +44,7 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
   const [state, setState] = useState<DisplayState | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [busy, setBusy] = useState(false);
+  const hideChinese = useHideChinese();
 
   // Load whenever the target lemma changes. `lookup()` is async (it may need
   // to fetch a shard from /dict on first hit) but subsequent opens for the
@@ -177,7 +179,7 @@ export default function DefinitionModal({ lemma, onClose }: Props) {
                           </p>
                           <SpeakButton text={ex.en} variant="us" />
                         </div>
-                        {ex.cn && (
+                        {ex.cn && !hideChinese && (
                           <p className="mt-1.5 text-[12px] leading-relaxed text-[var(--fg-soft)]">
                             {ex.cn}
                           </p>

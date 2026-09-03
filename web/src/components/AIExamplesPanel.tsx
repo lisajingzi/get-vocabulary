@@ -39,6 +39,7 @@ import {
   listKnownLemmasByRecency,
 } from "@/lib/wordbook/local";
 import type { DictSense } from "@/lib/types";
+import { useHideChinese } from "@/lib/ui/hide-chinese";
 
 interface Props {
   lemma: string;
@@ -56,6 +57,7 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
   const [busy, setBusy] = useState(false);
   const [attempts, setAttempts] = useState<AIAttempt[]>([]);
   const [fresh, setFresh] = useState<FreshUsage | null>(null);
+  const hideChinese = useHideChinese();
 
   const [knownLemmas, setKnownLemmas] = useState<string[]>(() =>
     typeof window === "undefined" ? [] : Array.from(getKnownLemmaSet()),
@@ -77,10 +79,13 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
       if (idx < 0) return "主要释义";
       const s = senses[idx];
       if (!s) return `释义 ${idx + 1}`;
-      const summary = (s.chn || s.def || "").slice(0, 18);
+      // When "hide Chinese" is on we fall back to the English def only so
+      // the dropdown summary doesn't leak the gloss.
+      const source = hideChinese ? s.def || "" : s.chn || s.def || "";
+      const summary = source.slice(0, 18);
       return summary ? `释义 ${idx + 1}·${summary}` : `释义 ${idx + 1}`;
     };
-  }, [senses]);
+  }, [senses, hideChinese]);
 
   const refresh = useCallback(async () => {
     setHistory(await listExamples(lemma, senseIndex));
@@ -191,7 +196,7 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
               <option value={-1}>主要释义</option>
               {senses.map((s, i) => (
                 <option key={i} value={i}>
-                  {`${i + 1}. ${(s.chn || s.def || "").slice(0, 24)}`}
+                  {`${i + 1}. ${(hideChinese ? s.def || "" : s.chn || s.def || "").slice(0, 24)}`}
                 </option>
               ))}
             </select>
@@ -237,7 +242,7 @@ export default function AIExamplesPanel({ lemma, senses }: Props) {
                 </p>
                 <SpeakButton text={ex.en} variant="us" />
               </div>
-              {ex.cn && (
+              {ex.cn && !hideChinese && (
                 <p className="text-xs text-[var(--fg-soft)]">{ex.cn}</p>
               )}
               <div className="flex items-center justify-between text-[11px] text-[var(--fg-soft)]">

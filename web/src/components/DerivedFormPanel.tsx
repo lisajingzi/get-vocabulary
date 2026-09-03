@@ -37,6 +37,7 @@ import {
   type AIAttempt,
 } from "@/components/AIStatus";
 import type { DictSense } from "@/lib/types";
+import { useHideChinese } from "@/lib/ui/hide-chinese";
 
 interface DerivedExample {
   en: string;
@@ -114,6 +115,7 @@ export default function DerivedFormPanel({ derived, base, baseSense, onResolved 
   const [busy, setBusy] = useState(false);
   const [attempts, setAttempts] = useState<AIAttempt[]>([]);
   const [fresh, setFresh] = useState<FreshUsage | null>(null);
+  const hideChinese = useHideChinese();
 
   // Keep the latest onResolved without retriggering effects when the parent
   // hands us a fresh function reference each render.
@@ -269,7 +271,7 @@ export default function DerivedFormPanel({ derived, base, baseSense, onResolved 
           </div>
 
           <p className="text-sm leading-relaxed">{info.def}</p>
-          {info.chn && (
+          {info.chn && !hideChinese && (
             <p className="text-sm leading-relaxed text-[var(--fg-soft)]">
               {info.chn}
             </p>
@@ -283,7 +285,7 @@ export default function DerivedFormPanel({ derived, base, baseSense, onResolved 
                     <p className="flex-1 text-sm">{ex.en}</p>
                     <SpeakButton text={ex.en} variant="us" />
                   </div>
-                  {ex.cn && (
+                  {ex.cn && !hideChinese && (
                     <p className="text-xs text-[var(--fg-soft)]">{ex.cn}</p>
                   )}
                 </li>
