@@ -259,39 +259,17 @@ function WrongbookPageInner() {
         </div>
 
         {/* 重温错词 —— 主要行动。
-            未完成会话（wrongResume）优先继续，忽略当前 group 筛选；
-            否则若用户选了具体组则把 group 参数带给 /review，让
-            ReviewView 只取该组的错词进入 mode-picker。 */}
-        <div>
-          <Link
-            href={
-              wrongResume
-                ? "/review?mode=wrongbook"
-                : group !== "all"
-                  ? `/review?mode=wrongbook&group=${encodeURIComponent(group)}`
-                  : "/review?mode=wrongbook"
-            }
-            className={[
-              "inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold transition",
-              visible.length > 0 || wrongResume
-                ? "bg-[var(--accent)] text-white shadow-[0_6px_14px_rgba(106,167,195,0.35)] hover:brightness-105"
-                : "cursor-not-allowed border border-[var(--border)] bg-white/70 opacity-55",
-            ].join(" ")}
-            aria-disabled={visible.length === 0 && !wrongResume}
-            onClick={(e) => {
-              if (visible.length === 0 && !wrongResume) e.preventDefault();
-            }}
-          >
-            {wrongResume
-              ? `继续重温（剩 ${Math.max(
-                  0,
-                  wrongResume.queue.length - wrongResume.cursor,
-                )} / ${wrongResume.queue.length}）`
-              : group !== "all"
-                ? `重温本组错词（${visible.length}）`
-                : "重温错词"}
-          </Link>
-        </div>
+            · 无未完成会话：按钮直接跳 /review?mode=wrongbook（可带当前 group 参数）。
+            · 有未完成会话：按钮展开一个内嵌面板，让用户在"继续上次进度"
+              和"选择其他组重新开始重温"之间自由切换——类似打卡时的组选择。
+            为什么用内嵌面板而非 Modal：错词本页面视觉轻量，弹窗会打断节奏；
+            也方便一眼看到所有组名和错词数量。 */}
+        <ReviewLauncher
+          totalVisible={visible.length}
+          currentGroup={group}
+          groupEntries={entries}
+          wrongResume={wrongResume}
+        />
 
         {/* Filters */}
         <div className="flex flex-wrap items-center gap-3 text-xs">
@@ -530,6 +508,166 @@ function WrongbookPageInner() {
       )}
 
       <DefinitionModal lemma={defLemma} onClose={() => setDefLemma(null)} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ReviewLauncher —— "重温错词"入口
+//
+// 无未完成会话时：一个直达按钮，逻辑与旧版一致（可携带当前 group）。
+// 有未完成会话时：按钮变成"展开面板"的开关，面板里两块内容：
+//   1. 顶部一个"继续上次进度"大按钮（显示剩 N/M）
+//   2. 一个横向排列的组名列表，点任意一个都会带 fresh=1 强制新开一轮
+// 这种"就地展开"的做法避免了 Modal 打断心流，也让所有组名一屏可见。
+// ---------------------------------------------------------------------------
+
+function ReviewLauncher({
+  totalVisible,
+  currentGroup,
+  groupEntries,
+  wrongResume,
+}: {
+  totalVisible: number;
+  currentGroup: GroupFilter;
+  groupEntries: WordbookEntry[];
+  wrongResume: ReviewSessionRecord | null;
+}) {
+  const [open, setOpen] = useState(false);
+
+  // 面板内的组选项：从错词本内的雅思词收集，按错词数量降序 + 字典序排列，
+  // 让"错得多的组"排在前面（这与页面默认排序一致的心智模型）。
+  const groupOptions = useMemo(() => {
+    const bucket = new Map<string, number>();
+    let orphanCount = 0;
+    for (const e of groupEntries) {
+      if (!e.ielts) continue;
+      const g = (e.group ?? "").trim();
+      if (g) bucket.set(g, (bucket.get(g) ?? 0) + 1);
+      else orphanCount += 1;
+    }
+    const list = Array.from(bucket.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => {
+        if (a.count !== b.count) return b.count - a.count;
+        return a.name.localeCompare(b.name, "zh-Hans-CN");
+      });
+    if (orphanCount > 0) list.push({ name: "__none__", count: orphanCount });
+    return list;
+  }, [groupEntries]);
+
+  // 无未完成会话：保留旧的一键跳转行为——点了就走，不弹面板。
+  if (!wrongResume) {
+    const href =
+      currentGroup !== "all"
+        ? `/review?mode=wrongbook&group=${encodeURIComponent(currentGroup)}`
+        : "/review?mode=wrongbook";
+    const disabled = totalVisible === 0;
+    return (
+      <div>
+        <Link
+          href={href}
+          className={[
+            "inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold transition",
+            !disabled
+              ? "bg-[var(--accent)] text-white shadow-[0_6px_14px_rgba(106,167,195,0.35)] hover:brightness-105"
+              : "cursor-not-allowed border border-[var(--border)] bg-white/70 opacity-55",
+          ].join(" ")}
+          aria-disabled={disabled}
+          onClick={(e) => {
+            if (disabled) e.preventDefault();
+          }}
+        >
+          {currentGroup !== "all"
+            ? `重温本组错词（${totalVisible}）`
+            : "重温错词"}
+        </Link>
+      </div>
+    );
+  }
+
+  // 有未完成会话：按钮先展开面板，让用户在"继续"和"换一组重新开始"之间选。
+  const remaining = Math.max(
+    0,
+    wrongResume.queue.length - wrongResume.cursor,
+  );
+  return (
+    <div className="space-y-3">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-4 py-1.5 text-sm font-semibold text-white shadow-[0_6px_14px_rgba(106,167,195,0.35)] transition hover:brightness-105"
+      >
+        重温错词
+        <span
+          aria-hidden
+          className={[
+            "inline-block text-xs transition-transform",
+            open ? "rotate-180" : "",
+          ].join(" ")}
+        >
+          ▾
+        </span>
+      </button>
+
+      {open && (
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--bg-soft)]/50 p-3 space-y-3">
+          {/* 继续上次会话 */}
+          <div>
+            <p className="mb-1.5 text-[11px] uppercase tracking-wide text-[var(--fg-soft)]">
+              上次未完成
+            </p>
+            <Link
+              href="/review?mode=wrongbook"
+              className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)] px-3.5 py-1.5 text-sm font-semibold text-white shadow-[0_4px_10px_rgba(106,167,195,0.3)] transition hover:brightness-105"
+            >
+              继续重温（剩 {remaining} / {wrongResume.queue.length}）
+            </Link>
+          </div>
+
+          {/* 选择其他组重新开始 */}
+          <div>
+            <p className="mb-1.5 text-[11px] uppercase tracking-wide text-[var(--fg-soft)]">
+              或选择其他组重新开始
+              <span className="ml-1 normal-case tracking-normal text-[var(--fg-soft)]/80">
+                （会覆盖上次的进度）
+              </span>
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {/* 全部错词——不带 group 参数 */}
+              <Link
+                href="/review?mode=wrongbook&fresh=1"
+                className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-white/70 px-3 py-1 text-xs text-[var(--fg)] transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+              >
+                全部错词
+                <span className="text-[10px] text-[var(--fg-soft)]">
+                  {totalVisible}
+                </span>
+              </Link>
+              {groupOptions.map(({ name, count }) => (
+                <Link
+                  key={name}
+                  href={`/review?mode=wrongbook&group=${encodeURIComponent(
+                    name,
+                  )}&fresh=1`}
+                  className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] bg-white/70 px-3 py-1 text-xs text-[var(--fg)] transition hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                >
+                  {name === "__none__" ? "其他（无组）" : name}
+                  <span className="text-[10px] text-[var(--fg-soft)]">
+                    {count}
+                  </span>
+                </Link>
+              ))}
+            </div>
+            {groupOptions.length === 0 && (
+              <p className="text-xs text-[var(--fg-soft)]">
+                当前错词本里还没有雅思分组词。
+              </p>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

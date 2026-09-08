@@ -191,6 +191,13 @@ export default function ReviewView() {
     if (!raw || raw === "all") return null;
     return raw;
   }, [searchParams]);
+  // ?fresh=1：用户在 /wrongbook 明确选择了"换一组重温"，强制丢弃任何未完成的
+  // 错词会话，直接按 wrongGroup 筛选进入 mode-picker。不加这个参数时保持原有
+  // "自动恢复上次进度"的行为。
+  const wrongFresh = useMemo(() => {
+    const raw = (searchParams?.get("fresh") ?? "").trim();
+    return raw === "1" || raw === "true";
+  }, [searchParams]);
 
   const [phase, setPhase] = useState<Phase>({ kind: "picker" });
 
@@ -272,6 +279,24 @@ export default function ReviewView() {
   // 若无，则按原逻辑抓当前所有 inWrongBook=true 的词进入方式选择。
   useEffect(() => {
     if (!wrongBookMode) return;
+    // 用户明确点了"换一组重温"（?fresh=1）：主动清掉旧的错词会话记录 +
+    // sessionStorage 的 hydrate 结果，然后按 wrongGroup 筛选直接进入
+    // mode-picker，不走恢复逻辑。
+    if (wrongFresh) {
+      const existing = findWrongBookSession();
+      if (existing) removeSessionRecord(existing.id);
+      const s = readSession();
+      if (s && s.phase === "review" && s.fromWrongBook) writeSession(null);
+      const wrong = listEntries().filter((e) => {
+        if (e.inWrongBook !== true) return false;
+        if (!wrongGroup) return true;
+        const g = (e.group ?? "").trim();
+        if (wrongGroup === "__none__") return e.ielts === true && !g;
+        return e.ielts === true && g === wrongGroup;
+      });
+      setPhase({ kind: "mode-picker", entries: wrong });
+      return;
+    }
     // If hydrate above already restored a wrong-book review from
     // sessionStorage, don't overwrite it — the user is mid-card.
     if (hydratedRef.current) {
@@ -320,7 +345,7 @@ export default function ReviewView() {
       return e.ielts === true && g === wrongGroup;
     });
     setPhase({ kind: "mode-picker", entries: wrong });
-  }, [wrongBookMode, wrongGroup]);
+  }, [wrongBookMode, wrongGroup, wrongFresh]);
 
   const advance = useCallback(
     (result: "pass" | "fail") => {
