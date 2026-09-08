@@ -10,6 +10,7 @@
  */
 
 import Image from "next/image";
+import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -196,11 +197,13 @@ function WordbookPageInner() {
   const counts = useMemo(() => {
     let n = 0;
     let o = 0;
+    let w = 0;
     for (const e of entries) {
       if (e.status === "new") n += 1;
       else if (e.status === "old") o += 1;
+      if (e.inWrongBook === true) w += 1;
     }
-    return { new: n, old: o };
+    return { new: n, old: o, wrong: w };
   }, [entries]);
 
   const visible = useMemo(() => {
@@ -364,9 +367,32 @@ function WordbookPageInner() {
             </button>
             <h1 className="text-xl font-semibold tracking-tight">单词本</h1>
           </div>
-          <span className="text-xs text-[var(--fg-soft)]">
-            共 <span className="font-medium text-[var(--fg)]">{visible.length}</span> 个
-          </span>
+          <div className="flex items-center gap-3">
+            {/* 错词本入口 —— 从顶部导航挪到这里，方便"复习完当前列表 → 顺手
+                看错词"的连贯流程。带一个红色错词计数徽标，未错时用弱化态
+                提示"暂无错词"。 */}
+            <Link
+              href="/wrongbook"
+              title="打开错词本"
+              className={[
+                "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition",
+                counts.wrong > 0
+                  ? "border-red-500/40 bg-red-500/10 text-red-500 hover:bg-red-500/15"
+                  : "border-[var(--border)] text-[var(--fg-soft)] hover:text-[var(--fg)] hover:border-[var(--fg-soft)]",
+              ].join(" ")}
+            >
+              <span aria-hidden>📕</span>
+              <span>错词本</span>
+              {counts.wrong > 0 && (
+                <span className="rounded-full bg-red-500/20 px-1.5 py-0.5 text-[10px] font-semibold leading-none">
+                  {counts.wrong}
+                </span>
+              )}
+            </Link>
+            <span className="text-xs text-[var(--fg-soft)]">
+              共 <span className="font-medium text-[var(--fg)]">{visible.length}</span> 个
+            </span>
+          </div>
         </div>
 
         {/* Tabs */}

@@ -181,6 +181,16 @@ export default function ReviewView() {
     () => isWrongBookMode(searchParams?.get("mode") ?? null),
     [searchParams],
   );
+  // 错词本重温可选按雅思组过滤：/review?mode=wrongbook&group=<name>。
+  // - 未指定 / 空 / "all" → 全部错词
+  // - "__none__"          → 雅思里未归组的散词
+  // - 其他字符串           → 精确匹配 entry.group
+  // 仅在没有可恢复的未完成错词会话时生效（恢复会话时以原会话为准，避免歧义）。
+  const wrongGroup = useMemo(() => {
+    const raw = (searchParams?.get("group") ?? "").trim();
+    if (!raw || raw === "all") return null;
+    return raw;
+  }, [searchParams]);
 
   const [phase, setPhase] = useState<Phase>({ kind: "picker" });
 
@@ -301,9 +311,16 @@ export default function ReviewView() {
         return;
       }
     }
-    const wrong = listEntries().filter((e) => e.inWrongBook === true);
+    const wrong = listEntries().filter((e) => {
+      if (e.inWrongBook !== true) return false;
+      if (!wrongGroup) return true;
+      const g = (e.group ?? "").trim();
+      if (wrongGroup === "__none__") return e.ielts === true && !g;
+      // 指定具体组名：隐含只看雅思（组名本就只对雅思词有意义）。
+      return e.ielts === true && g === wrongGroup;
+    });
     setPhase({ kind: "mode-picker", entries: wrong });
-  }, [wrongBookMode]);
+  }, [wrongBookMode, wrongGroup]);
 
   const advance = useCallback(
     (result: "pass" | "fail") => {

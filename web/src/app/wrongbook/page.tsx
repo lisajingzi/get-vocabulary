@@ -36,6 +36,9 @@ import {
 type SortKey = "error" | "recent" | "count" | "alpha";
 type PurposeFilter = "all" | WordbookPurpose;
 type IeltsFilter = "all" | "ielts" | "nonielts";
+/** "all" = 不按雅思组名筛；具体字符串代表一个已存在的雅思导入组名。
+ *  与 /wordbook 保持一致："__none__" 表示雅思里未归组的散词。 */
+type GroupFilter = "all" | string;
 
 const SORT_OPTIONS: Array<{ value: SortKey; label: string }> = [
   { value: "error", label: "错误次数" },
@@ -51,6 +54,10 @@ function parsePurpose(v: string | null | undefined): PurposeFilter {
 }
 function parseIelts(v: string | null | undefined): IeltsFilter {
   return v === "ielts" || v === "nonielts" ? v : "all";
+}
+function parseGroup(v: string | null | undefined): GroupFilter {
+  const s = (v ?? "").trim();
+  return s === "" ? "all" : s;
 }
 function parseSort(v: string | null | undefined): SortKey {
   return v === "recent" || v === "count" || v === "alpha" || v === "error"
@@ -77,6 +84,7 @@ function WrongbookPageInner() {
 
   const purpose = parsePurpose(searchParams?.get("purpose"));
   const ielts = parseIelts(searchParams?.get("ielts"));
+  const group = parseGroup(searchParams?.get("group"));
   const sortKey = parseSort(searchParams?.get("sort"));
   const page = parsePage(searchParams?.get("page"));
   const [defLemma, setDefLemma] = useState<string | null>(null);
@@ -102,9 +110,28 @@ function WrongbookPageInner() {
   const visible = useMemo(() => {
     const filtered = entries
       .filter((e) => matchPurpose(e.purpose, purpose))
-      .filter((e) => matchIelts(e.ielts, ielts));
+      .filter((e) => matchIelts(e.ielts, ielts))
+      .filter((e) => matchGroup(e, group));
     return [...filtered].sort(buildComparator(sortKey));
-  }, [entries, purpose, ielts, sortKey]);
+  }, [entries, purpose, ielts, group, sortKey]);
+
+  // 雅思导入组名取自错词本内的实际数据（去重 + 字典序）；空则不展示下拉。
+  // 与 /wordbook 一致：手动查询后勾选"雅思"但未指定组的散词归到 "__none__"。
+  const groupOptions = useMemo(() => {
+    const names = new Set<string>();
+    let hasOrphan = false;
+    for (const e of entries) {
+      if (!e.ielts) continue;
+      const g = (e.group ?? "").trim();
+      if (g) names.add(g);
+      else hasOrphan = true;
+    }
+    const sorted = Array.from(names).sort((a, b) =>
+      a.localeCompare(b, "zh-Hans-CN"),
+    );
+    if (hasOrphan) sorted.push("__none__");
+    return sorted;
+  }, [entries]);
 
   const totalPages = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
   const safePage = Math.min(page, totalPages);
@@ -151,7 +178,27 @@ function WrongbookPageInner() {
     setParams({ purpose: next === "all" ? null : next }, { resetPage: true });
   }
   function setIeltsFilter(next: IeltsFilter) {
-    setParams({ ielts: next === "all" ? null : next }, { resetPage: true });
+    // 切换雅思筛选时组名筛选失效，直接清掉 group 参数，避免
+    // "筛了组但一条没"的困惑现象。
+    setParams(
+      { ielts: next === "all" ? null : next, group: null },
+      { resetPage: true },
+    );
+  }
+  function setGroupFilter(next: GroupFilter) {
+    // 选了具体组名隐含"只看雅思"；切回 all 保留当前 ielts 的选择。
+    if (next === "all") {
+      setParams({ group: null }, { resetPage: true });
+    } else {
+      setParams(
+        {
+          group: next,
+          ielts:
+            ielts === "nonielts" ? "ielts" : ielts === "all" ? "ielts" : ielts,
+        },
+        { resetPage: true },
+      );
+    }
   }
   function setSortKey(next: SortKey) {
     setParams({ sort: next === "error" ? null : next }, { resetPage: true });
@@ -211,19 +258,28 @@ function WrongbookPageInner() {
           </span>
         </div>
 
-        {/* 重温错词 —— 主要行动 */}
+        {/* 重温错词 —— 主要行动。
+            未完成会话（wrongResume）优先继续，忽略当前 group 筛选；
+            否则若用户选了具体组则把 group 参数带给 /review，让
+            ReviewView 只取该组的错词进入 mode-picker。 */}
         <div>
           <Link
-            href="/review?mode=wrongbook"
+            href={
+              wrongResume
+                ? "/review?mode=wrongbook"
+                : group !== "all"
+                  ? `/review?mode=wrongbook&group=${encodeURIComponent(group)}`
+                  : "/review?mode=wrongbook"
+            }
             className={[
               "inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold transition",
-              entries.length > 0
+              visible.length > 0 || wrongResume
                 ? "bg-[var(--accent)] text-white shadow-[0_6px_14px_rgba(106,167,195,0.35)] hover:brightness-105"
                 : "cursor-not-allowed border border-[var(--border)] bg-white/70 opacity-55",
             ].join(" ")}
-            aria-disabled={entries.length === 0}
+            aria-disabled={visible.length === 0 && !wrongResume}
             onClick={(e) => {
-              if (entries.length === 0) e.preventDefault();
+              if (visible.length === 0 && !wrongResume) e.preventDefault();
             }}
           >
             {wrongResume
@@ -231,7 +287,9 @@ function WrongbookPageInner() {
                   0,
                   wrongResume.queue.length - wrongResume.cursor,
                 )} / ${wrongResume.queue.length}）`
-              : "重温错词"}
+              : group !== "all"
+                ? `重温本组错词（${visible.length}）`
+                : "重温错词"}
           </Link>
         </div>
 
@@ -301,6 +359,26 @@ function WrongbookPageInner() {
               );
             })}
           </div>
+          {/* 雅思词组下拉——仅当错词本里含雅思组词时才展示。选中具体组名会
+              隐含"只看雅思"（setGroupFilter 里已处理），并让"重温错词"按钮
+              带上 group 参数，只重温该组的错词。 */}
+          {groupOptions.length > 0 && (
+            <label className="inline-flex items-center gap-1.5 text-[var(--fg-soft)]">
+              雅思词组
+              <select
+                value={group}
+                onChange={(e) => setGroupFilter(e.target.value)}
+                className="rounded-md border border-[var(--border)] bg-transparent px-2 py-1 text-[var(--fg)] outline-none"
+              >
+                <option value="all">全部组</option>
+                {groupOptions.map((g) => (
+                  <option key={g} value={g}>
+                    {g === "__none__" ? "其他（无组）" : g}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
           <label className="inline-flex items-center gap-1.5 text-[var(--fg-soft)]">
             排序
             <select
@@ -481,6 +559,20 @@ function matchIelts(stored: boolean | undefined, want: IeltsFilter): boolean {
   if (want === "all") return true;
   const isIelts = stored === true;
   return want === "ielts" ? isIelts : !isIelts;
+}
+
+/**
+ * 雅思词组名匹配，与 /wordbook 保持一致：
+ *   - want = "all"        → 不筛
+ *   - want = "__none__"   → 雅思里未归组的散词
+ *   - 其他字符串           → 按组名精确匹配
+ * 非雅思词天然没 group，会被过滤掉——与"选组隐含只看雅思"预期一致。
+ */
+function matchGroup(entry: WordbookEntry, want: GroupFilter): boolean {
+  if (want === "all") return true;
+  const g = (entry.group ?? "").trim();
+  if (want === "__none__") return !g;
+  return g === want;
 }
 
 function buildComparator(key: SortKey) {
