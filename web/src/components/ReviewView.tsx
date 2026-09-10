@@ -1414,7 +1414,10 @@ function useGloss(target: string): Gloss[] | null {
           rest.push(s);
         }
       }
-      const picked = [...primary, ...rest].slice(0, 2);
+      // 按 POS 去重优先排序，至少展示前 3 个；剩余的仍保留（UI 通过
+      // 限高 + 滚动来承接超出的部分）。老逻辑只取 2 个，改动后允许更
+      // 完整地看到多义词的义项。
+      const picked = [...primary, ...rest];
       setSenses(
         picked.map((s) => ({
           pos: s.pos,
@@ -1488,7 +1491,10 @@ function RecognizeCard({
 
   return (
     <section className="space-y-4">
-      {/* 头部 — 词形与核心例句。 */}
+      {/* 头部 — 词形。原本这里会展示 coreExample（核心例句），但复习卡
+          片上"提前露例句"容易让用户读到目标词的语境线索，反而干扰自评，
+          因此打卡（识词）和错词重温均已去掉。例句仍会在下方释义区按义项
+          出现。 */}
       <div className="space-y-2 rounded-xl border border-[var(--border)] bg-[var(--card)] p-4">
         <div className="flex flex-wrap items-baseline gap-2">
           <Link
@@ -1500,16 +1506,6 @@ function RecognizeCard({
           </Link>
           <SpeakButton text={target} variant="us" />
         </div>
-        {/* 核心短语 / 例句 — 字号相比之前大一些（text-sm），目标单词加“点点下划线”以快速定位。
-            只展英文部分（stripChinese），不暴露中文释义。 */}
-        {entry.coreExample && (
-          <p className="text-sm leading-relaxed text-[var(--fg)]/80">
-            <CoreExampleText
-              text={stripChinese(entry.coreExample)}
-              target={target}
-            />
-          </p>
-        )}
       </div>
 
       {/* 一级自评 */}
@@ -1551,7 +1547,7 @@ function RecognizeCard({
       {/* 释义 / 例句 / 笔记 — 一级自评后展示；拆成三个白底卡片，层次清晰。 */}
       {graded !== null && (
         <div className="space-y-3">
-          {/* 词义卡片（白底） */}
+          {/* 词义卡片（白底）——多义词允许展开更多义项，超出限高时可上下滑动。 */}
           <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-4">
             <h3 className="mb-2 text-sm font-medium uppercase tracking-wide text-[var(--accent)]">
               释义
@@ -1585,48 +1581,50 @@ function RecognizeCard({
                 </p>
               )
             ) : (
-              <ul className="space-y-3">
-                {senses.map((s, i) => (
-                  <li
-                    key={i}
-                    className={
-                      i > 0
-                        ? "space-y-1 border-t border-[var(--border)] pt-3"
-                        : "space-y-1"
-                    }
-                  >
-                    <div className="flex items-baseline gap-2">
-                      {s.pos && (
-                        <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
-                          {s.pos}
-                        </span>
-                      )}
-                      {s.chn && !hideChinese && (
-                        <span className="text-sm text-[var(--fg)]">
-                          {s.chn}
-                        </span>
-                      )}
-                    </div>
-                    {s.def && (
-                      <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
-                        {s.def}
-                      </p>
-                    )}
-                    {s.example && (
-                      <div className="mt-1 space-y-0.5 border-l-2 border-[var(--border)] pl-3">
-                        <p className="text-sm italic leading-relaxed text-[var(--fg)]">
-                          “{s.example.en}”
-                        </p>
-                        {s.example.cn && !hideChinese && (
-                          <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
-                            {s.example.cn}
-                          </p>
+              <div className="max-h-[22rem] overflow-y-auto pr-1">
+                <ul className="space-y-3">
+                  {senses.map((s, i) => (
+                    <li
+                      key={i}
+                      className={
+                        i > 0
+                          ? "space-y-1 border-t border-[var(--border)] pt-3"
+                          : "space-y-1"
+                      }
+                    >
+                      <div className="flex items-baseline gap-2">
+                        {s.pos && (
+                          <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
+                            {s.pos}
+                          </span>
+                        )}
+                        {s.chn && !hideChinese && (
+                          <span className="text-sm text-[var(--fg)]">
+                            {s.chn}
+                          </span>
                         )}
                       </div>
-                    )}
-                  </li>
-                ))}
-              </ul>
+                      {s.def && (
+                        <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
+                          {s.def}
+                        </p>
+                      )}
+                      {s.example && (
+                        <div className="mt-1 space-y-0.5 border-l-2 border-[var(--border)] pl-3">
+                          <p className="text-sm italic leading-relaxed text-[var(--fg)]">
+                            “{s.example.en}”
+                          </p>
+                          {s.example.cn && !hideChinese && (
+                            <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
+                              {s.example.cn}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </div>
 
@@ -1702,45 +1700,6 @@ function RecognizeCard({
       )}
     </section>
   );
-}
-
-/**
- * <CoreExampleText /> — renders a sentence with the target word underlined
- * with a dotted line so the user can spot it quickly in the example.
- *
- * Case-insensitive whole-word match. If the target appears multiple times,
- * only the first hit is underlined — keeps the visual focused. If the
- * target isn't found (which happens for phrase-collocations that don't
- * literally include the lemma), we render the sentence unchanged.
- */
-function CoreExampleText({
-  text,
-  target,
-}: {
-  text: string;
-  target: string;
-}) {
-  const idx = text.toLowerCase().indexOf(target.toLowerCase());
-  if (idx < 0) return <>{text}</>;
-  return (
-    <>
-      {text.slice(0, idx)}
-      <span className="underline decoration-dotted decoration-2 decoration-[var(--accent)] underline-offset-4">
-        {text.slice(idx, idx + target.length)}
-      </span>
-      {text.slice(idx + target.length)}
-    </>
-  );
-}
-/** 从 "en — cn" 或 "en-cn" 类混合字符串里剥掉中文部分，只留英文。 */
-function stripChinese(s: string): string {
-  // 优先切 " — "、"—"、" - "，取第一个 chunk。
-  for (const sep of [" — ", "—", " – ", "–", " - "]) {
-    const idx = s.indexOf(sep);
-    if (idx > 0) return s.slice(0, idx).trim();
-  }
-  // 否则删掉所有 CJK 字符。
-  return s.replace(/[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/g, "").trim();
 }
 
 // ===========================================================================
@@ -1921,30 +1880,55 @@ function SpellCard({
           <div className="space-y-0.5">
             <div className="flex items-baseline gap-2">
               <span className="text-base font-semibold">{target}</span>
-              {senses?.[0]?.pos && (
-                <span className="text-[10px] text-[var(--fg-soft)]">
-                  ({senses[0].pos})
-                </span>
-              )}
             </div>
-            {senses?.[0]?.def && (
-              <p className="text-xs text-[var(--fg)]">{senses[0].def}</p>
-            )}
-            {senses?.[0]?.chn && !hideChinese && (
-              <p className="text-xs text-[var(--fg-soft)]">{senses[0].chn}</p>
-            )}
           </div>
 
-          {senses?.[0]?.example && (
-            <div className="space-y-0.5 rounded-md border border-[var(--border)]/60 bg-[var(--bg)] px-2 py-1.5">
-              <p className="text-xs italic leading-relaxed text-[var(--fg)]">
-                “{senses[0].example.en}”
-              </p>
-              {senses[0].example.cn && !hideChinese && (
-                <p className="text-[11px] leading-relaxed text-[var(--fg-soft)]">
-                  {senses[0].example.cn}
-                </p>
-              )}
+          {/* 揭示后的释义列表 — 与识词模式保持一致：至少铺开前 3 个义项，
+              超出限高时可上下滑动，义项自带的例句仍随义项展示。 */}
+          {senses && senses.length > 0 && (
+            <div className="max-h-72 overflow-y-auto pr-1">
+              <ul className="space-y-2">
+                {senses.map((s, i) => (
+                  <li
+                    key={i}
+                    className={
+                      i > 0
+                        ? "space-y-1 border-t border-[var(--border)]/60 pt-2"
+                        : "space-y-1"
+                    }
+                  >
+                    <div className="flex items-baseline gap-2">
+                      {s.pos && (
+                        <span className="rounded bg-[var(--bg-soft)] px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-[var(--fg-soft)]">
+                          {s.pos}
+                        </span>
+                      )}
+                      {s.chn && !hideChinese && (
+                        <span className="text-xs text-[var(--fg)]">
+                          {s.chn}
+                        </span>
+                      )}
+                    </div>
+                    {s.def && (
+                      <p className="text-xs leading-relaxed text-[var(--fg-soft)]">
+                        {s.def}
+                      </p>
+                    )}
+                    {s.example && (
+                      <div className="space-y-0.5 rounded-md border border-[var(--border)]/60 bg-[var(--bg)] px-2 py-1.5">
+                        <p className="text-xs italic leading-relaxed text-[var(--fg)]">
+                          “{s.example.en}”
+                        </p>
+                        {s.example.cn && !hideChinese && (
+                          <p className="text-[11px] leading-relaxed text-[var(--fg-soft)]">
+                            {s.example.cn}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </li>
+                ))}
+              </ul>
             </div>
           )}
 
