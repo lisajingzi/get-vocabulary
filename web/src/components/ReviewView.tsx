@@ -1559,16 +1559,31 @@ function RecognizeCard({
             {senses === null ? (
               <p className="text-xs text-[var(--fg-soft)]">加载释义中…</p>
             ) : senses.length === 0 ? (
-              <p className="text-xs text-[var(--fg-soft)]">
-                未找到详细释义，可
-                <Link
-                  href={`/word/${encodeURIComponent(target)}?from=review`}
-                  className="mx-1 text-[var(--accent)] hover:underline"
-                >
-                  进入详情页
-                </Link>
-                查看。
-              </p>
+              // 词典里查不到这个词 —— 用用户自己的笔记来充当释义。
+              // 若连笔记都没有，才回落到"进入详情页"提示。
+              notes.length > 0 ? (
+                <ul className="space-y-2">
+                  {notes.map((n, i) => (
+                    <li
+                      key={i}
+                      className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--fg)]"
+                    >
+                      {n.body}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-[var(--fg-soft)]">
+                  未找到详细释义，可
+                  <Link
+                    href={`/word/${encodeURIComponent(target)}?from=review`}
+                    className="mx-1 text-[var(--accent)] hover:underline"
+                  >
+                    进入详情页
+                  </Link>
+                  查看。
+                </p>
+              )
             ) : (
               <ul className="space-y-3">
                 {senses.map((s, i) => (
@@ -1615,8 +1630,10 @@ function RecognizeCard({
             )}
           </div>
 
-          {/* 笔记卡片（白底）——有笔记时才渲染，不占位。 */}
-          {notes.length > 0 && (
+          {/* 笔记卡片（白底）——有笔记时才渲染，不占位。
+              若该词不在词典里（senses.length === 0），笔记已作为上方
+              "释义"卡片的内容展示，这里就不再重复。 */}
+          {notes.length > 0 && !(senses !== null && senses.length === 0) && (
             <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-4">
               <h3 className="mb-2 text-sm font-medium uppercase tracking-wide text-[var(--accent)]">
                 我的笔记
