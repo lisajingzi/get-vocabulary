@@ -577,10 +577,16 @@ function WordbookPageInner() {
       )}
 
       {/* 自动连播工具栏——馈入当前可见页 paginated 的 lemma 列表。
-          翻页 / 换筛选造成列表变化时，AutoPlayer 会自动停止。 */}
+          翻页 / 换筛选造成列表变化时，AutoPlayer 会自动停止。
+          另外把每个词的英文例句一起喂进去，启用"仅例句 / 单词+例句"模式；
+          coreExample 可能是 "en — cn" 形式，这里用 stripChinese 去掉中文尾巴。 */}
       {visible.length > 0 && (
         <WordAutoPlayer
           words={paginated.map((e) => e.lemma)}
+          items={paginated.map((e) => ({
+            lemma: e.lemma,
+            example: stripChinese(e.coreExample ?? ""),
+          }))}
           onCurrentChange={setPlayingLemma}
         />
       )}

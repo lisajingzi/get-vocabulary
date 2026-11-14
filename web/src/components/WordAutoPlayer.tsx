@@ -5,19 +5,23 @@
  *
  * Purpose: on /wordbook, the user asked for a "just play everything on
  * this page" mode. This component owns:
+ *   - content selector (word / example / both)  → what to read per item
  *   - speed selector (0.8x / 1x / 1.2x / 1.4x)   → audio.playbackRate
  *   - gap selector (1s / 3s / 5s / 6s)           → setTimeout between words
  *   - play / pause (resume) / restart controls
  *
  * Strategy:
- *   - Try YouDao MP3 first (short single words → high hit rate).
- *   - On any error/load failure, fall back silently to /api/tts (Neural).
+ *   - Words → YouDao MP3 first, fall back to Neural on error.
+ *   - Examples (long sentences) → go straight to Neural (YouDao has no
+ *     recordings for arbitrary sentences).
+ *   - "both" mode: read word → short intra-gap → read example → full gap
+ *     → next item. If an item has no example, we just read the word.
  *   - When a word ends, wait `gap` ms then advance to the next.
  *   - Pause = clear the pending timeout + audio.pause(); resume picks up
  *     from the same cursor.
  *   - Restart = cursor back to 0 and immediately begin from the top.
  *
- * The parent tells us the *current visible page* of words. If that list
+ * The parent tells us the *current visible page* of items. If that list
  * changes (user flipped page, changed filter), we stop playing — trying
  * to reconcile an ongoing playback against a shifting queue is a rabbit
  * hole the user doesn't need.
@@ -26,9 +30,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCachedTTS, putCachedTTS } from "@/lib/tts/cache";
 
+/** What to read for each item during auto-play. */
+export type PlayContent = "word" | "example" | "both";
+
+interface PlayItem {
+  lemma: string;
+  /** English-only example sentence (already stripped of Chinese). Optional. */
+  example?: string;
+}
+
 interface Props {
-  /** Words on the current visible page (in list order). */
+  /** Words on the current visible page (in list order). Kept for backward
+   *  compatibility — if `items` isn't provided, we synthesize from this. */
   words: string[];
+  /** Optional per-item example sentences, aligned to `words`. When present,
+   *  enables the "仅例句" / "单词+例句" modes. */
+  items?: PlayItem[];
   /** Called with the currently-playing lemma so parent can highlight it.
    *  null = nothing playing. */
   onCurrentChange?: (lemma: string | null) => void;
@@ -38,9 +55,21 @@ type Phase = "idle" | "playing" | "paused";
 
 const SPEED_OPTIONS = [0.8, 1, 1.2, 1.4] as const;
 const GAP_OPTIONS_MS = [1000, 3000, 5000, 6000] as const;
+const CONTENT_OPTIONS: Array<{ value: PlayContent; label: string }> = [
+  { value: "word", label: "仅单词" },
+  { value: "example", label: "仅例句" },
+  { value: "both", label: "单词+例句" },
+];
+
+/** Small fixed pause between word and its example inside "both" mode —
+ *  short enough to feel like one unit, long enough to parse the word first. */
+const INTRA_PAIR_GAP_MS = 800;
 
 const YOUDAO_BASE = "https://dict.youdao.com/dictvoice";
 const NEURAL_VOICE_US = "en-US-JennyNeural";
+
+/** Persist the user's last content choice across sessions. */
+const LS_KEY_CONTENT = "wordbook:autoplay-content";
 
 function youdaoUrl(text: string): string {
   return `${YOUDAO_BASE}?audio=${encodeURIComponent(text)}&type=2`;
@@ -60,10 +89,33 @@ async function fetchNeuralMP3(text: string): Promise<ArrayBuffer | null> {
   }
 }
 
-export default function WordAutoPlayer({ words, onCurrentChange }: Props) {
+function parseContent(v: string | null | undefined): PlayContent {
+  return v === "example" || v === "both" ? v : "word";
+}
+
+export default function WordAutoPlayer({ words, items, onCurrentChange }: Props) {
   const [phase, setPhase] = useState<Phase>("idle");
   const [speed, setSpeed] = useState<number>(1);
   const [gapMs, setGapMs] = useState<number>(3000);
+  const [content, setContent] = useState<PlayContent>("word");
+
+  // Hydrate the saved content preference on mount.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      const saved = window.localStorage.getItem(LS_KEY_CONTENT);
+      const parsed = parseContent(saved);
+      if (parsed !== "word") setContent(parsed);
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Normalize to a single `items` array the rest of the component uses.
+  const normalizedItems: PlayItem[] = useMemo(() => {
+    if (items && items.length > 0) return items;
+    return words.map((w) => ({ lemma: w }));
+  }, [items, words]);
 
   // Refs so async callbacks always read the latest values without needing
   // to be re-created on every state change.
@@ -71,7 +123,8 @@ export default function WordAutoPlayer({ words, onCurrentChange }: Props) {
   const phaseRef = useRef<Phase>("idle");
   const speedRef = useRef(speed);
   const gapRef = useRef(gapMs);
-  const wordsRef = useRef(words);
+  const contentRef = useRef<PlayContent>(content);
+  const itemsRef = useRef<PlayItem[]>(normalizedItems);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const blobUrlRef = useRef<string | null>(null);
   const timerRef = useRef<number | null>(null);
@@ -86,15 +139,25 @@ export default function WordAutoPlayer({ words, onCurrentChange }: Props) {
   useEffect(() => {
     gapRef.current = gapMs;
   }, [gapMs]);
+  useEffect(() => {
+    contentRef.current = content;
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(LS_KEY_CONTENT, content);
+      } catch {
+        // ignore
+      }
+    }
+  }, [content]);
 
   // If the visible list changes (filter / page flip), stop playback so we
   // don't end up chasing a phantom cursor into the wrong list.
   useEffect(() => {
-    const prev = wordsRef.current;
+    const prev = itemsRef.current;
     const changed =
-      prev.length !== words.length ||
-      prev.some((w, i) => w !== words[i]);
-    wordsRef.current = words;
+      prev.length !== normalizedItems.length ||
+      prev.some((it, i) => it.lemma !== normalizedItems[i].lemma);
+    itemsRef.current = normalizedItems;
     if (changed && phaseRef.current !== "idle") {
       stopAll();
       setPhase("idle");
@@ -102,7 +165,7 @@ export default function WordAutoPlayer({ words, onCurrentChange }: Props) {
       onCurrentChange?.(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [words]);
+  }, [normalizedItems]);
 
   // Cleanup on unmount — kill audio + pending timers + blob URLs.
   useEffect(() => {
@@ -212,9 +275,58 @@ export default function WordAutoPlayer({ words, onCurrentChange }: Props) {
     [playUrl, playBlob],
   );
 
-  /** The core loop: play the current word, wait `gap`, advance. */
+  /** Play a sentence via Neural TTS directly (YouDao has no recordings
+   *  for arbitrary sentences). Uses the same cache so repeated playback
+   *  is instant. */
+  const speakSentence = useCallback(
+    async (sentence: string): Promise<void> => {
+      const text = sentence.trim();
+      if (!text) return;
+      // Try cache first.
+      const cached = await getCachedTTS(NEURAL_VOICE_US, text);
+      if (cached) {
+        try {
+          await playBlob(cached);
+          return;
+        } catch {
+          // fall through
+        }
+      }
+      // Fetch Neural.
+      const bytes = await fetchNeuralMP3(text);
+      if (bytes && bytes.byteLength > 0) {
+        void putCachedTTS(NEURAL_VOICE_US, text, bytes.slice(0));
+        try {
+          await playBlob(new Blob([bytes], { type: "audio/mpeg" }));
+        } catch {
+          // ignore
+        }
+      }
+      // Silent failure — keep the queue moving.
+    },
+    [playBlob],
+  );
+
+  /** Wait `ms` but bail early if phase flips away from "playing". The
+   *  returned promise resolves either when the timer fires or immediately
+   *  when playback is interrupted — step() re-checks phase after. */
+  const waitGap = useCallback((ms: number): Promise<void> => {
+    return new Promise((resolve) => {
+      if (phaseRef.current !== "playing") {
+        resolve();
+        return;
+      }
+      timerRef.current = window.setTimeout(() => {
+        timerRef.current = null;
+        resolve();
+      }, ms);
+    });
+  }, []);
+
+  /** The core loop: play the current item (word / example / both),
+   *  wait `gap`, advance. */
   const step = useCallback(async () => {
-    const list = wordsRef.current;
+    const list = itemsRef.current;
     if (phaseRef.current !== "playing") return;
     const i = cursorRef.current;
     if (i >= list.length) {
@@ -224,25 +336,47 @@ export default function WordAutoPlayer({ words, onCurrentChange }: Props) {
       onCurrentChange?.(null);
       return;
     }
-    const word = list[i];
-    onCurrentChange?.(word);
+    const item = list[i];
+    onCurrentChange?.(item.lemma);
+    const mode = contentRef.current;
+    const hasExample =
+      typeof item.example === "string" && item.example.trim().length > 0;
+
     try {
-      await speakWord(word);
+      if (mode === "word") {
+        await speakWord(item.lemma);
+      } else if (mode === "example") {
+        // If this item has no example, fall back to reading the word so
+        // the user isn't stuck in silence on an unexampled entry.
+        if (hasExample) {
+          await speakSentence(item.example!);
+        } else {
+          await speakWord(item.lemma);
+        }
+      } else {
+        // both: word → short pause → example (if any)
+        await speakWord(item.lemma);
+        if (phaseRef.current !== "playing") return;
+        if (hasExample) {
+          await waitGap(INTRA_PAIR_GAP_MS);
+          if (phaseRef.current !== "playing") return;
+          await speakSentence(item.example!);
+        }
+      }
     } catch {
       // Failure is silent — advance anyway so the user isn't stuck.
     }
     if (phaseRef.current !== "playing") return;
     // Gap → next.
-    timerRef.current = window.setTimeout(() => {
-      timerRef.current = null;
-      cursorRef.current = i + 1;
-      void step();
-    }, gapRef.current);
-  }, [speakWord, onCurrentChange]);
+    await waitGap(gapRef.current);
+    if (phaseRef.current !== "playing") return;
+    cursorRef.current = i + 1;
+    void step();
+  }, [speakWord, speakSentence, waitGap, onCurrentChange]);
 
   const handlePlay = useCallback(() => {
     if (phase === "playing") return;
-    if (wordsRef.current.length === 0) return;
+    if (itemsRef.current.length === 0) return;
     setPhase("playing");
     phaseRef.current = "playing";
     void step();
@@ -278,7 +412,7 @@ export default function WordAutoPlayer({ words, onCurrentChange }: Props) {
     void step();
   }, [step]);
 
-  const total = words.length;
+  const total = normalizedItems.length;
   const disabled = total === 0;
 
   const cursorLabel = useMemo(() => {
@@ -294,6 +428,20 @@ export default function WordAutoPlayer({ words, onCurrentChange }: Props) {
       <span className="tabular-nums text-[var(--fg-soft)]">{cursorLabel}</span>
 
       <div className="ml-auto flex flex-wrap items-center gap-2">
+        <label className="inline-flex items-center gap-1 text-[var(--fg-soft)]">
+          播放内容
+          <select
+            value={content}
+            onChange={(e) => setContent(e.target.value as PlayContent)}
+            className="rounded-md border border-[var(--border)] bg-transparent px-1.5 py-0.5 text-[var(--fg)] outline-none"
+          >
+            {CONTENT_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <label className="inline-flex items-center gap-1 text-[var(--fg-soft)]">
           速度
           <select
