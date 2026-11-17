@@ -75,18 +75,87 @@ function youdaoUrl(text: string): string {
   return `${YOUDAO_BASE}?audio=${encodeURIComponent(text)}&type=2`;
 }
 
+/**
+ * Fetch MP3 bytes from /api/tts with client-side retry.
+ *
+ * `/api/tts` fronts Bing edge-tts and intermittently returns 502 when the
+ * server-side WSS handshake fails twice in a row. Retrying from the client
+ * uses a fresh TCP connection and a new time window, which commonly
+ * succeeds where the server-side immediate retry failed. A short jittered
+ * backoff between attempts helps dodge Bing's burst rate-limit.
+ *
+ * Budget: up to 2 extra attempts × (~2s server work + 400ms backoff) adds
+ * ~5s worst-case latency on failure paths, which is acceptable because the
+ * alternative is no audio at all.
+ */
 async function fetchNeuralMP3(text: string): Promise<ArrayBuffer | null> {
-  try {
-    const res = await fetch("/api/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice: NEURAL_VOICE_US }),
-    });
-    if (!res.ok) return null;
-    return await res.arrayBuffer();
-  } catch {
-    return null;
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, voice: NEURAL_VOICE_US }),
+      });
+      if (res.ok) {
+        const buf = await res.arrayBuffer();
+        if (buf.byteLength > 0) return buf;
+      }
+      // 5xx is worth retrying (upstream flake); 4xx is terminal.
+      if (res.status < 500 && res.status !== 408 && res.status !== 429) {
+        console.warn(
+          `[autoplay] /api/tts terminal status ${res.status}, not retrying`,
+        );
+        return null;
+      }
+      console.warn(
+        `[autoplay] /api/tts attempt ${attempt}/${MAX_ATTEMPTS} failed (status=${res.status})`,
+      );
+    } catch (e) {
+      console.warn(
+        `[autoplay] /api/tts attempt ${attempt}/${MAX_ATTEMPTS} threw:`,
+        e instanceof Error ? e.message : e,
+      );
+    }
+    if (attempt < MAX_ATTEMPTS) {
+      // Jittered backoff: 400ms base + up to 300ms random. Each attempt
+      // waits a bit longer to let transient upstream issues clear.
+      const wait = 400 * attempt + Math.floor(Math.random() * 300);
+      await new Promise((r) => setTimeout(r, wait));
+    }
   }
+  return null;
+}
+
+/**
+ * Last-resort fallback for sentences: use the browser's built-in Web Speech
+ * API. Audio quality is noticeably worse than Neural TTS but guarantees we
+ * never leave the user in silence when /api/tts is down.
+ *
+ * Returns a Promise that resolves when the utterance ends (or rejects on
+ * error). Honors the current `speedRef` so playback feels consistent with
+ * the MP3 path.
+ */
+function speakWithWebSpeech(text: string, rate: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+      reject(new Error("Web Speech API not available"));
+      return;
+    }
+    try {
+      // Clear any queued utterance so we start cleanly.
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = "en-US";
+      u.rate = rate;
+      u.onend = () => resolve();
+      u.onerror = (ev) =>
+        reject(new Error(`web-speech error: ${ev.error ?? "unknown"}`));
+      window.speechSynthesis.speak(u);
+    } catch (e) {
+      reject(e instanceof Error ? e : new Error(String(e)));
+    }
+  });
 }
 
 function parseContent(v: string | null | undefined): PlayContent {
@@ -277,7 +346,11 @@ export default function WordAutoPlayer({ words, items, onCurrentChange }: Props)
 
   /** Play a sentence via Neural TTS directly (YouDao has no recordings
    *  for arbitrary sentences). Uses the same cache so repeated playback
-   *  is instant. */
+   *  is instant.
+   *
+   *  失败路径：Neural 全部失败 → Web Speech 兜底朗读，保证绝不静默。
+   *  音质会明显变差，但这是 "/api/tts 挂了但播放要继续" 场景下的
+   *  最后一张牌。之前这里 /api/tts 502 就 return，整条例句直接消音。 */
   const speakSentence = useCallback(
     async (sentence: string): Promise<void> => {
       const text = sentence.trim();
@@ -288,21 +361,39 @@ export default function WordAutoPlayer({ words, items, onCurrentChange }: Props)
         try {
           await playBlob(cached);
           return;
-        } catch {
-          // fall through
+        } catch (err) {
+          console.warn(
+            `[autoplay] cached sentence playback failed, will refetch:`,
+            err,
+          );
+          // fall through to refetch
         }
       }
-      // Fetch Neural.
+      // Fetch Neural (with internal retries).
       const bytes = await fetchNeuralMP3(text);
       if (bytes && bytes.byteLength > 0) {
         void putCachedTTS(NEURAL_VOICE_US, text, bytes.slice(0));
         try {
           await playBlob(new Blob([bytes], { type: "audio/mpeg" }));
-        } catch {
-          // ignore
+          return;
+        } catch (err) {
+          console.warn(
+            `[autoplay] sentence playBlob failed (likely autoplay policy):`,
+            err,
+          );
+          // fall through to Web Speech fallback
         }
+      } else {
+        console.warn(
+          `[autoplay] Neural TTS failed after retries, falling back to Web Speech for: "${text.slice(0, 60)}${text.length > 60 ? "..." : ""}"`,
+        );
       }
-      // Silent failure — keep the queue moving.
+      // Last resort: Web Speech so we never leave the user in silence.
+      try {
+        await speakWithWebSpeech(text, speedRef.current);
+      } catch (err) {
+        console.warn(`[autoplay] Web Speech fallback also failed:`, err);
+      }
     },
     [playBlob],
   );
@@ -342,29 +433,61 @@ export default function WordAutoPlayer({ words, items, onCurrentChange }: Props)
     const hasExample =
       typeof item.example === "string" && item.example.trim().length > 0;
 
-    try {
-      if (mode === "word") {
+    if (mode === "word") {
+      try {
         await speakWord(item.lemma);
-      } else if (mode === "example") {
-        // If this item has no example, fall back to reading the word so
-        // the user isn't stuck in silence on an unexampled entry.
-        if (hasExample) {
+      } catch (err) {
+        console.warn(`[autoplay] speakWord failed for "${item.lemma}":`, err);
+      }
+    } else if (mode === "example") {
+      // If this item has no example, fall back to reading the word so
+      // the user isn't stuck in silence on an unexampled entry.
+      if (hasExample) {
+        try {
           await speakSentence(item.example!);
-        } else {
-          await speakWord(item.lemma);
+        } catch (err) {
+          console.warn(
+            `[autoplay] speakSentence failed for "${item.lemma}":`,
+            err,
+          );
         }
       } else {
-        // both: word → short pause → example (if any)
-        await speakWord(item.lemma);
-        if (phaseRef.current !== "playing") return;
-        if (hasExample) {
-          await waitGap(INTRA_PAIR_GAP_MS);
-          if (phaseRef.current !== "playing") return;
-          await speakSentence(item.example!);
+        console.info(
+          `[autoplay] no example for "${item.lemma}", falling back to word`,
+        );
+        try {
+          await speakWord(item.lemma);
+        } catch (err) {
+          console.warn(`[autoplay] speakWord failed for "${item.lemma}":`, err);
         }
       }
-    } catch {
-      // Failure is silent — advance anyway so the user isn't stuck.
+    } else {
+      // both: word → short pause → example (if any).
+      // 关键：word / example 必须分别 try/catch，不然 speakWord 抛异常会
+      // 让整个 try 块跳到最外层 catch，直接跳过例句 — 之前 "单词+例句"
+      // 下例句不响的真因之一。
+      try {
+        await speakWord(item.lemma);
+      } catch (err) {
+        console.warn(`[autoplay] speakWord failed for "${item.lemma}":`, err);
+      }
+      if (phaseRef.current !== "playing") return;
+      if (hasExample) {
+        await waitGap(INTRA_PAIR_GAP_MS);
+        if (phaseRef.current !== "playing") return;
+        try {
+          await speakSentence(item.example!);
+        } catch (err) {
+          console.warn(
+            `[autoplay] speakSentence failed for "${item.lemma}":`,
+            err,
+          );
+        }
+      } else {
+        console.info(
+          `[autoplay] "${item.lemma}" has no example, playing word only`,
+        );
+      }
     }
     if (phaseRef.current !== "playing") return;
     // Gap → next.

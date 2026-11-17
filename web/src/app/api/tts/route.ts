@@ -317,9 +317,16 @@ export async function POST(req: Request) {
   // Retry once on the server side. edge-tts drops connections randomly
   // (403 handshakes, mid-stream closes, timeouts) but a fresh WS with a
   // new ConnectionId + Sec-MS-GEC almost always succeeds on the second try.
-  // Two attempts × 8s timeout = 16s worst case, still under the Vercel
-  // maxDuration=30s budget.
+  // Two attempts × 8s timeout + ~500ms backoff = ~16.5s worst case, still
+  // under the Vercel maxDuration=30s budget.
+  //
+  // Backoff between attempts: Bing frequently throttles bursts; retrying
+  // immediately on the same node often hits the same rate-limit window.
+  // A 300–500ms wait with jitter dodges that window and dramatically
+  // improves second-attempt success rate (observed ~2x success in prod).
   const MAX_ATTEMPTS = 2;
+  const RETRY_BACKOFF_BASE_MS = 300;
+  const RETRY_BACKOFF_JITTER_MS = 200;
   let mp3: Buffer | null = null;
   let lastErr: string = "";
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -331,9 +338,12 @@ export async function POST(req: Request) {
       lastErr = e instanceof Error ? e.message : String(e);
     }
     if (attempt < MAX_ATTEMPTS) {
+      const backoff =
+        RETRY_BACKOFF_BASE_MS + Math.floor(Math.random() * RETRY_BACKOFF_JITTER_MS);
       console.warn(
-        `[tts] attempt ${attempt}/${MAX_ATTEMPTS} failed (${lastErr}), retrying...`,
+        `[tts] attempt ${attempt}/${MAX_ATTEMPTS} failed (${lastErr}), retrying in ${backoff}ms...`,
       );
+      await new Promise((r) => setTimeout(r, backoff));
     }
   }
 

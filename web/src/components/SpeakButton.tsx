@@ -3,8 +3,9 @@
 /**
  * <SpeakButton /> — speaks an English word/phrase aloud.
  *
- * Strategy (tries in order, shows toast only when EVERY path failed —
- * never falls back to the robotic Web Speech API, per product decision):
+ * Strategy (tries in order; sentences fall back to Web Speech as a
+ * last resort to avoid silence; short words/phrases do not — YouDao
+ * already covers them well and Web Speech sounds worse than YouDao):
  *   1. **Word / short phrase** → YouDao MP3
  *      `https://dict.youdao.com/dictvoice?audio=<text>&type=<1|2>`
  *      Real human recordings, free, no API key. type=1 = UK, type=2 = US.
@@ -16,10 +17,11 @@
  *   2b. **Sentence** (long text, > 6 tokens or > 60 chars) → skip YouDao
  *       entirely, go straight to Edge Neural.
  *   3. **Edge Neural** → local IndexedDB cache → `/api/tts` (voice=Jenny
- *      or Sonia, server retries once internally). Cached MP3s replay
- *      instantly and offline.
- *   4. **Everything failed** → toast "朗读失败，请稍后重试". No mechanical
- *      fallback.
+ *      or Sonia, client retries 3× with jittered backoff). Cached MP3s
+ *      replay instantly and offline.
+ *   4. **Sentence Neural failed** → Web Speech API (robotic but always
+ *      available). Only used for long text — words stop at step 3.
+ *   5. **Everything failed** → toast "朗读失败，请稍后重试".
  *
  * Implementation notes:
  *   - We reuse a single <Audio> element to avoid GC churn.
@@ -67,21 +69,78 @@ function notifyFailure() {
   toast("朗读失败，请稍后重试");
 }
 
-/** Fetch MP3 bytes from /api/tts. Returns null on any failure. */
+/**
+ * Fetch MP3 bytes from /api/tts with client-side retry.
+ *
+ * `/api/tts` fronts Bing edge-tts and sporadically returns 502 when the
+ * server-side WSS handshake fails. Retrying from the client uses a fresh
+ * TCP connection and a different time window; combined with a jittered
+ * backoff this reliably rescues most upstream flakes.
+ */
 async function fetchNeuralMP3(
   text: string,
   voice: string,
 ): Promise<ArrayBuffer | null> {
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text, voice }),
+      });
+      if (res.ok) {
+        const buf = await res.arrayBuffer();
+        if (buf.byteLength > 0) return buf;
+      }
+      // 4xx (except 408/429) is terminal — no point retrying bad input.
+      if (res.status < 500 && res.status !== 408 && res.status !== 429) {
+        console.warn(
+          `[tts] /api/tts terminal status ${res.status}, not retrying`,
+        );
+        return null;
+      }
+      console.warn(
+        `[tts] /api/tts attempt ${attempt}/${MAX_ATTEMPTS} failed (status=${res.status})`,
+      );
+    } catch (e) {
+      console.warn(
+        `[tts] /api/tts attempt ${attempt}/${MAX_ATTEMPTS} threw:`,
+        e instanceof Error ? e.message : e,
+      );
+    }
+    if (attempt < MAX_ATTEMPTS) {
+      const wait = 400 * attempt + Math.floor(Math.random() * 300);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  return null;
+}
+
+/**
+ * Last-resort fallback for long text (sentences / phrases that YouDao
+ * can't pronounce): the browser's built-in Web Speech API. Audio quality
+ * is clearly worse than Neural TTS but guarantees non-silence when
+ * /api/tts is down.
+ *
+ * We intentionally do NOT use this for single words — YouDao already
+ * covers those well, and a Web Speech word reading sounds noticeably
+ * worse than a YouDao recording.
+ */
+function speakWithWebSpeech(text: string, variant: "uk" | "us"): boolean {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) {
+    return false;
+  }
   try {
-    const res = await fetch("/api/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voice }),
-    });
-    if (!res.ok) return null;
-    return await res.arrayBuffer();
-  } catch {
-    return null;
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = variant === "uk" ? "en-GB" : "en-US";
+    u.rate = 1;
+    window.speechSynthesis.speak(u);
+    return true;
+  } catch (e) {
+    console.warn("[tts] Web Speech fallback threw:", e);
+    return false;
   }
 }
 
@@ -144,8 +203,8 @@ export default function SpeakButton({
   /**
    * Play `trimmed` through the Edge Neural TTS pipeline.
    * Returns true on success, false on failure. Caller decides whether to
-   * toast — we never toast in here so this function can be used as a
-   * silent fallback from the YouDao branch.
+   * toast / fall back further — we never toast in here so this function
+   * can be used as a silent fallback from the YouDao branch.
    */
   const playNeuralTTS = useCallback(
     async (trimmed: string): Promise<boolean> => {
@@ -161,9 +220,9 @@ export default function SpeakButton({
         return true;
       }
 
-      // 2. Fetch from /api/tts. Show a busy indicator so the user knows
-      //    something is happening — cold requests can take 1–2s, and up to
-      //    ~16s in the retry-worst-case.
+      // 2. Fetch from /api/tts (with client-side retries). Show a busy
+      //    indicator so the user knows something is happening — cold
+      //    requests can take 1–2s, and up to ~10s in the retry-worst-case.
       console.debug(`[tts] cache miss, fetching /api/tts: "${preview}..."`);
       setBusy(true);
       try {
@@ -244,9 +303,18 @@ export default function SpeakButton({
       return;
     }
 
-    // ── Sentence → Edge Neural directly → toast only if that also fails ─
+    // ── Sentence → Edge Neural directly → Web Speech fallback → toast ──
+    // For long text, if Neural fails (upstream /api/tts flake) we fall
+    // back to the browser's Web Speech API so the user hears *something*
+    // instead of a silent toast. We only toast if even Web Speech is
+    // unavailable / fails to start.
     const ok = await playNeuralTTS(trimmed);
-    if (!ok) notifyFailure();
+    if (ok) return;
+    console.warn(
+      `[tts] Neural failed for sentence, falling back to Web Speech: "${trimmed.slice(0, 40)}..."`,
+    );
+    const spoke = speakWithWebSpeech(trimmed, variant);
+    if (!spoke) notifyFailure();
   }, [text, variant, playNeuralTTS]);
 
   return (
