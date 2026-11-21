@@ -41,6 +41,7 @@ import {
   getKnownLemmaSet,
   recordLookup,
   setCoreExample,
+  setGroup,
   setIelts,
   setPos,
   setPurpose,
@@ -48,6 +49,7 @@ import {
   type WordbookEntry,
   type WordbookPurpose,
 } from "@/lib/wordbook/local";
+import { listGroupNames } from "@/lib/wordbook/groups";
 import { pickDefaultCoreExample } from "@/lib/wordbook/core-example";
 
 interface Props {
@@ -237,6 +239,22 @@ export default function WordDetailView({ slug, from }: Props) {
     toast(nextFlag ? "已标记为雅思词" : "已取消雅思标记");
   }, [state, query, bookEntry?.ielts]);
 
+  // 切换分组。与雅思标记完全正交：组只是标签，不影响 ielts/purpose。
+  // 空字符串 = 不分组；在 setGroup 内部会投射成 group=undefined。
+  const handleChangeGroup = useCallback(
+    (next: string) => {
+      let lemma: string | null = null;
+      if (state.kind === "ok") lemma = state.result.query;
+      else if (state.kind === "not-found") lemma = query;
+      if (!lemma) return;
+      const updated = setGroup(lemma, next);
+      if (!updated) return;
+      setBookEntry(updated);
+      toast(next.trim().length === 0 ? "已移出分组" : `已分到组「${next.trim()}」`);
+    },
+    [state, query],
+  );
+
   // 保存雅思核心例句 / 短语。空字符串 = 清除覆盖，回退到字典默认例句。
   const handleSaveCoreExample = useCallback(
     (text: string) => {
@@ -421,6 +439,10 @@ export default function WordDetailView({ slug, from }: Props) {
                 active={bookEntry.ielts === true}
                 onToggle={handleToggleIelts}
               />
+              <GroupSelect
+                value={bookEntry.group ?? ""}
+                onChange={handleChangeGroup}
+              />
               <span className="text-xs text-[var(--fg-soft)]">
                 已查 {bookEntry.queryCount} 次
               </span>
@@ -428,8 +450,7 @@ export default function WordDetailView({ slug, from }: Props) {
           )}
         </header>
 
-        {/* 核心例句 / 短语 — not-found 无字典例句兑底，默认为空，完全交用户手写。 */}
-        {bookEntry && (
+        {/* 核心例句 / 短语 — not-found 无字典例句兌底，默认为空，完全交用户手写。 */}        {bookEntry && (
           <CoreExampleCard
             lemma={query}
             value={bookEntry.coreExample ?? ""}
@@ -552,6 +573,10 @@ export default function WordDetailView({ slug, from }: Props) {
             <IeltsToggle
               active={bookEntry.ielts === true}
               onToggle={handleToggleIelts}
+            />
+            <GroupSelect
+              value={bookEntry.group ?? ""}
+              onChange={handleChangeGroup}
             />
             <span className="text-xs text-[var(--fg-soft)]">
               已查 {bookEntry.queryCount} 次
@@ -1137,6 +1162,58 @@ function IeltsToggle({
       <span aria-hidden>{active ? "✓" : "＋"}</span>
       <span>雅思</span>
     </button>
+  );
+}
+
+/**
+ * 分组下拉 —— 与 <IeltsToggle> 正交。开头一项是「不分组」（value=""），
+ * 所以这是可以不选的。组名列表从所有词条的 group 字段聘合得来，
+ * 所以当前词本身的 group 也在列表里；万一是个历史残留、现在已被
+ * 删除的组，稍后把它作为额外选项补进来，免得显得当前值对不上。
+ *
+ * 在设置页改组名 / 删组后，重新挂载详情页时会自动重新读取。
+ */
+function GroupSelect({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  // listGroupNames() 每次 mount 时读一遍；在当前详情页内部切换组时，
+  // 我们通过 setBookEntry 更新 value，所以组列表本身不需要 live 更新。
+  const [names, setNames] = useState<string[]>([]);
+  useEffect(() => {
+    setNames(listGroupNames());
+  }, []);
+
+  // 当前词的 group 万一不在列表里（理论上不应该发生，因为 listGroupNames
+  // 本身已聘合所有词条的 group），补进来避免 <select> 显示成空。
+  const options = useMemo(() => {
+    const set = new Set(names);
+    if (value && !set.has(value)) {
+      return [value, ...names];
+    }
+    return names;
+  }, [names, value]);
+
+  return (
+    <label className="inline-flex items-center gap-1 rounded-md border border-[var(--border)] px-2 py-1 text-xs text-[var(--fg-soft)] transition hover:border-[var(--fg-soft)] hover:text-[var(--fg)]">
+      <span aria-hidden>📁</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="bg-transparent text-xs focus:outline-none"
+        title="将本词归入某个分组（可不选）"
+      >
+        <option value="">不分组</option>
+        {options.map((name) => (
+          <option key={name} value={name}>
+            {name}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

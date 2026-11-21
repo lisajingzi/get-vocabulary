@@ -28,6 +28,11 @@ import {
   hydrateNotesFromIdb,
 } from "@/lib/wordbook/local";
 import {
+  listAllGroups,
+  createGroup,
+  deleteGroup,
+} from "@/lib/wordbook/groups";
+import {
   readNotesStore as readNotebookNotes,
   hydrateNotebookNotesFromIdb,
 } from "@/lib/notebook/local";
@@ -62,6 +67,47 @@ export default function SettingsPage() {
   const [ieltsMsg, setIeltsMsg] = useState("");
   const [ieltsImporting, setIeltsImporting] = useState(false);
   const locked = isSyncIdLocked();
+  // 单词组管理 —— 列出所有组（有词的 + 预建的空组），支持新增 / 删除。
+  // 这里只记当前页面的本地 state，真实存储在 groups.ts（localStorage）+
+  // 各词条的 group 字段里。页面挂载时读一遍，增删后再 refresh 一遍。
+  const [groups, setGroups] = useState<Array<{ name: string; count: number }>>([]);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [groupMsg, setGroupMsg] = useState("");
+
+  function refreshGroups() {
+    setGroups(listAllGroups());
+  }
+
+  function handleCreateGroup() {
+    const name = newGroupName.trim();
+    if (!name) return;
+    const ok = createGroup(name);
+    if (ok) {
+      setNewGroupName("");
+      setGroupMsg(`已新建组：${name}`);
+      refreshGroups();
+    } else {
+      setGroupMsg(`组「${name}」已存在`);
+    }
+    window.setTimeout(() => setGroupMsg(""), 2500);
+  }
+
+  function handleDeleteGroup(name: string, count: number) {
+    const ok = window.confirm(
+      count > 0
+        ? `确定要删除组「${name}」吗？\n\n该组下的 ${count} 个单词会脱离本组（词本身和雅思标记都会保留），不可撤销。`
+        : `确定要删除空组「${name}」吗？`,
+    );
+    if (!ok) return;
+    const affected = deleteGroup(name);
+    setGroupMsg(
+      affected > 0
+        ? `已删除组「${name}」，${affected} 个单词已脱组`
+        : `已删除空组「${name}」`,
+    );
+    refreshGroups();
+    window.setTimeout(() => setGroupMsg(""), 2500);
+  }
   // `null` in state means "无上限"; we store it verbatim in preferences.
   // 两组 cap 分别控制 说写 / 阅读 的每日上限；两者互不影响。
   const [capActive, setCapActiveState] = useState<number | null>(null);
@@ -74,6 +120,7 @@ export default function SettingsPage() {
     setSyncIdState(getSyncId());
     setCapActiveState(getDailyCapActive());
     setCapPassiveState(getDailyCapPassive());
+    refreshGroups();
     // If cloud sync pulls in a new preference blob after mount, mirror it.
     const onPrefsChange = () => {
       setCapActiveState(getDailyCapActive());
@@ -250,6 +297,8 @@ export default function SettingsPage() {
     setIeltsMsg(
       `已导入 ${words.length} 个：新增 ${created} 个，已存在 ${existed} 个${groupName ? `（分组：${groupName}）` : ""}`,
     );
+    // 组名可能是新出现的 → 刷新一下组管理列表。
+    refreshGroups();
     window.setTimeout(() => setIeltsStatus("idle"), 5000);
   }
 
@@ -358,6 +407,85 @@ export default function SettingsPage() {
           <p className="text-xs text-green-600 pt-1">
             已保存 ✓ 明天生效
           </p>
+        )}
+      </section>
+
+      {/* ── Word group management ─────────────────────────
+          组名的真相是「所有词条 group 字段去重 + 预建空组」，由
+          @/lib/wordbook/groups 负责维护。组和雅思标记完全正交：删除组
+          只清词条的 group 字段，不会动 ielts 标记。 */}
+      <section className="rounded-xl border border-[var(--border)] p-5 space-y-3">
+        <div className="space-y-1.5">
+          <h2 className="font-medium text-base">单词组管理</h2>
+          <p className="text-sm text-[var(--fg-soft)]">
+            组用于把单词归类（如 List 1、教材 Unit3……）。可以新建空组名备用，也可以删除已有组。
+          </p>
+          <p className="text-xs text-[var(--fg-soft)]">
+            ℹ️ 删除组不会删单词，只会把该组下的词脱离组；雅思标记保留。组名在单词详情页的「分组」下拉里可选。
+          </p>
+        </div>
+
+        {/* 新建组 */}
+        <div className="flex items-stretch gap-2">
+          <input
+            type="text"
+            value={newGroupName}
+            onChange={(e) => setNewGroupName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                handleCreateGroup();
+              }
+            }}
+            placeholder="新建组名，例：List 1"
+            className="flex-1 rounded-lg border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[var(--accent)]"
+          />
+          <button
+            type="button"
+            onClick={handleCreateGroup}
+            disabled={!newGroupName.trim()}
+            className="shrink-0 rounded-lg bg-[var(--accent)] px-4 py-2 text-sm font-medium text-white transition hover:opacity-90 active:scale-95 disabled:opacity-50"
+          >
+            新建
+          </button>
+        </div>
+
+        {/* 已有组列表 */}
+        <div className="rounded-lg border border-[var(--border)] overflow-hidden">
+          {groups.length === 0 ? (
+            <p className="px-3 py-4 text-sm text-[var(--fg-soft)] text-center">
+              暂无分组。在上面输入名字来新建第一个组吧。
+            </p>
+          ) : (
+            <ul className="divide-y divide-[var(--border)]">
+              {groups.map((g) => (
+                <li
+                  key={g.name}
+                  className="flex items-center justify-between gap-2 px-3 py-2 text-sm"
+                >
+                  <div className="min-w-0 flex-1">
+                    <span className="font-medium text-[var(--fg)] truncate block">
+                      {g.name}
+                    </span>
+                    <span className="text-[11px] text-[var(--fg-soft)]">
+                      {g.count === 0 ? "空组（无词）" : `${g.count} 个单词`}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteGroup(g.name, g.count)}
+                    className="shrink-0 rounded-md border border-[var(--border)] px-2.5 py-1 text-xs text-[var(--fg-soft)] transition hover:border-red-400 hover:text-red-600"
+                  >
+                    删除
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        {groupMsg && (
+          <p className="text-xs text-green-600">{groupMsg}</p>
         )}
       </section>
 
