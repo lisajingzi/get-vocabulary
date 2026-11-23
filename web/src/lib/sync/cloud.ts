@@ -138,10 +138,29 @@ function fetchWithTimeout(
   timeoutMs = SYNC_FETCH_TIMEOUT_MS,
 ): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // Pass a real Error as the abort reason so downstream catches surface a
+  // meaningful message instead of the opaque "signal is aborted without
+  // reason" the browser invents when reason is undefined.
+  const timer = setTimeout(
+    () => controller.abort(new Error(`sync fetch timeout after ${timeoutMs}ms`)),
+    timeoutMs,
+  );
   return fetch(input, { ...init, signal: controller.signal }).finally(() =>
     clearTimeout(timer),
   );
+}
+
+// Sleep helper used by putShardRaw's retry loop.
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Is this error worth retrying? Network blips, timeouts and 5xx yes;
+// 4xx (bad request / auth) no — those won't get better by hitting again.
+function isTransientError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/HTTP 4\d\d/.test(msg)) return false;
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -341,23 +360,44 @@ async function putShardRaw(
   shard: ShardName,
   payload: unknown,
 ): Promise<void> {
-  const res = await fetchWithTimeout(
-    `/api/cos/sync?syncId=${encodeURIComponent(syncId)}&shard=${shard}`,
-    {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    },
-  );
-  if (!res.ok) {
-    let err: { error?: string } = {};
+  // Serialize once outside the retry loop — if JSON.stringify throws
+  // (circular ref etc.) retrying won't help.
+  const body = JSON.stringify(payload);
+  // Three attempts total with exponential backoff: 0 / 2s / 6s. Covers the
+  // common cases where one PUT hits a transient Vercel cold-start, a mobile
+  // tunnel hiccup, or a COS 5xx. 4xx errors bail out immediately.
+  const delays = [0, 2_000, 6_000];
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt < delays.length; attempt++) {
+    if (delays[attempt] > 0) await sleep(delays[attempt]);
     try {
-      err = await res.json();
-    } catch {
-      /* ignore */
+      const res = await fetchWithTimeout(
+        `/api/cos/sync?syncId=${encodeURIComponent(syncId)}&shard=${shard}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body,
+        },
+      );
+      if (!res.ok) {
+        let err: { error?: string } = {};
+        try {
+          err = await res.json();
+        } catch {
+          /* ignore */
+        }
+        throw new Error(err?.error ?? `HTTP ${res.status}`);
+      }
+      return; // success
+    } catch (e) {
+      lastErr = e;
+      if (!isTransientError(e)) break; // 4xx — no point retrying
+      // else loop and try again
     }
-    throw new Error(err?.error ?? `HTTP ${res.status}`);
   }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error(String(lastErr ?? "putShardRaw failed"));
 }
 
 // ---------------------------------------------------------------------------
@@ -633,6 +673,15 @@ export async function pull(overrideSyncId?: string): Promise<{
 
   hasPulledOnce = true;
 
+  // If any shards were flagged dirty while the initial pull was in flight
+  // (very common — users start interacting with the page as soon as it
+  // paints), those writes got skipped by push()'s hasPulledOnce gate. Now
+  // that the gate is open, drain them on the next tick so we don't lose
+  // data if the user then stops interacting.
+  if (typeof window !== "undefined" && dirty.size > 0) {
+    schedulePush(500);
+  }
+
   if (failed.length > 0) {
     const summary = failed
       .map((r) => `${r.shard}: ${r.error ?? "unknown"}`)
@@ -693,24 +742,53 @@ async function pushShards(
  */
 export async function push(): Promise<void> {
   if (!hasPulledOnce) {
+    // Initial pull hasn't completed yet. Don't just bail — if we did, the
+    // dirty shards would sit forever until the next user action triggered
+    // a new schedulePush. Instead, re-queue ourselves so we keep trying
+    // until the pull gate opens (pull() will also drain on completion
+    // which handles the common case).
     console.warn(
-      "[sync] auto-push skipped: initial pull hasn't completed yet",
+      "[sync] auto-push deferred: initial pull hasn't completed yet; will retry in 2s",
     );
+    schedulePush(2_000);
     return;
   }
   const syncId = getSyncId();
-  if (!syncId) return;
+  if (!syncId) {
+    // No syncId yet (localStorage temporarily unavailable, or very early
+    // boot). Same reasoning as above: re-queue, don't drop.
+    console.warn("[sync] auto-push deferred: no syncId yet; will retry in 5s");
+    schedulePush(5_000);
+    return;
+  }
   const targets = Array.from(dirty);
   if (targets.length === 0) return;
 
   const { failed } = await pushShards(targets);
   if (failed.length > 0) {
-    // Keep failed shards flagged dirty so the next tick retries.
+    // Keep failed shards flagged dirty AND re-schedule a retry — the old
+    // code only re-flagged them, which meant retry depended on the user
+    // making another change. Now we actively retry after a 15s backoff
+    // (on top of putShardRaw's own 3-attempt inner retry).
     for (const f of failed) dirty.add(f.shard);
     console.warn(
-      "[sync] auto-push partial failure:",
+      "[sync] auto-push partial failure, will retry in 15s:",
       failed.map((f) => `${f.shard}=${f.error}`).join("; "),
     );
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("get:sync-error", {
+          detail: {
+            failed: failed.map((f) => ({ shard: f.shard, error: f.error })),
+            at: new Date().toISOString(),
+          },
+        }),
+      );
+    }
+    schedulePush(15_000);
+  } else if (typeof window !== "undefined") {
+    // Signal recovery so any UI error banner can self-clear.
+    window.dispatchEvent(new CustomEvent("get:sync-ok"));
   }
 }
 

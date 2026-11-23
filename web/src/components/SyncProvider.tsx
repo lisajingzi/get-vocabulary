@@ -127,13 +127,28 @@ export default function SyncProvider() {
     // async itself, hence the void wrapper.
     void doPull();
 
-    // Pull whenever the tab becomes visible again (throttled).
+    // Pull whenever the tab becomes visible again (throttled). Also flush
+    // any pending dirty shards immediately \u2014 if the user left the tab in
+    // the middle of a debounce window, coming back is as good a signal as
+    // any that it's time to upload.
     const onVisibility = () => {
       if (document.visibilityState !== "visible") return;
+      flushPush();
       if (Date.now() - lastPullAt < VISIBILITY_PULL_THROTTLE_MS) return;
       void doPull();
     };
     document.addEventListener("visibilitychange", onVisibility);
+
+    // When the network comes back after being offline, flush dirty shards
+    // right away. Without this, the user has to perform another action
+    // (or alt-tab) before anything gets uploaded.
+    const onOnline = () => {
+      flushPush();
+      if (Date.now() - lastPullAt >= VISIBILITY_PULL_THROTTLE_MS) {
+        void doPull();
+      }
+    };
+    window.addEventListener("online", onOnline);
 
     // For every change event, flag the corresponding shard dirty and
     // schedule a debounced push. Only that shard will be uploaded.
@@ -161,6 +176,7 @@ export default function SyncProvider() {
 
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("online", onOnline);
       for (const ev of changeEvents) {
         window.removeEventListener(ev, changeHandler);
       }

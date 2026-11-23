@@ -4,6 +4,7 @@ import SearchBox from "@/components/SearchBox";
 import HideChineseToggle from "@/components/HideChineseToggle";
 import ToastHost from "@/components/Toast";
 import SyncProvider from "@/components/SyncProvider";
+import SyncErrorBanner from "@/components/SyncErrorBanner";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -40,6 +41,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body className="min-h-screen antialiased">
+        <SyncErrorBanner />
         <header className="sticky top-0 z-30 border-b border-white/50 bg-white/55 backdrop-blur-xl shadow-[0_1px_0_rgba(255,255,255,0.5),0_8px_24px_rgba(67,101,118,0.10)] supports-[backdrop-filter]:bg-white/40">
           <div className="mx-auto flex max-w-5xl items-center gap-3 px-6 py-3">
             <Link
