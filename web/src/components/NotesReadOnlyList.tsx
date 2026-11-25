@@ -26,6 +26,7 @@ import {
   updateNote,
   type WordNote,
 } from "@/lib/wordbook/local";
+import { resolveImageSrc, uploadImageFile } from "@/lib/wordbook/image";
 
 interface Props {
   lemma: string;
@@ -34,39 +35,10 @@ interface Props {
 }
 
 async function fileToCompressedDataUrl(file: File): Promise<string> {
-  if (!file.type.startsWith("image/")) {
-    throw new Error("仅支持图片文件");
-  }
-  const objectUrl = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const i = new Image();
-      i.onload = () => resolve(i);
-      i.onerror = reject;
-      i.src = objectUrl;
-    });
-    const MAX = 1200;
-    let { width, height } = img;
-    if (width > MAX || height > MAX) {
-      const ratio = Math.min(MAX / width, MAX / height);
-      width = Math.round(width * ratio);
-      height = Math.round(height * ratio);
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("canvas 2d context unavailable");
-    ctx.drawImage(img, 0, 0, width, height);
-    return canvas.toDataURL("image/jpeg", 0.85);
-  } finally {
-    URL.revokeObjectURL(objectUrl);
-  }
-}
+// Image attachment pipeline lives in lib/wordbook/image — downscale, upload
+// to COS, store only a short reference in the note.
 
-export default function NotesReadOnlyList({ lemma, title = "笔记" }: Props) {
-  const [notes, setNotes] = useState<WordNote[]>([]);
-  const [editing, setEditing] = useState<string | null>(null);
+export default function NotesReadOnlyList({  const [editing, setEditing] = useState<string | null>(null);
   const [editBody, setEditBody] = useState("");
   const [editImage, setEditImage] = useState<string | undefined>(undefined);
   const editFileRef = useRef<HTMLInputElement>(null);
@@ -94,8 +66,8 @@ export default function NotesReadOnlyList({ lemma, title = "笔记" }: Props) {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const url = await fileToCompressedDataUrl(file);
-      setEditImage(url);
+      const key = await uploadImageFile(file);
+      setEditImage(key);
     } catch (err) {
       // eslint-disable-next-line no-alert
       alert((err as Error).message);
@@ -152,7 +124,7 @@ export default function NotesReadOnlyList({ lemma, title = "笔记" }: Props) {
                     <div className="relative inline-block">
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
-                        src={editImage}
+                        src={resolveImageSrc(editImage)}
                         alt=""
                         className="max-h-40 rounded border border-[var(--border)]"
                       />
@@ -203,7 +175,7 @@ export default function NotesReadOnlyList({ lemma, title = "笔记" }: Props) {
                   {n.image && (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                      src={n.image}
+                      src={resolveImageSrc(n.image)}
                       alt=""
                       className="max-h-72 rounded border border-[var(--border)]"
                     />

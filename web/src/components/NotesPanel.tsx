@@ -27,6 +27,7 @@ import {
   updateNote,
   type WordNote,
 } from "@/lib/wordbook/local";
+import { resolveImageSrc, uploadImageFile } from "@/lib/wordbook/image";
 
 interface Props {
   lemma: string;
@@ -85,40 +86,10 @@ export const POS_PICKER_OPTIONS: ReadonlyArray<{
   { value: "other", short: "其他", label: "其他" },
 ];
 
-/** Down-scale uploaded images so localStorage doesn't blow up.
- *  Caps the longest edge at 1200px and re-encodes as JPEG q=0.85 — this turns
- *  a 4 MB phone photo into ~150 KB which we can comfortably stash inline. */
-async function fileToCompressedDataUrl(file: File): Promise<string> {
-  if (!file.type.startsWith("image/")) {
-    throw new Error("仅支持图片文件");
-  }
-  // Read into an Image element first so we can resize via canvas.
-  const objectUrl = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const i = new Image();
-      i.onload = () => resolve(i);
-      i.onerror = reject;
-      i.src = objectUrl;
-    });
-    const MAX = 1200;
-    let { width, height } = img;
-    if (width > MAX || height > MAX) {
-      const ratio = Math.min(MAX / width, MAX / height);
-      width = Math.round(width * ratio);
-      height = Math.round(height * ratio);
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("canvas 2d context unavailable");
-    ctx.drawImage(img, 0, 0, width, height);
-    return canvas.toDataURL("image/jpeg", 0.85);
-  } finally {
-    URL.revokeObjectURL(objectUrl);
-  }
-}
+// Image attachment pipeline lives in lib/wordbook/image: downscale → upload
+// to COS → store a short `cos:/sync/<syncId>/images/<uuid>.<ext>` reference
+// in the note instead of an inlined base64 data URL. Legacy data: URLs on
+// existing notes continue to render via resolveImageSrc().
 
 export default function NotesPanel({
   lemma,
@@ -200,8 +171,8 @@ export default function NotesPanel({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const url = await fileToCompressedDataUrl(file);
-      setDraftImage(url);
+      const key = await uploadImageFile(file);
+      setDraftImage(key);
     } catch (err) {
       // eslint-disable-next-line no-alert
       alert((err as Error).message);
@@ -218,8 +189,8 @@ export default function NotesPanel({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const url = await fileToCompressedDataUrl(file);
-      setEditImage(url);
+      const key = await uploadImageFile(file);
+      setEditImage(key);
     } catch (err) {
       // eslint-disable-next-line no-alert
       alert((err as Error).message);
@@ -271,7 +242,7 @@ className="w-full resize-none bg-transparent text-base leading-9 caret-[var(--ac
           <div className="relative inline-block">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={draftImage}
+              src={resolveImageSrc(draftImage)}
               alt="待保存的笔记图片"
               className="max-h-40 rounded border border-[var(--border)]"
             />
@@ -371,7 +342,7 @@ className="w-full resize-none bg-transparent text-base leading-9 caret-[var(--ac
                       <div className="relative inline-block">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
-                          src={editImage}
+                          src={resolveImageSrc(editImage)}
                           alt=""
                           className="max-h-40 rounded border border-[var(--border)]"
                         />
@@ -422,7 +393,7 @@ className="w-full resize-none bg-transparent text-base leading-9 caret-[var(--ac
                     {n.image && (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
-                        src={n.image}
+                        src={resolveImageSrc(n.image)}
                         alt=""
                         className="max-h-72 rounded border border-[var(--border)]"
                       />

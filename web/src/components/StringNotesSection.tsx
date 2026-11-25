@@ -37,6 +37,7 @@ import {
   updateNote,
 } from "@/lib/wordbook/string-notes";
 import { getEntry } from "@/lib/wordbook/local";
+import { resolveImageSrc, uploadImageFile } from "@/lib/wordbook/image";
 import { lookup } from "@/lib/dict";
 
 // ---------------------------------------------------------------------------
@@ -78,40 +79,11 @@ function writeExpanded(v: boolean) {
 }
 
 // ---------------------------------------------------------------------------
-// Image compression pipeline (identical to NotebookNotesPanel so images
-// round-trip the same regardless of where they were authored).
+// Image attachment pipeline lives in lib/wordbook/image: downscale → upload
+// to COS → store a short `cos:/sync/<syncId>/images/<uuid>.<ext>` reference.
+// Shared with NotesPanel / NotebookNotesPanel / NotesReadOnlyList so
+// attachments round-trip identically across every surface.
 // ---------------------------------------------------------------------------
-
-async function fileToCompressedDataUrl(file: File): Promise<string> {
-  if (!file.type.startsWith("image/")) {
-    throw new Error("仅支持图片文件");
-  }
-  const objectUrl = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const i = new window.Image();
-      i.onload = () => resolve(i);
-      i.onerror = reject;
-      i.src = objectUrl;
-    });
-    const MAX = 1200;
-    let { width, height } = img;
-    if (width > MAX || height > MAX) {
-      const ratio = Math.min(MAX / width, MAX / height);
-      width = Math.round(width * ratio);
-      height = Math.round(height * ratio);
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("canvas 2d context unavailable");
-    ctx.drawImage(img, 0, 0, width, height);
-    return canvas.toDataURL("image/jpeg", 0.85);
-  } finally {
-    URL.revokeObjectURL(objectUrl);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Word-tokenising for the editor's word input
@@ -420,8 +392,8 @@ function StringNoteEditor({ initial, groupOptions, onClose }: EditorProps) {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const url = await fileToCompressedDataUrl(file);
-      setImage(url);
+      const key = await uploadImageFile(file);
+      setImage(key);
     } catch (err) {
       // eslint-disable-next-line no-alert
       alert((err as Error).message);
@@ -584,7 +556,7 @@ function StringNoteEditor({ initial, groupOptions, onClose }: EditorProps) {
             <div className="relative inline-block">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={image}
+                src={resolveImageSrc(image)}
                 alt="串词笔记配图"
                 className="max-h-40 rounded border border-[var(--border)]"
               />
@@ -725,7 +697,7 @@ function StringNoteDetail({ note, onClose, onEdit, onDelete }: DetailProps) {
           <div className="mb-3">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={note.image}
+              src={resolveImageSrc(note.image)}
               alt=""
               className="max-h-80 w-full rounded border border-[var(--border)] object-contain"
             />

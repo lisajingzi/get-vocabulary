@@ -28,6 +28,7 @@ import {
   type NotebookNote,
   updateNote,
 } from "@/lib/notebook/local";
+import { resolveImageSrc, uploadImageFile } from "@/lib/wordbook/image";
 
 interface Props {
   entryId: string;
@@ -37,43 +38,8 @@ interface Props {
   placeholder?: string;
 }
 
-/**
- * Read a user-picked image, downscale it to <=1200px on the longer edge,
- * and re-encode as JPEG at quality 0.85. Returns a data URL suitable for
- * dropping straight into localStorage / an <img src>. Matches the exact
- * pipeline used by WordDetailView's notes so images round-trip identically
- * across the two feature areas.
- */
-async function fileToCompressedDataUrl(file: File): Promise<string> {
-  if (!file.type.startsWith("image/")) {
-    throw new Error("仅支持图片文件");
-  }
-  const objectUrl = URL.createObjectURL(file);
-  try {
-    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-      const i = new Image();
-      i.onload = () => resolve(i);
-      i.onerror = reject;
-      i.src = objectUrl;
-    });
-    const MAX = 1200;
-    let { width, height } = img;
-    if (width > MAX || height > MAX) {
-      const ratio = Math.min(MAX / width, MAX / height);
-      width = Math.round(width * ratio);
-      height = Math.round(height * ratio);
-    }
-    const canvas = document.createElement("canvas");
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) throw new Error("canvas 2d context unavailable");
-    ctx.drawImage(img, 0, 0, width, height);
-    return canvas.toDataURL("image/jpeg", 0.85);
-  } finally {
-    URL.revokeObjectURL(objectUrl);
-  }
-}
+// Image attachment pipeline shared with WordDetailView — downscale, upload
+// to COS, store only a short reference. See lib/wordbook/image.ts.
 
 export default function NotebookNotesPanel({
   entryId,
@@ -107,8 +73,8 @@ export default function NotebookNotesPanel({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const url = await fileToCompressedDataUrl(file);
-      setDraftImage(url);
+      const key = await uploadImageFile(file);
+      setDraftImage(key);
     } catch (err) {
       // eslint-disable-next-line no-alert
       alert((err as Error).message);
@@ -119,8 +85,8 @@ export default function NotebookNotesPanel({
     const file = e.target.files?.[0];
     if (!file) return;
     try {
-      const url = await fileToCompressedDataUrl(file);
-      setEditImage(url);
+      const key = await uploadImageFile(file);
+      setEditImage(key);
     } catch (err) {
       // eslint-disable-next-line no-alert
       alert((err as Error).message);
@@ -204,7 +170,7 @@ export default function NotebookNotesPanel({
                       <div className="relative inline-block">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
-                          src={editImage}
+                          src={resolveImageSrc(editImage)}
                           alt=""
                           className="max-h-40 rounded border border-[var(--border)]"
                         />
@@ -256,7 +222,7 @@ export default function NotebookNotesPanel({
                     {note.image && (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
-                        src={note.image}
+                        src={resolveImageSrc(note.image)}
                         alt=""
                         className="max-h-72 rounded border border-[var(--border)]"
                       />
@@ -307,7 +273,7 @@ export default function NotebookNotesPanel({
           <div className="relative inline-block">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={draftImage}
+              src={resolveImageSrc(draftImage)}
               alt="待保存的笔记图片"
               className="max-h-40 rounded border border-[var(--border)]"
             />
