@@ -126,9 +126,18 @@ export default function SettingsPage() {
       setCapActiveState(getDailyCapActive());
       setCapPassiveState(getDailyCapPassive());
     };
+    // Groups can change from several places:
+    //   - another tab / device (cloud pull merges, then dispatches events)
+    //   - WordDetailView's group dropdown (setGroup → get:wordbook-change)
+    //   - this page's own create/delete handlers (they call refreshGroups too)
+    const onGroupsChange = () => refreshGroups();
     window.addEventListener("get:preferences-change", onPrefsChange);
+    window.addEventListener("get:groups-change", onGroupsChange);
+    window.addEventListener("get:wordbook-change", onGroupsChange);
     return () => {
       window.removeEventListener("get:preferences-change", onPrefsChange);
+      window.removeEventListener("get:groups-change", onGroupsChange);
+      window.removeEventListener("get:wordbook-change", onGroupsChange);
     };
   }, []);
 

@@ -73,6 +73,12 @@ import {
   mergeSessionsStore,
   type ReviewSessionsStore,
 } from "@/lib/wordbook/review-sessions";
+import {
+  readGroupsStore,
+  writeGroupsStore,
+  mergeGroupsStore,
+  type GroupsStore,
+} from "@/lib/wordbook/groups";
 
 // ---------------------------------------------------------------------------
 // Sync ID (unchanged from previous impl)
@@ -176,7 +182,8 @@ export type ShardName =
   | "reviewLog"
   | "dailySnapshot"
   | "stringNotes"
-  | "reviewSessions";
+  | "reviewSessions"
+  | "groups";
 
 const ALL_SHARDS: ShardName[] = [
   "wordbook",
@@ -189,6 +196,7 @@ const ALL_SHARDS: ShardName[] = [
   "dailySnapshot",
   "stringNotes",
   "reviewSessions",
+  "groups",
 ];
 
 // Every shard payload carries a savedAt so we can compare envelopes at the
@@ -239,6 +247,7 @@ export const EVENT_TO_SHARD: Record<string, ShardName> = {
   "get:daily-snapshot-local-write": "dailySnapshot",
   "get:string-notes-change": "stringNotes",
   "get:review-sessions-change": "reviewSessions",
+  "get:groups-change": "groups",
 };
 
 // ---------------------------------------------------------------------------
@@ -493,6 +502,11 @@ const SHARD_BINDINGS: { [K in ShardName]: ShardBinding<unknown> } = {
         l as ReviewSessionsStore,
         r as ReviewSessionsStore,
       ),
+  },
+  groups: {
+    read: () => readGroupsStore() as unknown,
+    write: (d) => writeGroupsStore(d as GroupsStore),
+    merge: (l, r) => mergeGroupsStore(l as GroupsStore, r as GroupsStore),
   },
 };
 

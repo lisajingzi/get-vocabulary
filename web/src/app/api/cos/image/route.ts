@@ -151,11 +151,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "image too large" }, { status: 413 });
   }
 
-  // uuid preferred, fall back to hex if crypto.randomUUID absent
-  const uuid =
-    "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : crypto.randomBytes(16).toString("hex");
+  // Vercel's Node 18+/Edge runtimes all expose global Web Crypto,
+  // so randomUUID() is always available here.
+  const uuid = crypto.randomUUID();
   const path = `/sync/${syncId}/images/${uuid}.${ext}`;
   const auth = cosSign("put", path);
   const url = cosUrl(path);

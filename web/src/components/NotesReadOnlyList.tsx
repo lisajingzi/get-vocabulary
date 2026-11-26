@@ -34,11 +34,12 @@ interface Props {
   title?: string;
 }
 
-async function fileToCompressedDataUrl(file: File): Promise<string> {
 // Image attachment pipeline lives in lib/wordbook/image — downscale, upload
 // to COS, store only a short reference in the note.
 
-export default function NotesReadOnlyList({  const [editing, setEditing] = useState<string | null>(null);
+export default function NotesReadOnlyList({ lemma, title = "笔记" }: Props) {
+  const [notes, setNotes] = useState<WordNote[]>([]);
+  const [editing, setEditing] = useState<string | null>(null);
   const [editBody, setEditBody] = useState("");
   const [editImage, setEditImage] = useState<string | undefined>(undefined);
   const editFileRef = useRef<HTMLInputElement>(null);
