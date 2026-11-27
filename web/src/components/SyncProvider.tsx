@@ -30,6 +30,10 @@ import {
 import { hydrateNotebookNotesFromIdb } from "@/lib/notebook/local";
 import { hydrateStringNotesFromIdb } from "@/lib/wordbook/string-notes";
 import { migrateCoreExamples } from "@/lib/wordbook/core-example";
+import {
+  migrateInlineImages,
+  isImageMigrationDone,
+} from "@/lib/wordbook/image-migrate";
 
 // Events that must be flushed to the cloud immediately (no 3 s debounce),
 // because they're low-frequency but high-value and easy to lose if the tab
@@ -38,9 +42,18 @@ const FLUSH_EVENTS: Record<string, ShardName> = {
   "get:punch-flush": "punches",
 };
 
-// Minimum gap between visibility-driven pulls, to avoid hammering the API
-// if the user rapidly alt-tabs.
-const VISIBILITY_PULL_THROTTLE_MS = 5000;
+// Minimum gap between visibility-driven pulls.
+//
+// This used to be 5 seconds, which on mobile meant a full 11-shard pull
+// every time the user unlocked the phone or switched back from another
+// app. Combined with uncached (no-store) shard responses that was a
+// major contributor to blowing through the hosting bandwidth quota.
+//
+// Five minutes is still responsive enough for cross-device use (the
+// realistic gap between editing on a laptop and picking up the phone),
+// while cutting incidental pulls by roughly two orders of magnitude.
+// Conditional requests make each surviving pull nearly free anyway.
+const VISIBILITY_PULL_THROTTLE_MS = 5 * 60 * 1000;
 
 export default function SyncProvider() {
   useEffect(() => {
@@ -120,12 +133,37 @@ export default function SyncProvider() {
         /* hydrators log their own errors */
       }
       lastPullAt = Date.now();
-      pull().catch(() => {});
+      await pull().catch(() => {});
     };
 
-    // Kick off the initial hydrate + pull sequence. useEffect can't be
-    // async itself, hence the void wrapper.
-    void doPull();
+    // Kick off the initial hydrate + pull sequence, then run the one-time
+    // legacy-image migration.
+    //
+    // Ordering matters here. The migration rewrites note stores, so it
+    // must run AFTER hydration (otherwise the in-memory caches are empty
+    // and writing back would wipe real data) and after the initial pull
+    // has merged in whatever the cloud holds (otherwise we'd convert a
+    // stale local subset and then have the pull merge the base64
+    // originals straight back in).
+    //
+    // It is deliberately not awaited by anything user-facing: uploads
+    // happen in small throttled batches in the background and the UI
+    // stays fully usable throughout.
+    void (async () => {
+      await doPull();
+      if (isImageMigrationDone()) return;
+      try {
+        const report = await migrateInlineImages();
+        if (report.converted > 0) {
+          // Converted notes are already written locally and their shards
+          // marked dirty; nudge the pusher so the slimmed-down payloads
+          // reach the cloud.
+          schedulePush(1_000);
+        }
+      } catch (e) {
+        console.warn("[sync] inline image migration failed", e);
+      }
+    })();
 
     // Pull whenever the tab becomes visible again (throttled). Also flush
     // any pending dirty shards immediately \u2014 if the user left the tab in

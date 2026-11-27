@@ -342,16 +342,86 @@ function mergePunches(local: string[], remote: string[]): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// Shard ETag cache — the client half of the conditional-request scheme
+// ---------------------------------------------------------------------------
+//
+// /api/cos/sync forwards If-None-Match to COS and relays COS's 304. For
+// that to ever trigger, we must remember the ETag we last saw per shard
+// and send it back. We can't rely on the browser's own HTTP cache here
+// because the fetches use `cache: "no-store"` (needed so a stale body is
+// never served silently), so the ETag is tracked explicitly.
+//
+// Persisted in localStorage so the saving also applies to the very first
+// pull after a page reload — which is by far the most common pull.
+const ETAG_STORE_KEY = "get:syncEtags:v1";
+
+type EtagMap = Partial<Record<string, string>>;
+
+let etagCache: EtagMap | null = null;
+
+function readEtags(): EtagMap {
+  if (etagCache) return etagCache;
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(ETAG_STORE_KEY);
+    etagCache = raw ? (JSON.parse(raw) as EtagMap) : {};
+  } catch {
+    etagCache = {};
+  }
+  return etagCache;
+}
+
+function getEtag(shard: string): string | undefined {
+  return readEtags()[shard];
+}
+
+function setEtag(shard: string, etag: string | null): void {
+  const map = readEtags();
+  if (etag) map[shard] = etag;
+  else delete map[shard];
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(ETAG_STORE_KEY, JSON.stringify(map));
+  } catch {
+    /* quota — degrades to unconditional requests, still correct */
+  }
+}
+
+/**
+ * Drop a shard's cached ETag. Called after a successful PUT: our own
+ * upload changed the object, so the stored validator is stale and the
+ * next pull must fetch the new body in full.
+ */
+function invalidateEtag(shard: ShardName): void {
+  setEtag(shard, null);
+}
+
+/**
+ * Sentinel returned by fetchShardRaw when the server answered 304.
+ * Distinct from `null` (which legitimately means "no data on cloud") so
+ * the caller can skip merging entirely instead of treating it as empty.
+ */
+const NOT_MODIFIED = Symbol("not-modified");
+
+// ---------------------------------------------------------------------------
 // Low-level shard I/O
 // ---------------------------------------------------------------------------
 async function fetchShardRaw(
   syncId: string,
   shard: ShardName | "__legacy__",
-): Promise<unknown> {
+): Promise<unknown | typeof NOT_MODIFIED> {
+  const headers: Record<string, string> = {};
+  const known = getEtag(shard);
+  if (known) headers["If-None-Match"] = known;
+
   const res = await fetchWithTimeout(
     `/api/cos/sync?syncId=${encodeURIComponent(syncId)}&shard=${shard}`,
-    { cache: "no-store" },
+    { cache: "no-store", headers },
   );
+
+  // Nothing changed since last time — zero bytes transferred.
+  if (res.status === 304) return NOT_MODIFIED;
+
   if (!res.ok) {
     let err: { error?: string } = {};
     try {
@@ -361,7 +431,38 @@ async function fetchShardRaw(
     }
     throw new Error(err?.error ?? `HTTP ${res.status}`);
   }
+
+  // Remember the new validator for next time.
+  setEtag(shard, res.headers.get("etag"));
   return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Retry budget — the circuit breaker that stops runaway upload loops
+// ---------------------------------------------------------------------------
+//
+// The previous design had no upper bound: putShardRaw retried 3x
+// internally, push() rescheduled itself 15s after any failure, and the
+// pull-gate path rescheduled every 2s. A shard that could never upload
+// (too large, or a persistently failing network) would therefore re-send
+// its full payload forever. With multi-MB shards that is precisely how
+// 16 GB of origin transfer got burned in two days.
+//
+// Now every push consumes from a session-wide budget. Once exhausted,
+// auto-push stops permanently for this page session and the UI is told
+// to surface an error. A manual push from Settings resets the budget,
+// so the user always has an explicit escape hatch.
+const MAX_PUSH_FAILURES = 6;
+let pushFailureBudget = MAX_PUSH_FAILURES;
+
+/** True once we've given up on auto-pushing for this session. */
+export function isPushCircuitOpen(): boolean {
+  return pushFailureBudget <= 0;
+}
+
+/** Restore the budget. Called by the manual "upload all" path. */
+export function resetPushBudget(): void {
+  pushFailureBudget = MAX_PUSH_FAILURES;
 }
 
 async function putShardRaw(
@@ -372,10 +473,11 @@ async function putShardRaw(
   // Serialize once outside the retry loop — if JSON.stringify throws
   // (circular ref etc.) retrying won't help.
   const body = JSON.stringify(payload);
-  // Three attempts total with exponential backoff: 0 / 2s / 6s. Covers the
-  // common cases where one PUT hits a transient Vercel cold-start, a mobile
-  // tunnel hiccup, or a COS 5xx. 4xx errors bail out immediately.
-  const delays = [0, 2_000, 6_000];
+  // Two attempts with a short backoff. Trimmed from the original three
+  // (0/2s/6s): each attempt re-uploads the entire shard, so extra tries
+  // are directly proportional to wasted bandwidth. Transient blips are
+  // better handled by the outer scheduled retry than by hammering here.
+  const delays = [0, 3_000];
   let lastErr: unknown = null;
   for (let attempt = 0; attempt < delays.length; attempt++) {
     if (delays[attempt] > 0) await sleep(delays[attempt]);
@@ -397,6 +499,10 @@ async function putShardRaw(
         }
         throw new Error(err?.error ?? `HTTP ${res.status}`);
       }
+      // We just replaced the remote object, so any ETag we were holding
+      // for it is stale. Clear it so the next pull fetches the new body
+      // rather than getting a misleading 304.
+      invalidateEtag(shard);
       return; // success
     } catch (e) {
       lastErr = e;
@@ -532,6 +638,15 @@ async function pullOneShard(
 ): Promise<ShardPullResult> {
   try {
     const raw = await fetchShardRaw(syncId, shard);
+
+    // 304 — our local copy already reflects the cloud. No body was
+    // transferred and there is nothing to merge. Report it as a success
+    // with remote data present, so the "everything empty → try legacy
+    // migration" branch doesn't misfire on an up-to-date device.
+    if (raw === NOT_MODIFIED) {
+      return { shard, ok: true, hadRemoteData: true };
+    }
+
     const remote = unwrap<unknown>(raw);
     if (remote === null || remote === undefined) {
       return { shard, ok: true, hadRemoteData: false };
@@ -587,7 +702,7 @@ async function migrateFromLegacyIfNeeded(syncId: string): Promise<boolean> {
     console.warn("[sync] legacy fetch failed", e);
     return false;
   }
-  if (raw == null) return false;
+  if (raw == null || raw === NOT_MODIFIED) return false;
   const legacy = raw as Partial<SyncSnapshot>;
 
   // Merge each field into local using the same per-shard merge helpers.
@@ -755,12 +870,18 @@ async function pushShards(
  * Only pushes shards flagged dirty.
  */
 export async function push(): Promise<void> {
+  // Circuit breaker: too many consecutive failures this session means
+  // something is systematically wrong (payload too big, COS misconfigured,
+  // network down). Continuing to retry just burns bandwidth, which is the
+  // exact failure mode that exhausted the hosting quota before.
+  if (isPushCircuitOpen()) {
+    return;
+  }
   if (!hasPulledOnce) {
-    // Initial pull hasn't completed yet. Don't just bail — if we did, the
-    // dirty shards would sit forever until the next user action triggered
-    // a new schedulePush. Instead, re-queue ourselves so we keep trying
-    // until the pull gate opens (pull() will also drain on completion
-    // which handles the common case).
+    // Initial pull hasn't completed yet. Re-queue so the dirty shards
+    // aren't stranded, but count it against the budget so a pull that
+    // never succeeds can't spin this forever.
+    pushFailureBudget -= 1;
     console.warn(
       "[sync] auto-push deferred: initial pull hasn't completed yet; will retry in 2s",
     );
@@ -769,8 +890,7 @@ export async function push(): Promise<void> {
   }
   const syncId = getSyncId();
   if (!syncId) {
-    // No syncId yet (localStorage temporarily unavailable, or very early
-    // boot). Same reasoning as above: re-queue, don't drop.
+    pushFailureBudget -= 1;
     console.warn("[sync] auto-push deferred: no syncId yet; will retry in 5s");
     schedulePush(5_000);
     return;
@@ -780,13 +900,18 @@ export async function push(): Promise<void> {
 
   const { failed } = await pushShards(targets);
   if (failed.length > 0) {
-    // Keep failed shards flagged dirty AND re-schedule a retry — the old
-    // code only re-flagged them, which meant retry depended on the user
-    // making another change. Now we actively retry after a 15s backoff
-    // (on top of putShardRaw's own 3-attempt inner retry).
+    // Keep failed shards flagged dirty and schedule one more attempt,
+    // but spend a unit of the retry budget first. When the budget runs
+    // out we stop entirely and leave the error banner up — the user can
+    // force a retry from Settings, which resets the budget.
     for (const f of failed) dirty.add(f.shard);
+    pushFailureBudget -= 1;
+
+    const exhausted = isPushCircuitOpen();
     console.warn(
-      "[sync] auto-push partial failure, will retry in 15s:",
+      exhausted
+        ? "[sync] auto-push giving up after repeated failures:"
+        : "[sync] auto-push partial failure, will retry in 15s:",
       failed.map((f) => `${f.shard}=${f.error}`).join("; "),
     );
     if (typeof window !== "undefined") {
@@ -795,14 +920,19 @@ export async function push(): Promise<void> {
           detail: {
             failed: failed.map((f) => ({ shard: f.shard, error: f.error })),
             at: new Date().toISOString(),
+            exhausted,
           },
         }),
       );
     }
-    schedulePush(15_000);
-  } else if (typeof window !== "undefined") {
-    // Signal recovery so any UI error banner can self-clear.
-    window.dispatchEvent(new CustomEvent("get:sync-ok"));
+    if (!exhausted) schedulePush(15_000);
+  } else {
+    // A clean round restores the budget — intermittent blips shouldn't
+    // accumulate toward the breaker over a long session.
+    resetPushBudget();
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("get:sync-ok"));
+    }
   }
 }
 
@@ -815,6 +945,11 @@ export async function pushManual(_force = false): Promise<void> {
   void _force;
   const syncId = getSyncId();
   if (!syncId) throw new Error("no syncId");
+
+  // An explicit user action clears the circuit breaker — they've likely
+  // fixed whatever was wrong (reconnected, freed space) and are asking
+  // us to try again.
+  resetPushBudget();
 
   // Manual upload = "I want everything up now". Flag all shards dirty and
   // push them. This is also the path used to complete the initial legacy

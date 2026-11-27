@@ -20,11 +20,13 @@
  */
 
 import { useEffect, useState } from "react";
-import { schedulePush } from "@/lib/sync/cloud";
+import { schedulePush, resetPushBudget } from "@/lib/sync/cloud";
 
 interface SyncErrorDetail {
   failed: { shard: string; error: string }[];
   at: string;
+  /** True once auto-retry has given up; only a manual retry will resume. */
+  exhausted?: boolean;
 }
 
 export default function SyncErrorBanner() {
@@ -48,16 +50,26 @@ export default function SyncErrorBanner() {
 
   const shards = detail.failed.map((f) => f.shard).join("、");
 
+  // Once the retry budget is spent, auto-push is disabled for the rest of
+  // the session, so promising an automatic retry would be a lie. The
+  // manual button clears the breaker before scheduling.
+  const handleRetry = () => {
+    resetPushBudget();
+    schedulePush(0);
+  };
+
   return (
     <div className="sticky top-0 z-40 border-b border-red-300 bg-red-50 text-red-800">
       <div className="mx-auto flex max-w-5xl items-center gap-3 px-6 py-2 text-sm">
         <span aria-hidden>⚠️</span>
         <span className="min-w-0 flex-1 truncate">
-          云同步失败（{shards}），本地改动尚未上传。将在 15 秒后自动重试。
+          {detail.exhausted
+            ? `云同步多次失败（${shards}），已暂停自动重试，请手动重试。`
+            : `云同步失败（${shards}），本地改动尚未上传。将在 15 秒后自动重试。`}
         </span>
         <button
           type="button"
-          onClick={() => schedulePush(0)}
+          onClick={handleRetry}
           className="shrink-0 rounded border border-red-400 bg-white px-2 py-0.5 text-xs font-medium hover:bg-red-100"
         >
           立即重试

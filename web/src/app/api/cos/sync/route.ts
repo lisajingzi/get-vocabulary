@@ -163,13 +163,32 @@ export async function GET(req: NextRequest) {
   const acceptEncoding =
     req.headers.get("accept-encoding") || "gzip, deflate, br";
 
+  // Conditional request passthrough.
+  //
+  // This is the single biggest lever on Vercel's Fast Origin Transfer
+  // bill. Previously every shard GET streamed the full object from COS
+  // through this function on every single pull — and pulls fire on mount,
+  // on every tab focus and on every network reconnect. With 11 shards and
+  // multi-MB note payloads that added up to gigabytes of origin transfer
+  // per day.
+  //
+  // Now we forward the client's If-None-Match to COS. When the object
+  // hasn't changed COS answers 304 with an empty body, we return 304
+  // unchanged, and the number of bytes crossing the CDN<->function
+  // boundary is effectively zero. Since the overwhelming majority of
+  // pulls find nothing new, this removes almost all of the traffic.
+  const ifNoneMatch = req.headers.get("if-none-match");
+
+  const upstreamHeaders: Record<string, string> = {
+    Authorization: auth,
+    "Accept-Encoding": acceptEncoding,
+  };
+  if (ifNoneMatch) upstreamHeaders["If-None-Match"] = ifNoneMatch;
+
   let upstream: Response;
   try {
     upstream = await fetch(url, {
-      headers: {
-        Authorization: auth,
-        "Accept-Encoding": acceptEncoding,
-      },
+      headers: upstreamHeaders,
       cache: "no-store",
     });
   } catch (e) {
@@ -179,6 +198,17 @@ export async function GET(req: NextRequest) {
       { error: "upstream fetch failed", detail: msg },
       { status: 502 },
     );
+  }
+
+  // COS says the client's cached copy is still current. Pass the 304
+  // straight through with an empty body — this is the zero-transfer path
+  // that keeps us inside the Fast Origin Transfer quota.
+  if (upstream.status === 304) {
+    const notModified = new Headers();
+    const etag = upstream.headers.get("etag");
+    if (etag) notModified.set("ETag", etag);
+    notModified.set("Cache-Control", "no-cache");
+    return new Response(null, { status: 304, headers: notModified });
   }
 
   if (upstream.status === 404) {
@@ -213,7 +243,18 @@ export async function GET(req: NextRequest) {
   if (enc) headers.set("Content-Encoding", enc);
   const len = upstream.headers.get("content-length");
   if (len) headers.set("Content-Length", len);
-  headers.set("Cache-Control", "no-store");
+
+  // Hand the object's ETag back so the next request can be conditional.
+  // Without this the client has nothing to put in If-None-Match and every
+  // pull degrades to a full-body transfer again.
+  const etag = upstream.headers.get("etag");
+  if (etag) headers.set("ETag", etag);
+
+  // "no-cache" (NOT "no-store"): the browser may keep the response but
+  // must revalidate before reuse. That revalidation is exactly the
+  // If-None-Match round-trip we want. "no-store" would forbid caching
+  // entirely and thus permanently disable the 304 path.
+  headers.set("Cache-Control", "no-cache");
 
   return new Response(upstream.body, { status: 200, headers });
 }
